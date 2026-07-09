@@ -31,9 +31,11 @@ import SwiftUI
 /// whatever windows are beneath it.
 final class PassThroughHostingView: NSHostingView<AnyView> {
     var islandRect: () -> NSRect = { .zero }
-    /// The sub-rect of the island whose hover should EXPAND the panel —
-    /// excludes the sound-wave ear so it can be clicked without opening.
+    /// Bounding square of the CIRCULAR hover zone that expands the panel
+    /// (containment is radial, not rectangular).
     var hoverZoneRect: (() -> NSRect)?
+    /// X past which the island counts as the sound-wave ear.
+    var earBoundaryX: () -> CGFloat = { .infinity }
     /// Reports whether the cursor is over the hover zone. Driven by our own
     /// AppKit tracking area — SwiftUI's .onHover regions silently stop
     /// firing in this always-up accessory panel after a while.
@@ -79,11 +81,11 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     private func reportHover(_ event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let zone = hoverZoneRect?() ?? islandRect()
-        let inZone = zone.insetBy(dx: -2, dy: -2).contains(p)
+        let inZone = hypot(p.x - zone.midX, p.y - zone.midY) <= zone.width / 2 + 2
         onMouseState?(inZone)
         // The ear is strictly RIGHT of the notch — the left wing is neither
         // trigger nor ear.
-        onEarHover?(!inZone && p.x > zone.maxX
+        onEarHover?(!inZone && p.x > earBoundaryX()
                     && islandRect().insetBy(dx: -2, dy: -2).contains(p))
     }
 }

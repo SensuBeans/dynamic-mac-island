@@ -84,6 +84,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return NSRect(x: (b.width - s.width) / 2, y: y,
                           width: s.width, height: s.height)
         }
+        host.earBoundaryX = { [weak self] in
+            guard let self else { return .infinity }
+            return self.host.islandRect().minX + NotchMetrics.wing + self.metrics.notchWidth
+        }
         host.frame = NSRect(origin: .zero, size: metrics.windowFrame.size)
         host.autoresizingMask = [.width, .height]
         panel.contentView = host
@@ -147,10 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let islandScreen = self.panel.convertToScreen(
                 self.host.convert(self.host.islandRect(), to: nil))
             let mouse = NSEvent.mouseLocation
-            if zoneScreen.contains(mouse) {
+            let inCircle = hypot(mouse.x - zoneScreen.midX,
+                                 mouse.y - zoneScreen.midY) <= zoneScreen.width / 2 + 2
+            if inCircle {
                 self.expand()
             } else {
-                self.setEarHover(mouse.x > zoneScreen.maxX && islandScreen.contains(mouse))
+                let earX = islandScreen.minX + NotchMetrics.wing + self.metrics.notchWidth
+                self.setEarHover(mouse.x > earX && islandScreen.contains(mouse))
             }
         }
     }
