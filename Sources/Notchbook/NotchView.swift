@@ -49,17 +49,20 @@ struct NotchView: View {
             Color.black.opacity(state.isExpanded ? 0.32 : (collapsedVisible ? 1 : 0))
             // Ambient glow: the album cover, blown up and heavily blurred,
             // tints the whole panel with the artwork's palette (media tab).
+            // While music plays it breathes with the song's loudness.
             if state.isExpanded, state.currentTab == .media, let art = media.artwork {
+                let pulse = ambientPulse
                 Image(nsImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: size.width, height: size.height)
-                    .scaleEffect(1.6)
+                    .scaleEffect(1.55 + 0.25 * pulse)
                     .blur(radius: 46)
-                    .saturation(1.5)
-                    .opacity(0.38)
+                    .saturation(1.5 + 0.5 * pulse)
+                    .opacity(0.32 + 0.2 * pulse)
                     .frame(width: size.width, height: size.height)
                     .allowsHitTesting(false)
+                    .animation(.easeOut(duration: 0.16), value: pulse)
                     .transition(.opacity)
             }
             expandedContent
@@ -105,6 +108,7 @@ struct NotchView: View {
                                && media.nowPlaying?.isPlaying == true)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
+            mlog("onChange isExpanded=\(expanded) tab=\(state.currentTab)")
             if expanded && state.currentTab == .mirror {
                 mirror.resumeIfAuthorized()
             }
@@ -121,6 +125,15 @@ struct NotchView: View {
                 state.mirrorZoomed = false
             }
         }
+    }
+
+    /// Current music loudness (0…1) for the ambient background, averaged over
+    /// the newest few samples so the glow breathes rather than strobes. Zero
+    /// while paused — the tap is off, so the background settles to its base.
+    private var ambientPulse: CGFloat {
+        let recent = spectrum.levels.suffix(3)
+        guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
+        return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
     }
 
     /// Dynamic Island ears: album art on the left, live activity on the right.

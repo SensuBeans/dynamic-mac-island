@@ -659,6 +659,7 @@ struct MirrorTab: View {
             .onAppear {
                 // Once permission is granted, opening the tab IS the intent —
                 // no extra click needed each time.
+                mlog("MirrorTab onAppear")
                 mirror.resumeIfAuthorized()
             }
     }
