@@ -251,16 +251,33 @@ struct NotchView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            // A horizontal swipe drags the content a few points toward the
+            // tab it will land on; it springs back if the swipe bails.
+            .offset(x: state.tabSwipeProgress * 16)
+            .opacity(1 - 0.25 * abs(state.tabSwipeProgress))
+            .animation(.spring(response: 0.25, dampingFraction: 0.9),
+                       value: state.tabSwipeProgress)
         }
         .padding(.horizontal, 16)
         .padding(.top, metrics.notchHeight + 8)
         .padding(.bottom, 14)
     }
 
+    /// Tab the in-flight swipe will land on once it passes the commit
+    /// threshold (half of full progress), wrapping at the ends.
+    private var swipeTarget: NotchTab? {
+        guard abs(state.tabSwipeProgress) >= 0.5 else { return nil }
+        let tabs = NotchTab.allCases
+        guard let i = tabs.firstIndex(of: state.currentTab) else { return nil }
+        let step = state.tabSwipeProgress < 0 ? 1 : -1
+        return tabs[(i + step + tabs.count) % tabs.count]
+    }
+
     private var tabBar: some View {
         HStack(spacing: 2) {
             ForEach(NotchTab.allCases, id: \.self) { tab in
                 let selected = state.currentTab == tab
+                let targeted = swipeTarget == tab
                 Button { state.currentTab = tab } label: {
                     HStack(spacing: 4) {
                         Image(systemName: tab.icon)
@@ -270,11 +287,13 @@ struct NotchView: View {
                                 .font(.system(size: 11, weight: .semibold))
                         }
                     }
-                    .foregroundStyle(selected ? .white : .white.opacity(0.45))
+                    .foregroundStyle(selected ? .white
+                                     : .white.opacity(targeted ? 0.9 : 0.45))
                     .padding(.horizontal, selected ? 10 : 8)
                     .frame(height: 24)
                     .background(
-                        Capsule().fill(selected ? .white.opacity(0.16) : .clear)
+                        Capsule().fill(.white.opacity(
+                            selected ? 0.16 : (targeted ? 0.09 : 0)))
                     )
                 }
                 .buttonStyle(.plain)
@@ -284,6 +303,7 @@ struct NotchView: View {
         .padding(2)
         .background(Capsule().fill(.white.opacity(0.06)))
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
+        .animation(.easeOut(duration: 0.12), value: swipeTarget)
     }
 
     private struct VisualEffectBlur: NSViewRepresentable {

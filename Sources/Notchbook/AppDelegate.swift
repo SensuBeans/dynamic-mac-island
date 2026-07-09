@@ -232,45 +232,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
+    /// Live volume swipe: the player volume captured (asynchronously) when
+    /// the gesture began, offset by the fingers as they move.
+    private var volumeBase: Double?
+    /// Drops stale async volume reads once a newer gesture has begun.
+    private var volumeReadToken = 0
+    /// Set when the fingers lift before the base volume read landed — the
+    /// completion applies the whole swipe as soon as it arrives.
+    private var volumeSwipeEnded = false
+    private var lastSentVolume: Int?
+    private var lastVolumeSendTime: TimeInterval = 0
 
-    /// Two-finger swipes. Collapsed: left/right skips tracks, up/down nudges
-    /// player volume. Expanded: left/right switches tabs.
+    /// Once a swipe over the expanded panel proves horizontal it stays a
+    /// tab swipe for the rest of the gesture, so accumulated vertical noise
+    /// can't kill the indicator mid-drag.
+    private var tabSwipeActive = false
+    /// Tab steps already committed live during the current gesture.
+    private var tabSteps = 0
+
+    /// Swipe travel (pt) per tab step. The ratchet advances a tab each time
+    /// the fingers cover this much; lifting commits at half of it, where the
+    /// tab bar previews the target.
+    private static let tabSwipeSpan: CGFloat = 100
+    /// Volume percent gained per point of vertical travel.
+    private static let volumePerPoint: Double = 0.4
+
+    private func haptic(_ pattern: NSHapticFeedbackManager.FeedbackPattern = .alignment) {
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+    }
+
+    /// Two-finger swipes. Collapsed: left/right skips tracks, up/down drives
+    /// the player volume live while the fingers move. Expanded: a horizontal
+    /// swipe ratchets through the tabs continuously — one step per span of
+    /// travel, wrapping at the ends — with the content nudging along.
     private func handleIslandSwipe(_ event: NSEvent) {
         switch event.phase {
         case .began:
             swipeX = 0
             swipeY = 0
+            tabSwipeActive = false
+            tabSteps = 0
+            volumeBase = nil
+            volumeSwipeEnded = false
+            lastSentVolume = nil
+            volumeReadToken += 1
+            // Kick off the base volume read now so it has usually landed by
+            // the time the fingers actually move.
+            if !state.isExpanded, media.nowPlaying != nil {
+                let token = volumeReadToken
+                media.readPlayerVolumeAsync { [weak self] v in
+                    guard let self, token == self.volumeReadToken else { return }
+                    self.volumeBase = v
+                    self.updateLiveVolume(final: self.volumeSwipeEnded)
+                }
+            }
         case .changed:
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
+            if state.isExpanded {
+                if !tabSwipeActive, abs(swipeX) > 8,
+                   abs(swipeX) > abs(swipeY) * 1.5 {
+                    tabSwipeActive = true
+                }
+                guard tabSwipeActive else { return }
+                // Ratchet: travel is measured in "steps toward the next tab"
+                // (leftward swipe = positive); each whole span commits a step
+                // live and the residual drives the nudge indicator.
+                let travel = -swipeX / Self.tabSwipeSpan
+                let steps = Int(travel.rounded(.towardZero))
+                if steps != tabSteps {
+                    stepTab(by: steps - tabSteps)
+                    tabSteps = steps
+                }
+                state.tabSwipeProgress =
+                    max(-1, min(1, CGFloat(tabSteps) - travel))
+            } else {
+                updateLiveVolume(final: false)
+            }
         case .ended:
             if state.isExpanded {
-                guard abs(swipeX) > 50, abs(swipeX) > abs(swipeY) * 1.5 else { return }
-                let tabs = NotchTab.allCases
-                guard let i = tabs.firstIndex(of: state.currentTab) else { return }
-                let next = swipeX < 0 ? min(i + 1, tabs.count - 1) : max(i - 1, 0)
-                state.currentTab = tabs[next]
+                defer {
+                    state.tabSwipeProgress = 0
+                    tabSwipeActive = false
+                    tabSteps = 0
+                }
+                guard tabSwipeActive else { return }
+                // Lifting past half a span commits one more step.
+                let residual = -swipeX / Self.tabSwipeSpan - CGFloat(tabSteps)
+                if abs(residual) > 0.5 { stepTab(by: residual > 0 ? 1 : -1) }
                 return
             }
             guard media.nowPlaying != nil else { return }
             if abs(swipeX) > 40, abs(swipeX) > abs(swipeY) {
                 let next = swipeX < 0
                 next ? media.nextTrack() : media.previousTrack()
+                haptic()
                 state.showToast(NotchToast(icon: next ? "forward.fill" : "backward.fill",
                                            title: next ? "Next" : "Previous",
                                            color: media.accent), duration: 1.2)
-            } else if abs(swipeY) > 30 {
-                let up = swipeY < 0
-                let step: Double = abs(swipeY) > 100 ? 20 : 10
-                let vol = min(100, max(0, media.readPlayerVolume() + (up ? step : -step)))
-                media.setPlayerVolume(vol)
-                state.showToast(NotchToast(icon: up ? "speaker.wave.3.fill" : "speaker.wave.1.fill",
-                                           title: "Volume \(Int(vol))%",
-                                           color: media.accent), duration: 1)
+            } else if volumeBase == nil {
+                // Fingers lifted before the base read landed (a quick flick)
+                // — the pending completion applies the swipe.
+                volumeSwipeEnded = true
+            } else {
+                updateLiveVolume(final: true)
             }
+        case .cancelled:
+            state.tabSwipeProgress = 0
+            tabSwipeActive = false
+            tabSteps = 0
+            volumeReadToken += 1
         default:
             break
         }
+    }
+
+    /// Moves the current tab by `delta`, wrapping at the ends, with a
+    /// haptic tick per change.
+    private func stepTab(by delta: Int) {
+        let tabs = NotchTab.allCases
+        guard delta != 0, let i = tabs.firstIndex(of: state.currentTab) else { return }
+        let n = tabs.count
+        state.currentTab = tabs[((i + delta) % n + n) % n]
+        haptic()
+    }
+
+    /// Maps the accumulated vertical swipe onto the player volume. Sends
+    /// only whole-percent changes, rate-limited, so a fast swipe can't spawn
+    /// an osascript pile-up; a haptic tick marks every 10% detent.
+    private func updateLiveVolume(final: Bool) {
+        guard media.nowPlaying != nil, let base = volumeBase,
+              abs(swipeY) > 12, abs(swipeY) > abs(swipeX) else { return }
+        let whole = Int(min(100, max(0, base - swipeY * Self.volumePerPoint)).rounded())
+        let now = ProcessInfo.processInfo.systemUptime
+        if whole != lastSentVolume, final || now - lastVolumeSendTime > 0.05 {
+            if let prev = lastSentVolume, prev / 10 != whole / 10 {
+                haptic(.levelChange)
+            }
+            lastSentVolume = whole
+            lastVolumeSendTime = now
+            media.setPlayerVolume(Double(whole))
+        }
+        let icon = whole == 0 ? "speaker.slash.fill"
+            : whole < 34 ? "speaker.wave.1.fill"
+            : whole < 67 ? "speaker.wave.2.fill" : "speaker.wave.3.fill"
+        state.showToast(NotchToast(icon: icon, title: "Volume \(whole)%",
+                                   color: media.accent), duration: final ? 1 : 3)
     }
 
     private func setEarHover(_ over: Bool) {

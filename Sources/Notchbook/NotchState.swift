@@ -54,6 +54,10 @@ final class NotchState: ObservableObject {
     @Published var earHovered = false
     /// Transient notification shown beside the notch while collapsed.
     @Published var toast: NotchToast?
+    /// Live progress of a horizontal two-finger swipe over the expanded
+    /// panel, -1…1 (negative = toward the next tab). The content nudges
+    /// with the fingers and the tab bar previews where the swipe lands.
+    @Published var tabSwipeProgress: CGFloat = 0
     /// Hidden entirely while the user swipes between Spaces.
     @Published var spaceTransitioning = false
 

@@ -422,6 +422,35 @@ final class MediaWatcher: ObservableObject {
         }
     }
 
+    /// Non-blocking volume read for live gestures — osascript runs on a
+    /// background queue so a slow player can never hitch the island.
+    func readPlayerVolumeAsync(_ completion: @escaping (Double) -> Void) {
+        guard let np = nowPlaying else { completion(50); return }
+        let script: String
+        switch np.source {
+        case .music, .spotify:
+            guard isRunning(np.source) else { completion(50); return }
+            script = "tell application \"\(np.source.rawValue)\" to get sound volume"
+        case .youtube:
+            script = youtubeJS("document.querySelector('video').volume * 100")
+        }
+        DispatchQueue.global(qos: .userInteractive).async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p.arguments = ["-e", script]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = Pipe()
+            try? p.run()
+            p.waitUntilExit()
+            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                              encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let v = Double(text.replacingOccurrences(of: ",", with: ".")) ?? 50
+            DispatchQueue.main.async { completion(min(max(v, 0), 100)) }
+        }
+    }
+
     func setPlayerVolume(_ value: Double) {
         guard let np = nowPlaying else { return }
         let v = Int(min(max(value, 0), 100))
