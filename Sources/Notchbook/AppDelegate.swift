@@ -109,12 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupToasts()
 
-        // Hide the island the moment a 3+-finger gesture lands — catches
+        // Hide the island the moment a 4-finger gesture lands — catches
         // Space swipes at their START (wallpaper polling covers the tail).
         TouchSensor.start()
         TouchSensor.onFingerCount = { [weak self] fingers in
             guard let self, !self.state.isExpanded else { return }
-            if fingers >= 3 {
+            if fingers >= 4 {
                 self.spaceWork?.cancel()
                 self.state.spaceTransitioning = true
             } else if self.state.spaceTransitioning {
