@@ -187,7 +187,8 @@ struct MediaTab: View {
                                 .foregroundStyle(.white.opacity(showLyrics ? 0.9 : 0.4))
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 4)
+                        .frame(height: 36)
+                        .padding(.leading, 2)
                         .help("Lyrics")
                     }
                     if showLyrics {
@@ -352,10 +353,26 @@ private struct LyricsTicker: View {
                     .foregroundStyle(.white.opacity(0.35))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .loaded:
-                ticker
+                if lyrics.lines.isEmpty {
+                    plainSheet
+                } else {
+                    ticker
+                }
             }
         }
         .onReceive(timer) { now = $0 }
+    }
+
+    /// Unsynced lyrics: a quietly scrollable sheet, Apple-style.
+    private var plainSheet: some View {
+        ScrollView(showsIndicators: false) {
+            Text(lyrics.plainText)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.75))
+                .lineSpacing(3)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 4)
+        }
     }
 
     /// Player position, interpolated between the 1 Hz polls.
