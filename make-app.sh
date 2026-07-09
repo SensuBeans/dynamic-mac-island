@@ -26,6 +26,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key><true/>
     <key>NSAppleEventsUsageDescription</key>
     <string>Notchbook controls Music/Spotify playback and system toggles.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>The media tab's sound wave moves with the audio that is actually playing.</string>
     <key>NSCameraUsageDescription</key>
     <string>The Mirror tab shows your webcam so you can check yourself before a call.</string>
     <key>NSCalendarsUsageDescription</key>

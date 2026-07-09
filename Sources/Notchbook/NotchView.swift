@@ -10,6 +10,7 @@ struct NotchView: View {
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var stats: StatsModel
     @EnvironmentObject var pomodoro: PomodoroModel
+    @EnvironmentObject var spectrum: AudioSpectrum
     let metrics: NotchMetrics
 
     @FocusState private var editorFocused: Bool
@@ -46,6 +47,21 @@ struct NotchView: View {
                 VisualEffectBlur()
             }
             Color.black.opacity(state.isExpanded ? 0.32 : (collapsedVisible ? 1 : 0))
+            // Ambient glow: the album cover, blown up and heavily blurred,
+            // tints the whole panel with the artwork's palette (media tab).
+            if state.isExpanded, state.currentTab == .media, let art = media.artwork {
+                Image(nsImage: art)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: size.width, height: size.height)
+                    .scaleEffect(1.6)
+                    .blur(radius: 46)
+                    .saturation(1.5)
+                    .opacity(0.38)
+                    .frame(width: size.width, height: size.height)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
             expandedContent
                 .frame(width: expandedSize.width,
                        height: expandedSize.height, alignment: .top)
@@ -79,11 +95,13 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
+            spectrum.setActive(expanded && state.currentTab == .media)
         }
         .onChange(of: state.currentTab) { tab in
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
+            spectrum.setActive(state.isExpanded && tab == .media)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let state = NotchState()
     private let media = MediaWatcher()
     private let tray = FilesTray()
+    private let spectrum = AudioSpectrum()
     private let calendarModel = CalendarModel()
     private let mirror = MirrorController()
     private let toggles = TogglesModel()
@@ -294,7 +295,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(mirror)
             .environmentObject(toggles)
             .environmentObject(stats)
-            .environmentObject(pomodoro))
+            .environmentObject(pomodoro)
+            .environmentObject(spectrum))
     }
 
     /// Expand on hover, effectively instantly. SwiftUI can drop hover-exit

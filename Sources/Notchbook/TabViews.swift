@@ -79,6 +79,7 @@ struct MediaTab: View {
     @EnvironmentObject var media: MediaWatcher
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var toggles: TogglesModel
+    @EnvironmentObject var spectrum: AudioSpectrum
     @State private var volume: Double = 50
 
     var body: some View {
@@ -155,7 +156,9 @@ struct MediaTab: View {
                                 EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
                                               barWidth: 2.5, maxHeight: 26,
                                               color: media.accent,
-                                              animating: np.isPlaying && state.isExpanded)
+                                              animating: np.isPlaying && state.isExpanded,
+                                              levels: spectrum.levels.isEmpty
+                                                  ? nil : spectrum.levels)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                         }
@@ -1002,6 +1005,9 @@ struct EqualizerBars: View {
     var maxHeight: CGFloat = 12
     var color: Color = .orange
     var animating = true
+    /// Real audio levels (0…1, newest last). When present, the bars render
+    /// this history instead of the synthetic sine animation.
+    var levels: [Float]? = nil
 
     @State private var t: Double = 0
     private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
@@ -1016,11 +1022,17 @@ struct EqualizerBars: View {
             }
         }
         .onReceive(timer) { _ in
-            if animating { t += 1.0 / 20.0 }
+            if animating, levels == nil { t += 1.0 / 20.0 }
         }
     }
 
     private func height(_ i: Int) -> CGFloat {
+        if let levels, !levels.isEmpty {
+            // Map bars onto the history, newest sample on the right.
+            let idx = levels.count - 1 - ((barCount - 1 - i) * levels.count) / barCount
+            let level = levels[max(0, min(levels.count - 1, idx))]
+            return max(barWidth, maxHeight * CGFloat(level))
+        }
         guard animating else { return maxHeight * 0.25 }
         let speed = 2.2 + Double(i % 4) * 0.35
         let phase = Double(i) * 0.9
