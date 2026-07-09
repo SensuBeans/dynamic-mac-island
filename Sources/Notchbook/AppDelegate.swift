@@ -85,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
-        host.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
+        panel.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
         // The expand trigger hugs the physical notch exactly; the ear and
         // wings never open the panel.
         host.hoverZoneRect = { [weak self] in

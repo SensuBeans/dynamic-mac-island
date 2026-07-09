@@ -22,6 +22,19 @@ final class NotchPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// Two-finger swipes over the island. Observed at the WINDOW level so
+    /// they work even when the cursor sits over a scroll view (the notes
+    /// editor used to swallow them before the swipe handler ever looked).
+    /// The event still reaches the view underneath afterwards, so vertical
+    /// scrolling in the editor keeps working; the swipe handler only acts
+    /// on decisively horizontal gestures.
+    var onScroll: ((NSEvent) -> Void)?
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel { onScroll?(event) }
+        super.sendEvent(event)
+    }
 }
 
 import SwiftUI
@@ -36,8 +49,6 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     var hoverZoneRect: (() -> NSRect)?
     /// X past which the island counts as the sound-wave ear.
     var earBoundaryX: () -> CGFloat = { .infinity }
-    /// Two-finger trackpad swipes over the island.
-    var onScroll: ((NSEvent) -> Void)?
     /// Reports whether the cursor is over the hover zone. Driven by our own
     /// AppKit tracking area — SwiftUI's .onHover regions silently stop
     /// firing in this always-up accessory panel after a while.
@@ -72,11 +83,6 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         reportHover(event)
-    }
-
-    override func scrollWheel(with event: NSEvent) {
-        onScroll?(event)
-        super.scrollWheel(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
