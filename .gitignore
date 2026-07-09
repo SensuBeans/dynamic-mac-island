@@ -1,0 +1,5 @@
+.build/
+Notchbook.app/
+*.p12
+*.pem
+.DS_Store

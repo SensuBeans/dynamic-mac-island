@@ -1,0 +1,861 @@
+import SwiftUI
+import EventKit
+import AVFoundation
+
+// MARK: - Notes
+
+struct NotesTab: View {
+    @EnvironmentObject var state: NotchState
+    var focus: FocusState<Bool>.Binding
+
+    var body: some View {
+        VStack(spacing: 8) {
+            TextEditor(text: editorText)
+                .focused(focus)
+                .font(.system(size: 13))
+                .foregroundStyle(.white)
+                .scrollContentBackground(.hidden)
+                .padding(6)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.white.opacity(0.07))
+                )
+
+            HStack {
+                pageTabs
+                Text("\(state.pages[state.currentPage].count) chars · autosaved")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .padding(.leading, 6)
+                Spacer()
+                Button { state.pages[state.currentPage] = "" } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+                .help("Clear this page")
+            }
+        }
+    }
+
+    /// The hidden (collapsed) editor must never write through to the store —
+    /// an AppKit-backed TextEditor can push its initial empty text back
+    /// through the binding during setup, which once wiped saved notes.
+    private var editorText: Binding<String> {
+        Binding(
+            get: { state.pages[state.currentPage] },
+            set: { newValue in
+                guard state.isExpanded else { return }
+                state.pages[state.currentPage] = newValue
+            })
+    }
+
+    private var pageTabs: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<NotchState.pageCount, id: \.self) { i in
+                let isCurrent = i == state.currentPage
+                let isEmpty = state.pages[i].isEmpty
+                Button { state.currentPage = i } label: {
+                    Text("\(i + 1)")
+                        .font(.system(size: 10, weight: isCurrent ? .bold : .regular))
+                        .foregroundStyle(isCurrent ? .black : .white.opacity(isEmpty ? 0.45 : 0.8))
+                        .frame(width: 18, height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(.white.opacity(isCurrent ? 0.85 : 0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help(isEmpty ? "Page \(i + 1) (empty)" : "Page \(i + 1)")
+            }
+        }
+    }
+}
+
+// MARK: - Media
+
+struct MediaTab: View {
+    @EnvironmentObject var media: MediaWatcher
+    @EnvironmentObject var state: NotchState
+    @EnvironmentObject var toggles: TogglesModel
+    @State private var volume: Double = 50
+
+    var body: some View {
+        if let np = media.nowPlaying {
+            mediaCard(np)
+                .onAppear { volume = media.readPlayerVolume() }
+                .onChange(of: np.source) { _ in volume = media.readPlayerVolume() }
+        } else {
+            placeholder
+        }
+    }
+
+    /// Exactly the progress bar's 4 pt capsule, in the same column width.
+    private var volumeRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "speaker.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(.white.opacity(0.4))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.2))
+                        .frame(height: 4)
+                    Capsule().fill(media.accent)
+                        .frame(width: max(4, geo.size.width * volume / 100), height: 4)
+                    // Knob so the slider reads as a slider.
+                    Circle().fill(.white)
+                        .frame(width: 10, height: 10)
+                        .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
+                        .offset(x: max(0, geo.size.width * volume / 100 - 5))
+                }
+                .frame(height: geo.size.height)
+                .contentShape(Rectangle().inset(by: -8))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            volume = min(100, max(0, v.location.x / geo.size.width * 100))
+                        }
+                        .onEnded { _ in media.setPlayerVolume(volume) }
+                )
+            }
+            .frame(height: 10)
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(.white.opacity(0.4))
+        }
+    }
+
+    private func mediaCard(_ np: MediaWatcher.NowPlaying) -> some View {
+            // Mirrors Apple's mini-player: artwork left at full card height;
+            // title block with a small live waveform beside it, transport
+            // centered, progress bar with elapsed/remaining at the bottom.
+            HStack(alignment: .center, spacing: 18) {
+                artwork
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .top, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(np.source.displayName.uppercased())
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.4))
+                                .kerning(0.8)
+                            Text(np.title)
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                            Text(np.artist)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 4)
+                        Button { media.playPause() } label: {
+                            EqualizerBars(barCount: 4, barWidth: 2.5, maxHeight: 14,
+                                          color: media.accent,
+                                          animating: np.isPlaying && state.isExpanded)
+                                .padding(.top, 2)
+                        }
+                        .buttonStyle(.plain)
+                        .help(np.isPlaying ? "Pause" : "Play")
+                    }
+                    Spacer(minLength: 6)
+                    HStack(spacing: 30) {
+                        Button { media.previousTrack() } label: {
+                            Image(systemName: "backward.fill").font(.system(size: 15))
+                        }
+                        Button { media.playPause() } label: {
+                            Image(systemName: np.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 23))
+                                .frame(width: 28)
+                        }
+                        Button { media.nextTrack() } label: {
+                            Image(systemName: "forward.fill").font(.system(size: 15))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    Spacer(minLength: 6)
+                    if np.source == .youtube {
+                        Text(media.youtubeJSBlocked
+                             ? "For volume: Chrome ▸ View ▸ Developer ▸ Allow JavaScript from Apple Events"
+                             : "YouTube · Google Chrome")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.white.opacity(media.youtubeJSBlocked ? 0.55 : 0.35))
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        progressBar
+                    }
+                    Spacer(minLength: 8)
+                    volumeRow
+                }
+                .frame(height: 168)
+            }
+            .padding(.horizontal, 6)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var placeholder: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "music.note")
+                .font(.system(size: 26))
+                .foregroundStyle(.white.opacity(0.25))
+            Text("Nothing Playing")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.6))
+            HStack(spacing: 10) {
+                LaunchButton(icon: "music.note", label: "Music") {
+                    media.launchAndPlay(.music)
+                }
+                if FileManager.default.fileExists(atPath: "/Applications/Spotify.app") {
+                    LaunchButton(icon: "waveform", label: "Spotify") {
+                        media.launchAndPlay(.spotify)
+                    }
+                }
+                LaunchButton(icon: "play.rectangle.fill", label: "YouTube") {
+                    if let url = URL(string: "https://www.youtube.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+            .padding(.top, 4)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var artwork: some View {
+        Group {
+            if let art = media.artwork {
+                Image(nsImage: art)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.white.opacity(0.08))
+                    .overlay(
+                        Image(systemName: "music.note")
+                            .font(.system(size: 36))
+                            .foregroundStyle(.white.opacity(0.3))
+                    )
+            }
+        }
+        .frame(width: 168, height: 168)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
+    }
+
+    private var progressBar: some View {
+        VStack(spacing: 5) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.2))
+                    Capsule().fill(.white.opacity(0.85))
+                        .frame(width: max(4, geo.size.width * fraction))
+                }
+            }
+            .frame(height: 4)
+            HStack {
+                Text(timeString(media.position))
+                Spacer()
+                Text("-" + timeString(max(0, media.duration - media.position)))
+            }
+            .font(.system(size: 10))
+            .monospacedDigit()
+            .foregroundStyle(.white.opacity(0.45))
+        }
+    }
+
+    private var fraction: CGFloat {
+        media.duration > 0 ? min(1, media.position / media.duration) : 0
+    }
+
+    private func timeString(_ seconds: Double) -> String {
+        let s = Int(seconds.rounded())
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+private struct LaunchButton: View {
+    let icon: String
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                Text(label)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(.white.opacity(0.1)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Files tray
+
+struct TrayTab: View {
+    @EnvironmentObject var tray: FilesTray
+
+    var body: some View {
+        if tray.items.isEmpty {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.white.opacity(0.2),
+                              style: StrokeStyle(lineWidth: 1.5, dash: [6, 5]))
+                .overlay(
+                    VStack(spacing: 8) {
+                        Image(systemName: "tray.and.arrow.down")
+                            .font(.system(size: 26))
+                            .foregroundStyle(.white.opacity(0.3))
+                        Text("Drop Files Here")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.6))
+                        Text("Drag onto the notch anytime · drag out to move · AirDrop below")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                )
+        } else {
+            VStack(spacing: 8) {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(tray.items, id: \.self) { url in
+                            TrayRow(url: url)
+                        }
+                    }
+                }
+                HStack(spacing: 10) {
+                    Button { tray.airDrop() } label: {
+                        Label("AirDrop All", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(.white.opacity(0.12)))
+                    }
+                    Button { tray.clear() } label: {
+                        Text("Clear")
+                            .font(.system(size: 11))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Capsule().fill(.white.opacity(0.07)))
+                    }
+                    Spacer()
+                    Text("\(tray.items.count) item\(tray.items.count == 1 ? "" : "s")")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.85))
+            }
+        }
+    }
+}
+
+private struct TrayRow: View {
+    @EnvironmentObject var tray: FilesTray
+    let url: URL
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable()
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(url.lastPathComponent)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                Text(url.deletingLastPathComponent().path)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            Spacer()
+            Button { tray.airDrop([url]) } label: {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .help("AirDrop")
+            Button { tray.remove(url) } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .help("Remove from tray")
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+        .onDrag { NSItemProvider(object: url as NSURL) }
+    }
+}
+
+// MARK: - Calendar
+
+struct CalendarTab: View {
+    @EnvironmentObject var calendarModel: CalendarModel
+
+    var body: some View {
+        Group {
+            if !calendarModel.hasAccess {
+                VStack(spacing: 10) {
+                    Spacer()
+                    Image(systemName: "calendar")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.white.opacity(0.3))
+                    Text("Connect your Calendar")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.7))
+                    Button { calendarModel.connect() } label: {
+                        Text("Allow Access")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(.orange))
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else if calendarModel.events.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No events in the next 7 days")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(calendarModel.events, id: \.eventIdentifier) { event in
+                            eventRow(event)
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear { calendarModel.load() }
+    }
+
+    private func eventRow(_ event: EKEvent) -> some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(cgColor: event.calendar.cgColor))
+                .frame(width: 3, height: 30)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(event.title ?? "Untitled")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                Text(timeLabel(event))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+    }
+
+    private func timeLabel(_ event: EKEvent) -> String {
+        if event.isAllDay {
+            return event.startDate.formatted(.dateTime.weekday(.wide).month().day()) + " · All day"
+        }
+        return event.startDate.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+            + " · " + event.startDate.formatted(date: .omitted, time: .shortened)
+    }
+}
+
+// MARK: - Mirror
+
+struct MirrorTab: View {
+    @EnvironmentObject var mirror: MirrorController
+    @EnvironmentObject var state: NotchState
+
+    var body: some View {
+        content
+            .onAppear {
+                // Once permission is granted, opening the tab IS the intent —
+                // no extra click needed each time.
+                if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
+                    mirror.start()
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if mirror.isRunning {
+            CameraPreview(session: mirror.session)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(alignment: .bottomTrailing) {
+                    HStack(spacing: 6) {
+                        Button { state.mirrorZoomed.toggle() } label: {
+                            Image(systemName: state.mirrorZoomed
+                                  ? "arrow.down.right.and.arrow.up.left"
+                                  : "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(7)
+                                .background(Circle().fill(.black.opacity(0.55)))
+                        }
+                        .help(state.mirrorZoomed ? "Shrink mirror" : "Expand mirror")
+                        Button {
+                            mirror.stop()
+                            state.mirrorZoomed = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(7)
+                                .background(Circle().fill(.black.opacity(0.55)))
+                        }
+                        .help("Stop camera")
+                    }
+                    .buttonStyle(.plain)
+                    .padding(8)
+                }
+        } else {
+            VStack(spacing: 10) {
+                Spacer()
+                Image(systemName: "web.camera")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.white.opacity(0.3))
+                if mirror.denied {
+                    Text("Camera access denied — enable it in\nSystem Settings → Privacy → Camera")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text("Check yourself before a call")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Button { mirror.start() } label: {
+                        Text("Show Mirror")
+                            .font(.system(size: 11, weight: .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(.orange))
+                            .foregroundStyle(.black)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+// MARK: - Stats
+
+struct StatsTab: View {
+    @EnvironmentObject var stats: StatsModel
+
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 8) {
+            StatTile(title: "CPU",
+                     center: pct(stats.cpu),
+                     detail: nil,
+                     fraction: stats.cpu)
+            StatTile(title: "Memory",
+                     center: pct(stats.memUsed / stats.memTotal),
+                     detail: "\(gb(stats.memUsed)) / \(gb(stats.memTotal)) GB",
+                     fraction: stats.memUsed / stats.memTotal)
+            StatTile(title: "GPU",
+                     center: stats.gpu < 0 ? "—" : pct(stats.gpu),
+                     detail: nil,
+                     fraction: max(stats.gpu, 0))
+            StatTile(title: "Disk",
+                     center: stats.diskTotal > 0
+                        ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
+                     detail: "\(gb(stats.diskFree)) GB free",
+                     fraction: stats.diskTotal > 0
+                        ? 1 - stats.diskFree / stats.diskTotal : 0)
+            StatTile(title: "Fan",
+                     center: stats.fanRPM < 0 ? "—"
+                        : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
+                     detail: stats.fanRPM >= 1 ? "rpm" : nil,
+                     fraction: stats.fanRPM < 0 ? 0 : min(stats.fanRPM / 6000, 1))
+            StatTile(title: "Battery",
+                     center: stats.batteryLevel < 0 ? "—" : pct(stats.batteryLevel),
+                     detail: stats.batteryCharging ? "charging ⚡" : nil,
+                     fraction: max(stats.batteryLevel, 0),
+                     invertSeverity: true)
+        }
+        .padding(.top, 4)
+    }
+
+    private func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+    private func gb(_ bytes: Double) -> String {
+        String(format: "%.0f", bytes / 1_073_741_824)
+    }
+}
+
+private struct StatTile: View {
+    let title: String
+    let center: String
+    let detail: String?
+    let fraction: Double
+    var invertSeverity = false
+
+    var body: some View {
+        VStack(spacing: 5) {
+            ZStack {
+                Circle()
+                    .stroke(.white.opacity(0.12), lineWidth: 4.5)
+                Circle()
+                    .trim(from: 0, to: max(0.02, min(fraction, 1)))
+                    .stroke(ringColor,
+                            style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Text(center)
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .padding(.horizontal, 7)
+            }
+            .frame(width: 46, height: 46)
+            .animation(.easeOut(duration: 0.5), value: fraction)
+            VStack(spacing: 1) {
+                Text(title.uppercased())
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .kerning(0.6)
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.white.opacity(0.3))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+    }
+
+    private var ringColor: Color {
+        let severity = invertSeverity ? 1 - fraction : fraction
+        if severity > 0.85 { return .red }
+        if severity > 0.6 { return .yellow }
+        return .green
+    }
+}
+
+// MARK: - Toggles
+
+struct TogglesTab: View {
+    @EnvironmentObject var toggles: TogglesModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
+                    toggles.toggleDarkMode()
+                }
+                ToggleCard(icon: "cup.and.saucer.fill", label: "Keep Awake",
+                           active: toggles.keepAwake) {
+                    toggles.keepAwake.toggle()
+                }
+                ToggleCard(icon: "eye.slash.fill", label: "Hide Desktop",
+                           active: toggles.desktopIconsHidden) {
+                    toggles.toggleDesktopIcons()
+                }
+            }
+            HStack(spacing: 8) {
+                if toggles.displaySliderAvailable {
+                    BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
+                                   read: { toggles.readDisplayBrightness() },
+                                   set: { toggles.setDisplayBrightness($0) })
+                } else {
+                    StepperCard(icon: "sun.max.fill", label: "Display",
+                                minus: { toggles.displayBrightnessDown() },
+                                plus: { toggles.displayBrightnessUp() })
+                }
+                if toggles.keyboardSliderAvailable {
+                    BrightnessCard(icon: "keyboard", endIcon: "light.max",
+                                   read: { toggles.readKeyboardBrightness() },
+                                   set: { toggles.setKeyboardBrightness($0) })
+                } else {
+                    StepperCard(icon: "keyboard", label: "Keyboard",
+                                minus: { toggles.keyboardBacklightDown() },
+                                plus: { toggles.keyboardBacklightUp() })
+                }
+            }
+            HStack(spacing: 8) {
+                ToggleCard(icon: "speaker.slash.fill", label: "Mute", active: false) {
+                    toggles.toggleMute()
+                }
+                ToggleCard(icon: "lock.fill", label: "Lock Screen", active: false) {
+                    toggles.lockScreen()
+                }
+                ToggleCard(icon: "camera.viewfinder", label: "Screenshot", active: false) {
+                    toggles.screenshot()
+                }
+            }
+            Spacer()
+        }
+        .padding(.top, 2)
+    }
+}
+
+/// A scrubbable brightness capsule (applies live while dragging).
+private struct BrightnessCard: View {
+    let icon: String
+    let endIcon: String
+    let read: () -> Double
+    let set: (Double) -> Void
+
+    @State private var level: Double = 0
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.7))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.2))
+                        .frame(height: 4)
+                    Capsule().fill(.white.opacity(0.85))
+                        .frame(width: max(4, geo.size.width * level), height: 4)
+                }
+                .frame(height: geo.size.height)
+                .contentShape(Rectangle().inset(by: -10))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            level = min(1, max(0, v.location.x / geo.size.width))
+                            set(level)
+                        }
+                )
+            }
+            .frame(height: 4)
+            Image(systemName: endIcon)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .frame(height: 42)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .onAppear { level = read() }
+    }
+}
+
+private struct StepperCard: View {
+    let icon: String
+    let label: String
+    let minus: () -> Void
+    let plus: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.7))
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+            Spacer()
+            Button(action: minus) {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            Button(action: plus) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
+        .frame(height: 42)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+    }
+}
+
+private struct ToggleCard: View {
+    let icon: String
+    let label: String
+    let active: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 16))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 54)
+            .foregroundStyle(active ? .black : .white.opacity(0.8))
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(active ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.08)))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Equalizer
+
+/// Bouncing bars used on the island's ear and as the media tab's waveform.
+/// Driven by a run-loop timer — TimelineView's display-link pauses inside
+/// non-key overlay panels, which froze the bars; a Timer never does.
+struct EqualizerBars: View {
+    var barCount = 3
+    var barWidth: CGFloat = 2
+    var maxHeight: CGFloat = 12
+    var color: Color = .orange
+    var animating = true
+
+    @State private var t: Double = 0
+    private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: barWidth) {
+            ForEach(0..<barCount, id: \.self) { i in
+                Capsule()
+                    .fill(color)
+                    .frame(width: barWidth, height: height(i))
+                    .frame(height: maxHeight, alignment: .center)
+            }
+        }
+        .onReceive(timer) { _ in
+            if animating { t += 1.0 / 20.0 }
+        }
+    }
+
+    private func height(_ i: Int) -> CGFloat {
+        guard animating else { return maxHeight * 0.25 }
+        let speed = 2.2 + Double(i % 4) * 0.35
+        let phase = Double(i) * 0.9
+        let v = (sin(t * speed + phase) + 1) / 2
+        return maxHeight * (0.25 + 0.75 * v)
+    }
+}
