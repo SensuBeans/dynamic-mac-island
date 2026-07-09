@@ -74,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
+        host.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
         // The expand trigger hugs the physical notch exactly; the ear and
         // wings never open the panel.
         host.hoverZoneRect = { [weak self] in
@@ -226,6 +227,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if low && !prev.low && !charging {
             state.showToast(NotchToast(icon: "battery.25", title: "Low Battery",
                                        subtitle: "\(pct)%", color: .red))
+        }
+    }
+
+    private var swipeX: CGFloat = 0
+    private var swipeY: CGFloat = 0
+
+    /// Two-finger swipe on the collapsed island: left/right skips tracks,
+    /// up/down nudges the player volume.
+    private func handleIslandSwipe(_ event: NSEvent) {
+        guard !state.isExpanded, media.nowPlaying != nil else { return }
+        switch event.phase {
+        case .began:
+            swipeX = 0
+            swipeY = 0
+        case .changed:
+            swipeX += event.scrollingDeltaX
+            swipeY += event.scrollingDeltaY
+        case .ended:
+            if abs(swipeX) > 40, abs(swipeX) > abs(swipeY) {
+                let next = swipeX < 0
+                next ? media.nextTrack() : media.previousTrack()
+                state.showToast(NotchToast(icon: next ? "forward.fill" : "backward.fill",
+                                           title: next ? "Next" : "Previous",
+                                           color: media.accent), duration: 1.2)
+            } else if abs(swipeY) > 30 {
+                let up = swipeY < 0
+                let step: Double = abs(swipeY) > 100 ? 20 : 10
+                let vol = min(100, max(0, media.readPlayerVolume() + (up ? step : -step)))
+                media.setPlayerVolume(vol)
+                state.showToast(NotchToast(icon: up ? "speaker.wave.3.fill" : "speaker.wave.1.fill",
+                                           title: "Volume \(Int(vol))%",
+                                           color: media.accent), duration: 1)
+            }
+        default:
+            break
         }
     }
 

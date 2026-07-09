@@ -36,6 +36,8 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     var hoverZoneRect: (() -> NSRect)?
     /// X past which the island counts as the sound-wave ear.
     var earBoundaryX: () -> CGFloat = { .infinity }
+    /// Two-finger trackpad swipes over the island.
+    var onScroll: ((NSEvent) -> Void)?
     /// Reports whether the cursor is over the hover zone. Driven by our own
     /// AppKit tracking area — SwiftUI's .onHover regions silently stop
     /// firing in this always-up accessory panel after a while.
@@ -70,6 +72,11 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
         reportHover(event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        onScroll?(event)
+        super.scrollWheel(with: event)
     }
 
     override func mouseExited(with event: NSEvent) {
