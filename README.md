@@ -1,4 +1,4 @@
-# Dynamic Mac Island
+# Dynamic Island
 
 **A Dynamic Island for your MacBook's notch.** Hover the notch and it expands
 into a frosted-glass panel: media controls with album art, quick notes, a file
@@ -6,11 +6,11 @@ tray, your calendar, a webcam mirror, live system stats, and system toggles.
 When music plays, the island grows an "ear" — album artwork and a live
 equalizer tinted with the album's colors — right beside the notch.
 
-![Dynamic Mac Island demo](docs/demo.gif)
+![Dynamic Island demo](docs/demo.gif)
 
 ## Why this one?
 
-Notchbook does something the other notch apps don't: **it recognizes YouTube
+Dynamic Island does something the other notch apps don't: **it recognizes YouTube
 playing in Chrome.** Video title, real thumbnail as artwork, play/pause/next
 controls, and a volume slider that drives YouTube's own player volume —
 independent of your Mac's output volume. Apple Music and Spotify get the same
@@ -49,14 +49,14 @@ Build from source (recommended — takes ~30 seconds):
 git clone https://github.com/SensuBeans/dynamic-mac-island.git
 cd dynamic-mac-island
 ./make-app.sh
-open Notchbook.app
+open "Dynamic Island.app"
 ```
 
 Requires macOS 13+ and Xcode Command Line Tools (`xcode-select --install`).
 
 If you download a prebuilt release instead: it's not notarized, so
 right-click → Open the first time, or
-`xattr -dr com.apple.quarantine Notchbook.app`.
+`xattr -dr com.apple.quarantine "Dynamic Island.app"`.
 
 ### Start at login
 
@@ -68,7 +68,7 @@ cat > ~/Library/LaunchAgents/com.sensubeans.notchbook.plist <<EOF
 <dict>
     <key>Label</key><string>com.sensubeans.notchbook</string>
     <key>ProgramArguments</key>
-    <array><string>$PWD/Notchbook.app/Contents/MacOS/Notchbook</string></array>
+    <array><string>/usr/bin/open</string><string>-a</string><string>$PWD/Dynamic Island.app</string></array>
     <key>RunAtLoad</key><true/>
     <key>ProcessType</key><string>Interactive</string>
 </dict>

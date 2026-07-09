@@ -1,5 +1,6 @@
 .build/
 Notchbook.app/
+Dynamic Island.app/
 *.p12
 *.pem
 .DS_Store

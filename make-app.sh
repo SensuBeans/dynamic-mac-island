@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Build a release binary and wrap it in Notchbook.app (in this directory).
+# Build a release binary and wrap it in "Dynamic Island.app" (in this directory).
 set -e
 cd "$(dirname "$0")"
 
 swift build -c release
 
-APP=Notchbook.app
+APP="Dynamic Island.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
@@ -17,7 +17,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key><string>com.sensubeans.notchbook</string>
-    <key>CFBundleName</key><string>Notchbook</string>
+    <key>CFBundleName</key><string>Dynamic Island</string>
     <key>CFBundleExecutable</key><string>Notchbook</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
