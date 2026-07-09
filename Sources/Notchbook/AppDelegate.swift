@@ -48,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: self.state.mirrorZoomed)
             } else {
-                s = self.metrics.collapsedSize(withMedia: self.media.nowPlaying != nil,
+                s = self.metrics.collapsedSize(withMedia: self.media.nowPlaying != nil && !self.media.earHidden,
                                                toast: self.state.toast != nil)
                 x = self.metrics.islandLeadingPad(expanded: false)
             }
@@ -63,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return .zero }
             var r = self.host.islandRect()
             if !self.state.isExpanded, self.media.nowPlaying != nil,
-               self.state.toast == nil {
+               !self.media.earHidden, self.state.toast == nil {
                 r.size.width = max(0, r.width - self.metrics.mediaEarWidth)
             }
             return r

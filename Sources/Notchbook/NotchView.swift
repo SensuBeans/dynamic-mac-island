@@ -24,7 +24,7 @@ struct NotchView: View {
     }
 
     private var island: some View {
-        let hasMedia = media.nowPlaying != nil
+        let hasMedia = media.nowPlaying != nil && !media.earHidden
         let hasToast = state.toast != nil
         let expandedSize = metrics.expandedSize(zoomed: state.mirrorZoomed)
         let size = state.isExpanded
@@ -121,7 +121,7 @@ struct NotchView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
-            } else if let np = media.nowPlaying, !state.isExpanded {
+            } else if let np = media.nowPlaying, !media.earHidden, !state.isExpanded {
                 // Right ear only: never cover the frontmost app's menu items.
                 HStack(spacing: 6) {
                     Spacer()

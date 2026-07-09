@@ -47,6 +47,11 @@ final class MediaWatcher: ObservableObject {
     /// Chrome refused JS-over-AppleEvents — YouTube volume needs the user to
     /// enable View ▸ Developer ▸ Allow JavaScript from Apple Events.
     @Published var youtubeJSBlocked = false
+    /// 90 seconds after pausing, the island ear hides (session stays alive).
+    @Published var earHidden = false
+
+    private var earHideWork: DispatchWorkItem?
+    private var earCancellable: AnyCancellable?
 
     private var observers: [NSObjectProtocol] = []
     private var workspaceObserver: NSObjectProtocol?
@@ -89,6 +94,18 @@ final class MediaWatcher: ObservableObject {
             self?.pollYouTube()
         }
         youtubeTimer?.tolerance = 1
+
+        earCancellable = $nowPlaying.sink { [weak self] np in
+            guard let self else { return }
+            self.earHideWork?.cancel()
+            if let np, !np.isPlaying {
+                let work = DispatchWorkItem { [weak self] in self?.earHidden = true }
+                self.earHideWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90, execute: work)
+            } else {
+                self.earHidden = false
+            }
+        }
     }
 
     private func pollYouTube() {
