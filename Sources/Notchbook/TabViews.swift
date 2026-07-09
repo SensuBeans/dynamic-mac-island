@@ -79,6 +79,7 @@ struct MediaTab: View {
     @EnvironmentObject var media: MediaWatcher
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var toggles: TogglesModel
+    @EnvironmentObject var spectrum: AudioSpectrum
     @State private var volume: Double = 50
 
     var body: some View {
@@ -130,52 +131,60 @@ struct MediaTab: View {
             // Mirrors Apple's mini-player: artwork left at full card height;
             // title block with a small live waveform beside it, transport
             // centered, progress bar with elapsed/remaining at the bottom.
-            HStack(alignment: .center, spacing: 18) {
+            HStack(alignment: .center, spacing: 14) {
                 artwork
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .top, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: 1) {
                             Text(np.source.displayName.uppercased())
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 8, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.4))
                                 .kerning(0.8)
                             Text(np.title)
-                                .font(.system(size: 17, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.white)
-                                .lineLimit(2)
+                                .lineLimit(1)
                             Text(np.artist)
-                                .font(.system(size: 13))
+                                .font(.system(size: 11))
                                 .foregroundStyle(.white.opacity(0.55))
                                 .lineLimit(1)
                         }
-                        Spacer(minLength: 4)
                         Button { media.playPause() } label: {
-                            EqualizerBars(barCount: 4, barWidth: 2.5, maxHeight: 14,
-                                          color: media.accent,
-                                          animating: np.isPlaying && state.isExpanded)
-                                .padding(.top, 2)
+                            // Fill whatever width the title leaves over with
+                            // waveform bars — the count adapts to the gap.
+                            GeometryReader { geo in
+                                EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
+                                              barWidth: 2.5, maxHeight: 26,
+                                              color: media.accent,
+                                              animating: np.isPlaying && state.isExpanded,
+                                              levels: np.isPlaying && !spectrum.levels.isEmpty
+                                                  ? spectrum.levels : nil)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
                         }
                         .buttonStyle(.plain)
+                        .frame(height: 36)
+                        .padding(.leading, 6)
                         .help(np.isPlaying ? "Pause" : "Play")
                     }
-                    Spacer(minLength: 6)
-                    HStack(spacing: 30) {
+                    Spacer(minLength: 2)
+                    HStack(spacing: 24) {
                         Button { media.previousTrack() } label: {
-                            Image(systemName: "backward.fill").font(.system(size: 15))
+                            Image(systemName: "backward.fill").font(.system(size: 12))
                         }
                         Button { media.playPause() } label: {
                             Image(systemName: np.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 23))
-                                .frame(width: 28)
+                                .font(.system(size: 18))
+                                .frame(width: 22)
                         }
                         Button { media.nextTrack() } label: {
-                            Image(systemName: "forward.fill").font(.system(size: 15))
+                            Image(systemName: "forward.fill").font(.system(size: 12))
                         }
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: 2)
                     if np.source == .youtube {
                         Text(media.youtubeJSBlocked
                              ? "For volume: Chrome ▸ View ▸ Developer ▸ Allow JavaScript from Apple Events"
@@ -187,10 +196,10 @@ struct MediaTab: View {
                     } else {
                         progressBar
                     }
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 3)
                     volumeRow
                 }
-                .frame(height: 168)
+                .frame(height: 102)
             }
             .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -237,18 +246,19 @@ struct MediaTab: View {
                     .fill(.white.opacity(0.08))
                     .overlay(
                         Image(systemName: "music.note")
-                            .font(.system(size: 36))
+                            .font(.system(size: 24))
                             .foregroundStyle(.white.opacity(0.3))
                     )
             }
         }
-        .frame(width: 168, height: 168)
+        .frame(width: 102, height: 102)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
     }
 
     private var progressBar: some View {
-        VStack(spacing: 5) {
+        HStack(spacing: 8) {
+            Text(timeString(media.position))
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.white.opacity(0.2))
@@ -257,15 +267,11 @@ struct MediaTab: View {
                 }
             }
             .frame(height: 4)
-            HStack {
-                Text(timeString(media.position))
-                Spacer()
-                Text("-" + timeString(max(0, media.duration - media.position)))
-            }
-            .font(.system(size: 10))
-            .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.45))
+            Text("-" + timeString(max(0, media.duration - media.position)))
         }
+        .font(.system(size: 10))
+        .monospacedDigit()
+        .foregroundStyle(.white.opacity(0.45))
     }
 
     private var fraction: CGFloat {
@@ -321,29 +327,29 @@ struct TimerTab: View {
     }
 
     var body: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 20) {
             ZStack {
-                Circle().stroke(.white.opacity(0.12), lineWidth: 6)
+                Circle().stroke(.white.opacity(0.12), lineWidth: 5)
                 Circle()
                     .trim(from: 0, to: max(0.003, pomodoro.progress))
                     .stroke(pomodoro.phase == .focus ? Color.orange : .green,
-                            style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 1), value: pomodoro.progress)
-                VStack(spacing: 2) {
+                VStack(spacing: 1) {
                     Text(pomodoro.timeString)
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                     Text(pomodoro.phase == .focus ? "FOCUS" : "BREAK")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 8, weight: .semibold))
                         .kerning(1)
                         .foregroundStyle(.white.opacity(0.45))
                 }
             }
-            .frame(width: 132, height: 132)
+            .frame(width: 98, height: 98)
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 5) {
                     ForEach(0..<4, id: \.self) { i in
                         Circle()
@@ -357,20 +363,20 @@ struct TimerTab: View {
                         .padding(.leading, 4)
                 }
 
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     Button { pomodoro.startPause() } label: {
                         Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
-                            .font(.system(size: 20))
-                            .frame(width: 24)
+                            .font(.system(size: 16))
+                            .frame(width: 20)
                     }
                     Button { pomodoro.reset() } label: {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 14))
+                            .font(.system(size: 12))
                     }
                     .help("Reset")
                     Button { pomodoro.skip() } label: {
                         Image(systemName: "forward.end.fill")
-                            .font(.system(size: 13))
+                            .font(.system(size: 11))
                     }
                     .help("Skip phase")
                 }
@@ -384,8 +390,8 @@ struct TimerTab: View {
                         } label: {
                             Text("\(m)m")
                                 .font(.system(size: 10, weight: .medium))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
                                 .background(
                                     Capsule().fill(pomodoro.focusMinutes == m
                                         ? .white.opacity(0.85) : .white.opacity(0.08))
@@ -403,11 +409,11 @@ struct TimerTab: View {
                 HStack(spacing: 6) {
                     TextField("custom · 90 or 12:30", text: $customTime)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .frame(width: 130)
+                        .padding(.vertical, 3)
+                        .frame(width: 120)
                         .background(RoundedRectangle(cornerRadius: 6)
                             .fill(.white.opacity(0.08)))
                         .onSubmit { applyCustomTime() }
@@ -425,6 +431,8 @@ struct TimerTab: View {
 
 struct TrayTab: View {
     @EnvironmentObject var tray: FilesTray
+
+    private let columns = [GridItem(.adaptive(minimum: 62), spacing: 8)]
 
     var body: some View {
         if tray.items.isEmpty {
@@ -445,32 +453,39 @@ struct TrayTab: View {
                     }
                 )
         } else {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVGrid(columns: columns, spacing: 8) {
                         ForEach(tray.items, id: \.self) { url in
-                            TrayRow(url: url)
+                            TrayTile(url: url)
                         }
                     }
                 }
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("Drag all", systemImage: "square.stack")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(.white.opacity(0.12)))
+                        .overlay { MultiFileDragOverlay(urls: tray.items) }
+                        .help("Drag every file out as one stack")
                     Button { tray.airDrop() } label: {
-                        Label("AirDrop All", systemImage: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                        Label("AirDrop", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
                             .background(Capsule().fill(.white.opacity(0.12)))
                     }
                     Button { tray.clear() } label: {
                         Text("Clear")
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                            .font(.system(size: 10))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
                             .background(Capsule().fill(.white.opacity(0.07)))
                     }
                     Spacer()
                     Text("\(tray.items.count) item\(tray.items.count == 1 ? "" : "s")")
-                        .font(.system(size: 10))
+                        .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.35))
                 }
                 .buttonStyle(.plain)
@@ -480,45 +495,76 @@ struct TrayTab: View {
     }
 }
 
-private struct TrayRow: View {
+private struct TrayTile: View {
     @EnvironmentObject var tray: FilesTray
     let url: URL
 
+    @State private var thumbnail: NSImage?
+    @State private var hovered = false
+
+    private static let side: CGFloat = 54
+
     var body: some View {
-        HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable()
-                .frame(width: 26, height: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(url.lastPathComponent)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                Text(url.deletingLastPathComponent().path)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .lineLimit(1)
-                    .truncationMode(.head)
+        VStack(spacing: 4) {
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let thumbnail {
+                        Image(nsImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(8)
+                    }
+                }
+                .frame(width: Self.side, height: Self.side)
+                .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(.white.opacity(hovered ? 0.3 : 0.1), lineWidth: 1)
+                )
+                .scaleEffect(hovered ? 1.04 : 1)
+
+                if hovered {
+                    Button { tray.remove(url) } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .black.opacity(0.65))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(3)
+                    .help("Remove from tray")
+                    .transition(.opacity)
+                }
             }
-            Spacer()
-            Button { tray.airDrop([url]) } label: {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .help("AirDrop")
-            Button { tray.remove(url) } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.35))
-            }
-            .help("Remove from tray")
+            Text(url.lastPathComponent)
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(hovered ? 0.9 : 0.55))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.side + 8)
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
         .onDrag { NSItemProvider(object: url as NSURL) }
+        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .contextMenu {
+            Button("Open") { NSWorkspace.shared.open(url) }
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            Button("AirDrop") { tray.airDrop([url]) }
+            Divider()
+            Button("Remove") { tray.remove(url) }
+        }
+        .onAppear {
+            TrayThumbnails.shared.load(url, side: Self.side) { thumbnail = $0 }
+        }
     }
 }
 
@@ -613,9 +659,7 @@ struct MirrorTab: View {
             .onAppear {
                 // Once permission is granted, opening the tab IS the intent —
                 // no extra click needed each time.
-                if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-                    mirror.start()
-                }
+                mirror.resumeIfAuthorized()
             }
     }
 
@@ -688,10 +732,10 @@ struct MirrorTab: View {
 struct StatsTab: View {
     @EnvironmentObject var stats: StatsModel
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
-
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 8) {
+        // Plain HStack, not a grid: every tile stretches equally in both
+        // axes so the six cards are always identical and fill the panel.
+        HStack(spacing: 6) {
             StatTile(title: "CPU",
                      center: pct(stats.cpu),
                      detail: nil,
@@ -738,40 +782,43 @@ private struct StatTile: View {
     var invertSeverity = false
 
     var body: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 3) {
             ZStack {
                 Circle()
-                    .stroke(.white.opacity(0.12), lineWidth: 4.5)
+                    .stroke(.white.opacity(0.12), lineWidth: 3.5)
                 Circle()
                     .trim(from: 0, to: max(0.02, min(fraction, 1)))
                     .stroke(ringColor,
-                            style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
+                            style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Text(center)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                    .padding(.horizontal, 7)
+                    .minimumScaleFactor(0.5)
+                    .padding(.horizontal, 5)
             }
-            .frame(width: 46, height: 46)
+            .frame(width: 38, height: 38)
             .animation(.easeOut(duration: 0.5), value: fraction)
             VStack(spacing: 1) {
                 Text(title.uppercased())
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 7.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.45))
-                    .kerning(0.6)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.white.opacity(0.3))
-                }
+                    .kerning(0.4)
+                // Always laid out (blank when absent) so tiles with a
+                // sublabel are exactly as tall as tiles without one.
+                Text(detail ?? " ")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 2)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
     }
 
     private var ringColor: Color {
@@ -788,8 +835,8 @@ struct TogglesTab: View {
     @EnvironmentObject var toggles: TogglesModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
                 ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
                     toggles.toggleDarkMode()
                 }
@@ -802,7 +849,7 @@ struct TogglesTab: View {
                     toggles.toggleDesktopIcons()
                 }
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if toggles.displaySliderAvailable {
                     BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
                                    read: { toggles.readDisplayBrightness() },
@@ -822,7 +869,7 @@ struct TogglesTab: View {
                                 plus: { toggles.keyboardBacklightUp() })
                 }
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 ToggleCard(icon: "speaker.slash.fill", label: "Mute", active: false) {
                     toggles.toggleMute()
                 }
@@ -833,9 +880,8 @@ struct TogglesTab: View {
                     toggles.screenshot()
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.top, 2)
     }
 }
 
@@ -877,8 +923,8 @@ private struct BrightnessCard: View {
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 42)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
         .onAppear { level = read() }
     }
 }
@@ -912,8 +958,8 @@ private struct StepperCard: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 42)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
     }
 }
 
@@ -925,17 +971,17 @@ private struct ToggleCard: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(.system(size: 12))
                 Text(label)
                     .font(.system(size: 10, weight: .medium))
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(height: 28)
             .foregroundStyle(active ? .black : .white.opacity(0.8))
             .background(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 9)
                     .fill(active ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.08)))
             )
         }
@@ -954,6 +1000,9 @@ struct EqualizerBars: View {
     var maxHeight: CGFloat = 12
     var color: Color = .orange
     var animating = true
+    /// Real audio levels (0…1, newest last). When present, the bars render
+    /// this history instead of the synthetic sine animation.
+    var levels: [Float]? = nil
 
     @State private var t: Double = 0
     private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
@@ -968,11 +1017,18 @@ struct EqualizerBars: View {
             }
         }
         .onReceive(timer) { _ in
-            if animating { t += 1.0 / 20.0 }
+            if animating, levels == nil { t += 1.0 / 20.0 }
         }
+        .animation(.linear(duration: 0.09), value: levels)
     }
 
     private func height(_ i: Int) -> CGFloat {
+        if let levels, !levels.isEmpty {
+            // Map bars onto the history, newest sample on the right.
+            let idx = levels.count - 1 - ((barCount - 1 - i) * levels.count) / barCount
+            let level = levels[max(0, min(levels.count - 1, idx))]
+            return max(barWidth, maxHeight * CGFloat(level))
+        }
         guard animating else { return maxHeight * 0.25 }
         let speed = 2.2 + Double(i % 4) * 0.35
         let phase = Double(i) * 0.9

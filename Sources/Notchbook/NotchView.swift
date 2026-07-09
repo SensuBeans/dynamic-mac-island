@@ -10,10 +10,14 @@ struct NotchView: View {
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var stats: StatsModel
     @EnvironmentObject var pomodoro: PomodoroModel
+    @EnvironmentObject var spectrum: AudioSpectrum
     let metrics: NotchMetrics
 
     @FocusState private var editorFocused: Bool
     @State private var dropTargeted = false
+    /// Accumulated rotation of the ambient color layers. Advances with each
+    /// audio sample — faster when the music is loud, frozen when paused.
+    @State private var colorPhase: Double = 0
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -27,7 +31,9 @@ struct NotchView: View {
     private var island: some View {
         let hasMedia = (media.nowPlaying != nil && !media.earHidden) || pomodoro.isRunning
         let hasToast = state.toast != nil
-        let expandedSize = metrics.expandedSize(zoomed: state.mirrorZoomed)
+        let expandedSize = state.currentTab == .tray
+            ? metrics.trayExpandedSize(itemCount: tray.items.count)
+            : metrics.expandedSize(zoomed: state.mirrorZoomed)
         let size = state.isExpanded
             ? expandedSize
             : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
@@ -44,6 +50,35 @@ struct NotchView: View {
                 VisualEffectBlur()
             }
             Color.black.opacity(state.isExpanded ? 0.32 : (collapsedVisible ? 1 : 0))
+            // Ambient glow: the album cover, blown up and heavily blurred,
+            // tints the whole panel with the artwork's palette (media tab).
+            // While music plays it breathes with the song's loudness.
+            if state.isExpanded, state.currentTab == .media, let art = media.artwork {
+                let pulse = ambientPulse
+                // Two counter-rotating copies of the cover: their color
+                // regions slide past each other so the palette wanders
+                // around the panel instead of sitting still. Square layers
+                // bigger than the panel's diagonal never expose an edge.
+                ZStack {
+                    ambientLayer(art, side: size.width)
+                        .scaleEffect(1.6 + 0.25 * pulse)
+                        .rotationEffect(.degrees(colorPhase))
+                    ambientLayer(art, side: size.width)
+                        .scaleEffect(1.95 + 0.3 * pulse)
+                        .rotationEffect(.degrees(140 - colorPhase * 1.6))
+                        .offset(x: 30 * cos(colorPhase / 40),
+                                y: 18 * sin(colorPhase / 47))
+                        .opacity(0.6)
+                }
+                .blur(radius: 46)
+                .saturation(1.5 + 0.5 * pulse)
+                .opacity(0.32 + 0.2 * pulse)
+                .frame(width: size.width, height: size.height)
+                .allowsHitTesting(false)
+                .animation(.linear(duration: 0.14), value: colorPhase)
+                .animation(.easeOut(duration: 0.16), value: pulse)
+                .transition(.opacity)
+            }
             expandedContent
                 .frame(width: expandedSize.width,
                        height: expandedSize.height, alignment: .top)
@@ -62,9 +97,23 @@ struct NotchView: View {
                                                     zoomed: state.mirrorZoomed))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorZoomed)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
+        .onChange(of: media.nowPlaying?.isPlaying) { playing in
+            // The tap only listens while the player itself is playing —
+            // paused means a still wave, whatever else the system sounds.
+            spectrum.setActive(state.isExpanded && state.currentTab == .media
+                               && playing == true)
+        }
+        .onChange(of: spectrum.levels) { levels in
+            // Each fresh audio sample nudges the ambient colors along,
+            // loudness sets the pace; no samples (paused) — no motion.
+            guard !levels.isEmpty else { return }
+            colorPhase += 0.5 + 2.0 * Double(ambientPulse)
+        }
         .onChange(of: dropTargeted) { targeted in
             if targeted && !state.isExpanded {
                 state.currentTab = .tray
@@ -75,17 +124,45 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
+            spectrum.setActive(expanded && state.currentTab == .media
+                               && media.nowPlaying?.isPlaying == true)
+            // MirrorTab stays mounted while hidden (the panel is opacity-0,
+            // not removed), so its onAppear never re-fires — restart here.
+            if expanded && state.currentTab == .mirror {
+                mirror.resumeIfAuthorized()
+            }
         }
         .onChange(of: state.currentTab) { tab in
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
+            spectrum.setActive(state.isExpanded && tab == .media
+                               && media.nowPlaying?.isPlaying == true)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
                 state.mirrorZoomed = false
             }
         }
+    }
+
+    /// One oversized square copy of the artwork for the ambient background —
+    /// square and larger than the panel's diagonal, so rotation never shows
+    /// a corner.
+    private func ambientLayer(_ art: NSImage, side: CGFloat) -> some View {
+        Image(nsImage: art)
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: side, height: side)
+    }
+
+    /// Current music loudness (0…1) for the ambient background, averaged over
+    /// the newest few samples so the glow breathes rather than strobes. Zero
+    /// while paused — the tap is off, so the background settles to its base.
+    private var ambientPulse: CGFloat {
+        let recent = spectrum.levels.suffix(3)
+        guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
+        return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
     }
 
     /// Dynamic Island ears: album art on the left, live activity on the right.

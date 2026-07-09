@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let state = NotchState()
     private let media = MediaWatcher()
     private let tray = FilesTray()
+    private let spectrum = AudioSpectrum()
     private let calendarModel = CalendarModel()
     private let mirror = MirrorController()
     private let toggles = TogglesModel()
@@ -61,7 +62,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s: CGSize
             let x: CGFloat
             if self.state.isExpanded {
-                s = self.metrics.expandedSize(zoomed: self.state.mirrorZoomed)
+                s = self.state.currentTab == .tray
+                    ? self.metrics.trayExpandedSize(itemCount: self.tray.items.count)
+                    : self.metrics.expandedSize(zoomed: self.state.mirrorZoomed)
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: self.state.mirrorZoomed)
             } else {
@@ -399,7 +402,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(mirror)
             .environmentObject(toggles)
             .environmentObject(stats)
-            .environmentObject(pomodoro))
+            .environmentObject(pomodoro)
+            .environmentObject(spectrum))
     }
 
     /// Expand on hover, effectively instantly. SwiftUI can drop hover-exit

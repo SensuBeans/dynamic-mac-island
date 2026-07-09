@@ -14,7 +14,7 @@ struct NotchMetrics {
     var hoverZoneSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     static let topFlare: CGFloat = 6
 
-    static let expandedContentSize = CGSize(width: 460, height: 240)
+    static let expandedContentSize = CGSize(width: 460, height: 158)
     /// Larger island used while the mirror is zoomed.
     static let zoomedContentSize = CGSize(width: 620, height: 470)
     /// Transparent margin around the expanded shape so its shadow isn't clipped.
@@ -54,6 +54,21 @@ struct NotchMetrics {
         let content = zoomed ? Self.zoomedContentSize : Self.expandedContentSize
         return CGSize(width: max(content.width, collapsedSize(withMedia: true).width),
                       height: notchHeight + content.height)
+    }
+
+    /// The tray hugs its content like a proper drop shelf: one row of files
+    /// keeps the panel short; more rows grow it up to the standard height,
+    /// after which the grid scrolls.
+    func trayExpandedSize(itemCount: Int) -> CGSize {
+        let columns = 6  // 62pt tiles + 8pt gaps in the 428pt content width
+        let rows = max(1, (itemCount + columns - 1) / columns)
+        // 74pt per tile row (tile + label), 8pt between rows; 28pt footer
+        // block; 56pt tab bar + paddings.
+        let grid = CGFloat(rows) * 74 + CGFloat(rows - 1) * 8
+        let content = min(Self.expandedContentSize.height, 56 + grid + 28)
+        var size = expandedSize()
+        size.height = notchHeight + content
+        return size
     }
 
     /// The ONE window frame: fixed and centered, sized for the expanded
