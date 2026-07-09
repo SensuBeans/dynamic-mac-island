@@ -81,7 +81,7 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     private func reportHover(_ event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let zone = hoverZoneRect?() ?? islandRect()
-        let inZone = hypot(p.x - zone.midX, p.y - zone.midY) <= zone.width / 2 + 2
+        let inZone = zone.insetBy(dx: -2, dy: -2).contains(p)
         onMouseState?(inZone)
         // The ear is strictly RIGHT of the notch — the left wing is neither
         // trigger nor ear.

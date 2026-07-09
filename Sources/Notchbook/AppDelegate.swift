@@ -151,9 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let islandScreen = self.panel.convertToScreen(
                 self.host.convert(self.host.islandRect(), to: nil))
             let mouse = NSEvent.mouseLocation
-            let inCircle = hypot(mouse.x - zoneScreen.midX,
-                                 mouse.y - zoneScreen.midY) <= zoneScreen.width / 2 + 2
-            if inCircle {
+            if zoneScreen.contains(mouse) {
                 self.expand()
             } else {
                 let earX = islandScreen.minX + NotchMetrics.wing + self.metrics.notchWidth

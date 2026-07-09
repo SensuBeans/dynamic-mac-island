@@ -10,10 +10,8 @@ struct NotchMetrics {
     /// Extra width either side of the physical notch (visual only, when the
     /// island is showing content). The hover zone hugs the notch exactly.
     static let wing: CGFloat = 14
-    /// The hover/expand trigger: a CIRCLE inscribed in the physical notch
-    /// (diameter = notch height, centered), so the whole zone hides behind
-    /// the hardware and never exceeds the notch's borders.
-    var hoverZoneSize: CGSize { CGSize(width: notchHeight, height: notchHeight) }
+    /// The hover/expand trigger zone: the physical notch bounds, exactly.
+    var hoverZoneSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     static let topFlare: CGFloat = 6
 
     static let expandedContentSize = CGSize(width: 460, height: 240)
