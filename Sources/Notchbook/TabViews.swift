@@ -80,13 +80,21 @@ struct MediaTab: View {
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var spectrum: AudioSpectrum
+    @EnvironmentObject var lyrics: LyricsModel
     @State private var volume: Double = 50
+    @State private var showLyrics = false
 
     var body: some View {
         if let np = media.nowPlaying {
             mediaCard(np)
                 .onAppear { volume = media.readPlayerVolume() }
                 .onChange(of: np.source) { _ in volume = media.readPlayerVolume() }
+                .onChange(of: np.title) { _ in
+                    if showLyrics {
+                        lyrics.fetch(title: np.title, artist: np.artist,
+                                     duration: media.duration)
+                    }
+                }
         } else {
             placeholder
         }
@@ -166,7 +174,25 @@ struct MediaTab: View {
                         .frame(height: 36)
                         .padding(.leading, 6)
                         .help(np.isPlaying ? "Pause" : "Play")
+                        Button {
+                            showLyrics.toggle()
+                            if showLyrics {
+                                lyrics.fetch(title: np.title, artist: np.artist,
+                                             duration: media.duration)
+                            }
+                        } label: {
+                            Image(systemName: showLyrics
+                                  ? "quote.bubble.fill" : "quote.bubble")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.white.opacity(showLyrics ? 0.9 : 0.4))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 4)
+                        .help("Lyrics")
                     }
+                    if showLyrics {
+                        LyricsTicker(accent: media.accent)
+                    } else {
                     Spacer(minLength: 2)
                     HStack(spacing: 24) {
                         if np.source != .youtube {
@@ -214,6 +240,7 @@ struct MediaTab: View {
                     }
                     Spacer(minLength: 3)
                     volumeRow
+                    }
                 }
                 .frame(height: 102)
             }
@@ -297,6 +324,88 @@ struct MediaTab: View {
     private func timeString(_ seconds: Double) -> String {
         let s = Int(seconds.rounded())
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+/// Apple Music-style synced lyrics: bold rounded lines, the current one
+/// bright, the next ones dimmed and softly blurred, springing upward as the
+/// song advances. Tap any line to seek there.
+private struct LyricsTicker: View {
+    @EnvironmentObject var media: MediaWatcher
+    @EnvironmentObject var lyrics: LyricsModel
+    let accent: Color
+
+    @State private var now = Date()
+    private let timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Group {
+            switch lyrics.status {
+            case .loading:
+                Text("Finding lyrics…")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .idle, .unavailable:
+                Text("No lyrics for this song")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loaded:
+                ticker
+            }
+        }
+        .onReceive(timer) { now = $0 }
+    }
+
+    /// Player position, interpolated between the 1 Hz polls.
+    private var position: Double {
+        let base = media.position
+        guard media.nowPlaying?.isPlaying == true else { return base }
+        return base + now.timeIntervalSince(media.positionStamp)
+    }
+
+    private var currentIndex: Int {
+        let p = position
+        var idx = -1
+        for (i, line) in lyrics.lines.enumerated() where line.time <= p { idx = i }
+        return idx
+    }
+
+    private var ticker: some View {
+        let i = currentIndex
+        return VStack(alignment: .leading, spacing: 7) {
+            lyricLine(i, current: true)
+            lyricLine(i + 1)
+            lyricLine(i + 2)
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.top, 4)
+        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: i)
+    }
+
+    @ViewBuilder
+    private func lyricLine(_ idx: Int, current: Bool = false) -> some View {
+        if idx >= 0, idx < lyrics.lines.count {
+            let line = lyrics.lines[idx]
+            Text(line.text)
+                .font(.system(size: current ? 15 : 13,
+                              weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(current ? 1 : 0.25))
+                .blur(radius: current ? 0 : 0.7)
+                .lineLimit(current ? 2 : 1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { media.seek(to: line.time) }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .id("\(line.id)-\(current)")
+        } else if idx == -1, current {
+            // Intro before the first line: show what's coming, dimmed.
+            Text("…")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.4))
+        }
     }
 }
 

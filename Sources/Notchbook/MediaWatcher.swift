@@ -50,6 +50,9 @@ final class MediaWatcher: ObservableObject {
     /// 90 seconds after pausing, the island ear hides (session stays alive).
     @Published var earHidden = false
     @Published var shuffleOn = false
+    /// Wall-clock stamp of the last position poll — lets views interpolate
+    /// a smooth position between the 1 Hz polls.
+    private(set) var positionStamp = Date.distantPast
     /// "off" | "all" | "one" (Spotify only knows off/all)
     @Published var repeatMode = "off"
 
@@ -245,6 +248,7 @@ final class MediaWatcher: ObservableObject {
               let pos = Double(parts[0]), var dur = Double(parts[1]) else { return }
         if np.source == .spotify { dur /= 1000 }  // Spotify reports ms
         position = pos
+        positionStamp = Date()
         duration = dur
         if parts.count == 4 {
             shuffleOn = parts[2] == "true"
@@ -375,6 +379,14 @@ final class MediaWatcher: ObservableObject {
             nowPlaying = np
         }
         control("playpause")
+    }
+
+    /// Jump the player to an absolute position (lyrics tap-to-seek).
+    func seek(to seconds: Double) {
+        guard let np = nowPlaying, np.source != .youtube else { return }
+        fireScript("tell application \"\(np.source.rawValue)\" to set player position to \(Int(seconds))")
+        position = seconds
+        positionStamp = Date()
     }
 
     func nextTrack() { control("next track") }
