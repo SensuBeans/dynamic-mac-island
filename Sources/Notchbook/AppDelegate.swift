@@ -59,7 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // edge — starts at y = 0; handle both orientations to be safe.
         host.islandRect = { [weak self] in
             guard let self else { return .zero }
-            let s: CGSize
+            var s: CGSize
             let x: CGFloat
             if self.state.isExpanded {
                 let onMirror = self.state.currentTab == .mirror
@@ -67,6 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     ? self.metrics.trayExpandedSize(itemCount: self.tray.items.count)
                     : self.metrics.expandedSize(zoomed: onMirror,
                                                 large: onMirror && self.state.mirrorBig)
+                // The panel floats below the notch — the interactive rect
+                // bridges notch, gap, and panel so crossing the gap doesn't
+                // read as leaving the island.
+                s.height += self.metrics.notchHeight + NotchMetrics.islandGap * 2
+                    + NotchMetrics.navIslandHeight
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: onMirror,
                                                   large: onMirror && self.state.mirrorBig)
@@ -444,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopMouseWatch()
         state.isExpanded = false
         state.pinned = false
+        state.navHovered = false
         state.mirrorBig = false
         state.saveNow()
         mirror.stop()
@@ -458,7 +464,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
-            if !visible.contains(NSEvent.mouseLocation), !self.state.pinned {
+            let mouse = NSEvent.mouseLocation
+            // The nav dock lives in the bottom strip of the island stack
+            // (screen coords are bottom-up); it shows only while the cursor
+            // is down there or a swipe is in flight.
+            let navZone = NSRect(x: visible.minX, y: visible.minY,
+                                 width: visible.width,
+                                 height: NotchMetrics.navIslandHeight
+                                     + NotchMetrics.islandGap + 16)
+            let inNav = navZone.contains(mouse)
+            if self.state.navHovered != inNav { self.state.navHovered = inNav }
+            if !visible.contains(mouse), !self.state.pinned {
                 self.collapse()
             }
         }

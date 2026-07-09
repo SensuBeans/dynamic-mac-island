@@ -49,6 +49,9 @@ final class MediaWatcher: ObservableObject {
     @Published var youtubeJSBlocked = false
     /// 90 seconds after pausing, the island ear hides (session stays alive).
     @Published var earHidden = false
+    @Published var shuffleOn = false
+    /// "off" | "all" | "one" (Spotify only knows off/all)
+    @Published var repeatMode = "off"
 
     private var earHideWork: DispatchWorkItem?
     private var earCancellable: AnyCancellable?
@@ -223,10 +226,13 @@ final class MediaWatcher: ObservableObject {
 
     private func pollProgress() {
         guard let np = nowPlaying, np.source != .youtube, isRunning(np.source) else { return }
+        let modeExpr = np.source == .music
+            ? "(shuffle enabled as text) & \"|\" & (song repeat as text)"
+            : "(shuffling as text) & \"|\" & (repeating as text)"
         let script = """
         tell application "\(np.source.rawValue)"
             try
-                return (player position as text) & "|" & ((duration of current track) as text)
+                return (player position as text) & "|" & ((duration of current track) as text) & "|" & \(modeExpr)
             on error
                 return ""
             end try
@@ -235,11 +241,17 @@ final class MediaWatcher: ObservableObject {
         guard let out = runAppleScript(script)?.stringValue, !out.isEmpty else { return }
         let parts = out.components(separatedBy: "|")
             .map { $0.replacingOccurrences(of: ",", with: ".") }
-        guard parts.count == 2,
+        guard parts.count >= 2,
               let pos = Double(parts[0]), var dur = Double(parts[1]) else { return }
         if np.source == .spotify { dur /= 1000 }  // Spotify reports ms
         position = pos
         duration = dur
+        if parts.count == 4 {
+            shuffleOn = parts[2] == "true"
+            repeatMode = np.source == .music
+                ? parts[3]
+                : (parts[3] == "true" ? "all" : "off")
+        }
     }
 
     private func isRunning(_ source: Source) -> Bool {
@@ -367,6 +379,34 @@ final class MediaWatcher: ObservableObject {
 
     func nextTrack() { control("next track") }
     func previousTrack() { control("previous track") }
+
+    func toggleShuffle() {
+        guard let np = nowPlaying, np.source != .youtube else { return }
+        shuffleOn.toggle()  // optimistic; the 1 Hz poll confirms
+        let script = np.source == .music
+            ? "tell application \"Music\" to set shuffle enabled to \(shuffleOn)"
+            : "tell application \"Spotify\" to set shuffling to \(shuffleOn)"
+        fireScript(script)
+    }
+
+    /// off → all → one → off on Music; off ↔ all on Spotify.
+    func cycleRepeat() {
+        guard let np = nowPlaying, np.source != .youtube else { return }
+        if np.source == .music {
+            repeatMode = ["off": "all", "all": "one"][repeatMode] ?? "off"
+            fireScript("tell application \"Music\" to set song repeat to \(repeatMode)")
+        } else {
+            repeatMode = repeatMode == "off" ? "all" : "off"
+            fireScript("tell application \"Spotify\" to set repeating to \(repeatMode == "all")")
+        }
+    }
+
+    private func fireScript(_ script: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", script]
+        try? p.run()
+    }
 
     /// Players get AppleScript; YouTube gets the system media keys (the
     /// same events the hardware F7/F8/F9 keys send, which its player obeys).

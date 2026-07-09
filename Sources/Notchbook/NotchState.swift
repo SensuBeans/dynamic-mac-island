@@ -48,6 +48,9 @@ final class NotchState: ObservableObject {
     /// Pinned: the panel ignores mouse-leave and stays expanded until the
     /// user unpins it (or presses Esc).
     @Published var pinned = false
+    /// Cursor is over the nav dock's strip below the panel (drives its
+    /// show/hide — the dock stays hidden until summoned).
+    @Published var navHovered = false
     @Published var currentPage = 0
     @Published var currentTab: NotchTab = .media
     /// Mirror at double size ("twice as big") — toggled from the mirror

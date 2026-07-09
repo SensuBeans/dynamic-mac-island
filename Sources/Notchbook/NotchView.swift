@@ -48,55 +48,49 @@ struct NotchView: View {
         // pixels, and a visible black bar looks bad during Space swipes. The
         // island only materializes when it has something to show.
         let collapsedVisible = hasMedia || hasToast
+        // The nav dock appears on hover over its strip or mid tab-swipe.
+        let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
+        let gap = NotchMetrics.islandGap
+        let totalExpandedHeight = metrics.notchHeight + gap
+            + NotchMetrics.navIslandHeight + gap + expandedSize.height
         return ZStack(alignment: .top) {
-            // Apple-style frosted glass: black fades from opaque (collapsed
-            // island matches the physical notch) to a dark tint over blur.
-            if state.isExpanded || collapsedVisible {
-                VisualEffectBlur()
+            // Collapsed bar: hugs the notch silhouette, hosts the ears.
+            // Fully invisible when idle — the hardware notch covers it.
+            ZStack(alignment: .top) {
+                if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
             }
-            Color.black.opacity(state.isExpanded ? 0.32 : (collapsedVisible ? 1 : 0))
-            // Ambient glow: the album cover, blown up and heavily blurred,
-            // tints the whole panel with the artwork's palette (media tab).
-            // While music plays it breathes with the song's loudness.
-            if state.isExpanded, state.currentTab == .media, let art = media.artwork {
-                let pulse = ambientPulse
-                // Two counter-rotating copies of the cover: their color
-                // regions slide past each other so the palette wanders
-                // around the panel instead of sitting still. Square layers
-                // bigger than the panel's diagonal never expose an edge.
-                ZStack {
-                    ambientLayer(art, side: size.width)
-                        .scaleEffect(1.6 + 0.25 * pulse)
-                        .rotationEffect(.degrees(colorPhase))
-                    ambientLayer(art, side: size.width)
-                        .scaleEffect(1.95 + 0.3 * pulse)
-                        .rotationEffect(.degrees(140 - colorPhase * 1.6))
-                        .offset(x: 30 * cos(colorPhase / 40),
-                                y: 18 * sin(colorPhase / 47))
-                        .opacity(0.6)
-                }
-                .blur(radius: 46)
-                .saturation(1.5 + 0.5 * pulse)
-                .opacity(0.32 + 0.2 * pulse)
-                .frame(width: size.width, height: size.height)
-                .allowsHitTesting(false)
-                .animation(.linear(duration: 0.14), value: colorPhase)
-                .animation(.easeOut(duration: 0.16), value: pulse)
-                .transition(.opacity)
+            .frame(width: metrics.collapsedSize(withMedia: hasMedia,
+                                                toast: hasToast).width,
+                   height: metrics.notchHeight)
+            .overlay(alignment: .top) { ears }
+            .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
+                                  bottomRadius: 10))
+            .opacity(state.isExpanded ? 0 : 1)
+
+            // Expanded: the nav bar and the content panel are each their
+            // OWN floating island, stacked below the notch.
+            VStack(spacing: gap) {
+                contentIsland(size: expandedSize)
+                    .frame(width: expandedSize.width, height: expandedSize.height)
+                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+                navIsland
+                    .frame(height: NotchMetrics.navIslandHeight)
+                    .opacity(navShown ? 1 : 0)
+                    .offset(y: navShown ? 0 : -10)
+                    .allowsHitTesting(navShown)
+                    .animation(.easeOut(duration: 0.18), value: navShown)
             }
-            expandedContent
-                .frame(width: expandedSize.width,
-                       height: expandedSize.height, alignment: .top)
-                .opacity(state.isExpanded ? 1 : 0)
-                .offset(y: state.isExpanded ? 0 : -expandedSize.height)
-                .allowsHitTesting(state.isExpanded)
+            .padding(.top, metrics.notchHeight + gap)
+            .opacity(state.isExpanded ? 1 : 0)
+            .offset(y: state.isExpanded ? 0 : -totalExpandedHeight)
+            .allowsHitTesting(state.isExpanded)
         }
-        .frame(width: size.width, height: size.height)
-        .overlay(alignment: .top) { ears }
-        .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
-                              bottomRadius: state.isExpanded ? 26 : 10))
-        .shadow(color: .black.opacity(state.isExpanded ? 0.55 : 0), radius: 18, y: 8)
-        .opacity(state.spaceTransitioning ? 0 : 1)
+        .frame(width: size.width,
+               height: state.isExpanded ? totalExpandedHeight : size.height,
+               alignment: .top)
+        .opacity(state.spaceTransitioning && !state.pinned ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
         .padding(.leading, metrics.islandLeadingPad(expanded: state.isExpanded,
                                                     zoomed: onMirror,
@@ -111,8 +105,7 @@ struct NotchView: View {
         .onChange(of: media.nowPlaying?.isPlaying) { playing in
             // The tap only listens while the player itself is playing —
             // paused means a still wave, whatever else the system sounds.
-            spectrum.setActive(state.isExpanded && state.currentTab == .media
-                               && playing == true)
+            spectrum.setActive(state.isExpanded && playing == true)
         }
         .onChange(of: spectrum.levels) { levels in
             // Each fresh audio sample nudges the ambient colors along,
@@ -130,8 +123,7 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
-            spectrum.setActive(expanded && state.currentTab == .media
-                               && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(expanded && media.nowPlaying?.isPlaying == true)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
             if expanded && state.currentTab == .mirror {
@@ -142,8 +134,7 @@ struct NotchView: View {
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
-            spectrum.setActive(state.isExpanded && tab == .media
-                               && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(state.isExpanded && media.nowPlaying?.isPlaying == true)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
@@ -305,32 +296,71 @@ struct NotchView: View {
 
     // MARK: - Expanded panel
 
+    /// The nav bar as its own floating capsule island: tabs + pin + quit.
+    private var navIsland: some View {
+        HStack(spacing: 10) {
+            tabBar
+            Button { state.pinned.toggle() } label: {
+                Image(systemName: state.pinned ? "pin.fill" : "pin")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
+                    .rotationEffect(.degrees(state.pinned ? 0 : 45))
+            }
+            .buttonStyle(.plain)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
+            .help(state.pinned ? "Unpin — collapse when the mouse leaves"
+                               : "Pin the panel open")
+            Button { state.onQuit?() } label: {
+                Image(systemName: "power")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            .buttonStyle(.plain)
+            .help("Quit Notchbook")
+        }
+        .padding(.horizontal, 12)
+        .frame(maxHeight: .infinity)
+        .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.32) } }
+        .clipShape(Capsule())
+        .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+    }
+
+    /// The content panel island: frosted glass, ambient album glow, the tab.
+    private func contentIsland(size: CGSize) -> some View {
+        ZStack(alignment: .top) {
+            VisualEffectBlur()
+            Color.black.opacity(0.32)
+            // Ambient glow: the album cover, blown up and heavily blurred,
+            // tints the panel with the artwork's palette on every tab.
+            // While music plays it breathes with the song's loudness.
+            if let art = media.artwork {
+                let pulse = ambientPulse
+                ZStack {
+                    ambientLayer(art, side: size.width)
+                        .scaleEffect(1.6 + 0.25 * pulse)
+                        .rotationEffect(.degrees(colorPhase))
+                    ambientLayer(art, side: size.width)
+                        .scaleEffect(1.95 + 0.3 * pulse)
+                        .rotationEffect(.degrees(140 - colorPhase * 1.6))
+                        .offset(x: 30 * cos(colorPhase / 40),
+                                y: 18 * sin(colorPhase / 47))
+                        .opacity(0.6)
+                }
+                .blur(radius: 46)
+                .saturation(1.5 + 0.5 * pulse)
+                .opacity(0.32 + 0.2 * pulse)
+                .frame(width: size.width, height: size.height)
+                .allowsHitTesting(false)
+                .animation(.linear(duration: 0.14), value: colorPhase)
+                .animation(.easeOut(duration: 0.16), value: pulse)
+            }
+            expandedContent
+                .frame(width: size.width, height: size.height, alignment: .top)
+        }
+    }
+
     private var expandedContent: some View {
         VStack(spacing: 10) {
-            ZStack {
-                tabBar
-                HStack(spacing: 10) {
-                    Spacer()
-                    Button { state.pinned.toggle() } label: {
-                        Image(systemName: state.pinned ? "pin.fill" : "pin")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
-                            .rotationEffect(.degrees(state.pinned ? 0 : 45))
-                    }
-                    .buttonStyle(.plain)
-                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
-                    .help(state.pinned ? "Unpin — collapse when the mouse leaves"
-                                       : "Pin the panel open")
-                    Button { state.onQuit?() } label: {
-                        Image(systemName: "power")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.4))
-                    }
-                    .buttonStyle(.plain)
-                    .help("Quit Notchbook")
-                }
-            }
-
             Group {
                 switch state.currentTab {
                 case .notes: NotesTab(focus: $editorFocused)
@@ -352,7 +382,7 @@ struct NotchView: View {
                        value: state.tabSwipeProgress)
         }
         .padding(.horizontal, 16)
-        .padding(.top, metrics.notchHeight + 8)
+        .padding(.top, 12)
         .padding(.bottom, 14)
     }
 

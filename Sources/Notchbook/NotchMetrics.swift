@@ -13,6 +13,10 @@ struct NotchMetrics {
     /// The hover/expand trigger zone: the physical notch bounds, exactly.
     var hoverZoneSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     static let topFlare: CGFloat = 6
+    /// Gap between the physical notch and the floating expanded island.
+    static let islandGap: CGFloat = 6
+    /// Height of the floating nav-bar island.
+    static let navIslandHeight: CGFloat = 34
 
     static let expandedContentSize = CGSize(width: 460, height: 158)
     /// Larger island used while the mirror is zoomed.
@@ -64,8 +68,12 @@ struct NotchMetrics {
         let content = large ? mirrorLargeContentSize
                     : zoomed ? Self.zoomedContentSize
                     : Self.expandedContentSize
+        // The panel floats BELOW the notch as its own island, so its height
+        // is just the content plus a small top pad (no notch strip).
+        // The nav bar lives in its own island above, so the content panel
+        // sheds the old in-panel tab bar (24pt) + spacing (10pt).
         return CGSize(width: max(content.width, collapsedSize(withMedia: true).width),
-                      height: notchHeight + content.height)
+                      height: content.height - 30)
     }
 
     /// The tray hugs its content like a proper drop shelf: one row of files
@@ -79,7 +87,7 @@ struct NotchMetrics {
         let grid = CGFloat(rows) * 74 + CGFloat(rows - 1) * 8
         let content = min(Self.expandedContentSize.height, 56 + grid + 28)
         var size = expandedSize()
-        size.height = notchHeight + content
+        size.height = content - 30
         return size
     }
 
@@ -91,7 +99,7 @@ struct NotchMetrics {
     var windowFrame: NSRect {
         let biggest = expandedSize(zoomed: true, large: true)
         let size = CGSize(width: biggest.width + Self.shadowPad * 2,
-                          height: biggest.height + Self.shadowPad)
+                          height: biggest.height + Self.shadowPad + 90)
         let f = screen.frame
         return NSRect(x: f.midX - size.width / 2,
                       y: f.maxY - size.height,

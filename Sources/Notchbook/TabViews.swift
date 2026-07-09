@@ -169,6 +169,14 @@ struct MediaTab: View {
                     }
                     Spacer(minLength: 2)
                     HStack(spacing: 24) {
+                        if np.source != .youtube {
+                            Button { media.toggleShuffle() } label: {
+                                Image(systemName: "shuffle")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(media.shuffleOn ? 0.95 : 0.35))
+                            }
+                            .help("Shuffle")
+                        }
                         Button { media.previousTrack() } label: {
                             Image(systemName: "backward.fill").font(.system(size: 12))
                         }
@@ -179,6 +187,14 @@ struct MediaTab: View {
                         }
                         Button { media.nextTrack() } label: {
                             Image(systemName: "forward.fill").font(.system(size: 12))
+                        }
+                        if np.source != .youtube {
+                            Button { media.cycleRepeat() } label: {
+                                Image(systemName: media.repeatMode == "one" ? "repeat.1" : "repeat")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(media.repeatMode == "off" ? 0.35 : 0.95))
+                            }
+                            .help("Repeat: off → all → one")
                         }
                     }
                     .buttonStyle(.plain)
