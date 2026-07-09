@@ -9,6 +9,7 @@ struct NotchView: View {
     @EnvironmentObject var mirror: MirrorController
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var stats: StatsModel
+    @EnvironmentObject var pomodoro: PomodoroModel
     let metrics: NotchMetrics
 
     @FocusState private var editorFocused: Bool
@@ -24,7 +25,7 @@ struct NotchView: View {
     }
 
     private var island: some View {
-        let hasMedia = media.nowPlaying != nil && !media.earHidden
+        let hasMedia = (media.nowPlaying != nil && !media.earHidden) || pomodoro.isRunning
         let hasToast = state.toast != nil
         let expandedSize = metrics.expandedSize(zoomed: state.mirrorZoomed)
         let size = state.isExpanded
@@ -118,6 +119,29 @@ struct NotchView: View {
                         }
                     }
                     .frame(width: 150, alignment: .leading)
+                }
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity)
+                .frame(height: metrics.notchHeight)
+                .transition(.opacity)
+            } else if pomodoro.isRunning, media.nowPlaying == nil || media.earHidden,
+                      !state.isExpanded {
+                // Live countdown while the pomodoro runs.
+                HStack(spacing: 5) {
+                    Spacer()
+                    ZStack {
+                        Circle().stroke(.white.opacity(0.25), lineWidth: 2)
+                        Circle()
+                            .trim(from: 0, to: max(0.02, pomodoro.progress))
+                            .stroke(pomodoro.phase == .focus ? Color.orange : .green,
+                                    style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                            .rotationEffect(.degrees(-90))
+                    }
+                    .frame(width: 13, height: 13)
+                    Text(pomodoro.timeString)
+                        .font(.system(size: 11, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(pomodoro.phase == .focus ? Color.orange : .green)
                 }
                 .padding(.trailing, 10)
                 .frame(maxWidth: .infinity)
@@ -217,6 +241,7 @@ struct NotchView: View {
             Group {
                 switch state.currentTab {
                 case .notes: NotesTab(focus: $editorFocused)
+                case .timer: TimerTab()
                 case .media: MediaTab()
                 case .tray: TrayTab()
                 case .calendar: CalendarTab()

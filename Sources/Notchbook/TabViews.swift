@@ -300,6 +300,96 @@ private struct LaunchButton: View {
     }
 }
 
+// MARK: - Timer (Pomodoro)
+
+struct TimerTab: View {
+    @EnvironmentObject var pomodoro: PomodoroModel
+
+    var body: some View {
+        HStack(spacing: 24) {
+            ZStack {
+                Circle().stroke(.white.opacity(0.12), lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: max(0.003, pomodoro.progress))
+                    .stroke(pomodoro.phase == .focus ? Color.orange : .green,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.linear(duration: 1), value: pomodoro.progress)
+                VStack(spacing: 2) {
+                    Text(pomodoro.timeString)
+                        .font(.system(size: 26, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                    Text(pomodoro.phase == .focus ? "FOCUS" : "BREAK")
+                        .font(.system(size: 9, weight: .semibold))
+                        .kerning(1)
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .frame(width: 132, height: 132)
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 5) {
+                    ForEach(0..<4, id: \.self) { i in
+                        Circle()
+                            .fill(i < pomodoro.sessions % 4 || (pomodoro.sessions > 0 && pomodoro.sessions % 4 == 0)
+                                  ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.2)))
+                            .frame(width: 6, height: 6)
+                    }
+                    Text("\(pomodoro.sessions) done")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .padding(.leading, 4)
+                }
+
+                HStack(spacing: 14) {
+                    Button { pomodoro.startPause() } label: {
+                        Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 20))
+                            .frame(width: 24)
+                    }
+                    Button { pomodoro.reset() } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 14))
+                    }
+                    .help("Reset")
+                    Button { pomodoro.skip() } label: {
+                        Image(systemName: "forward.end.fill")
+                            .font(.system(size: 13))
+                    }
+                    .help("Skip phase")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+
+                HStack(spacing: 6) {
+                    ForEach([15, 25, 45], id: \.self) { m in
+                        Button {
+                            pomodoro.focusMinutes = m
+                        } label: {
+                            Text("\(m)m")
+                                .font(.system(size: 10, weight: .medium))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Capsule().fill(pomodoro.focusMinutes == m
+                                        ? .white.opacity(0.85) : .white.opacity(0.08))
+                                )
+                                .foregroundStyle(pomodoro.focusMinutes == m
+                                    ? .black : .white.opacity(0.7))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Text("+ 5m break")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+}
+
 // MARK: - Files tray
 
 struct TrayTab: View {

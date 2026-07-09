@@ -12,12 +12,13 @@ struct NotchToast: Equatable {
 }
 
 enum NotchTab: String, CaseIterable {
-    case media, notes, tray, calendar, mirror, stats, toggles
+    case media, notes, timer, tray, calendar, mirror, stats, toggles
 
     var icon: String {
         switch self {
         case .notes: return "note.text"
         case .media: return "music.note"
+        case .timer: return "timer"
         case .tray: return "tray.full"
         case .calendar: return "calendar"
         case .mirror: return "web.camera"
@@ -30,6 +31,7 @@ enum NotchTab: String, CaseIterable {
         switch self {
         case .notes: return "Notes"
         case .media: return "Media"
+        case .timer: return "Timer"
         case .tray: return "Tray"
         case .calendar: return "Calendar"
         case .mirror: return "Mirror"

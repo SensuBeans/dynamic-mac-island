@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let mirror = MirrorController()
     private let toggles = TogglesModel()
     private let stats = StatsModel()
+    private let pomodoro = PomodoroModel()
 
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
@@ -64,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: self.state.mirrorZoomed)
             } else {
-                s = self.metrics.collapsedSize(withMedia: self.media.nowPlaying != nil && !self.media.earHidden,
+                s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || self.pomodoro.isRunning,
                                                toast: self.state.toast != nil)
                 x = self.metrics.islandLeadingPad(expanded: false)
             }
@@ -108,6 +109,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in self?.rebuildMetrics() })
 
         setupToasts()
+
+        pomodoro.onPhaseEnd = { [weak self] ended in
+            NSSound(named: "Glass")?.play()
+            self?.state.showToast(NotchToast(
+                icon: ended == .focus ? "cup.and.saucer.fill" : "brain.head.profile",
+                title: ended == .focus ? "Focus done" : "Break over",
+                subtitle: ended == .focus ? "Take a break" : "Back to work",
+                color: ended == .focus ? .green : .orange), duration: 4)
+        }
 
         // Hide the island the moment a 4-finger gesture lands — catches
         // Space swipes at their START (wallpaper polling covers the tail).
@@ -237,7 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(calendarModel)
             .environmentObject(mirror)
             .environmentObject(toggles)
-            .environmentObject(stats))
+            .environmentObject(stats)
+            .environmentObject(pomodoro))
     }
 
     /// Expand on hover, effectively instantly. SwiftUI can drop hover-exit
