@@ -109,6 +109,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupToasts()
 
+        // Hide the island the moment a 3+-finger gesture lands — catches
+        // Space swipes at their START (wallpaper polling covers the tail).
+        TouchSensor.start()
+        TouchSensor.onFingerCount = { [weak self] fingers in
+            guard let self, !self.state.isExpanded else { return }
+            if fingers >= 3 {
+                self.spaceWork?.cancel()
+                self.state.spaceTransitioning = true
+            } else if self.state.spaceTransitioning {
+                self.spaceWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    self?.state.spaceTransitioning = false
+                }
+                self.spaceWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            }
+        }
+
         // Vanish during Space switches so swipes between desktops look clean.
         observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
