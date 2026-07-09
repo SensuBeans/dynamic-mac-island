@@ -61,7 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s: CGSize
             let x: CGFloat
             if self.state.isExpanded {
-                s = self.metrics.expandedSize(zoomed: self.state.mirrorZoomed)
+                s = self.state.currentTab == .tray
+                    ? self.metrics.trayExpandedSize(itemCount: self.tray.items.count)
+                    : self.metrics.expandedSize(zoomed: self.state.mirrorZoomed)
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: self.state.mirrorZoomed)
             } else {

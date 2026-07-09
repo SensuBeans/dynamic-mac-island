@@ -27,7 +27,9 @@ struct NotchView: View {
     private var island: some View {
         let hasMedia = (media.nowPlaying != nil && !media.earHidden) || pomodoro.isRunning
         let hasToast = state.toast != nil
-        let expandedSize = metrics.expandedSize(zoomed: state.mirrorZoomed)
+        let expandedSize = state.currentTab == .tray
+            ? metrics.trayExpandedSize(itemCount: tray.items.count)
+            : metrics.expandedSize(zoomed: state.mirrorZoomed)
         let size = state.isExpanded
             ? expandedSize
             : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
@@ -62,6 +64,8 @@ struct NotchView: View {
                                                     zoomed: state.mirrorZoomed))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorZoomed)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)

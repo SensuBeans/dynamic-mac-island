@@ -56,6 +56,21 @@ struct NotchMetrics {
                       height: notchHeight + content.height)
     }
 
+    /// The tray hugs its content like a proper drop shelf: one row of files
+    /// keeps the panel short; more rows grow it up to the standard height,
+    /// after which the grid scrolls.
+    func trayExpandedSize(itemCount: Int) -> CGSize {
+        let columns = 5  // 72pt tiles + 10pt gaps in the 428pt content width
+        let rows = max(1, (itemCount + columns - 1) / columns)
+        // 80pt per tile row (tile + label), 10pt between rows; 38pt footer
+        // block; 56pt tab bar + paddings.
+        let grid = CGFloat(rows) * 80 + CGFloat(rows - 1) * 10
+        let content = min(Self.expandedContentSize.height, 56 + grid + 38)
+        var size = expandedSize()
+        size.height = notchHeight + content
+        return size
+    }
+
     /// The ONE window frame: fixed and centered, sized for the expanded
     /// island plus shadow margins. The window never moves or resizes — the
     /// island animates inside it, so transitions can never visually snap.
