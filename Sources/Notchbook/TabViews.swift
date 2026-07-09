@@ -148,14 +148,20 @@ struct MediaTab: View {
                                 .foregroundStyle(.white.opacity(0.55))
                                 .lineLimit(1)
                         }
-                        Spacer(minLength: 4)
                         Button { media.playPause() } label: {
-                            EqualizerBars(barCount: 4, barWidth: 2.5, maxHeight: 12,
-                                          color: media.accent,
-                                          animating: np.isPlaying && state.isExpanded)
-                                .padding(.top, 2)
+                            // Fill whatever width the title leaves over with
+                            // waveform bars — the count adapts to the gap.
+                            GeometryReader { geo in
+                                EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
+                                              barWidth: 2.5, maxHeight: 26,
+                                              color: media.accent,
+                                              animating: np.isPlaying && state.isExpanded)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            }
                         }
                         .buttonStyle(.plain)
+                        .frame(height: 36)
+                        .padding(.leading, 6)
                         .help(np.isPlaying ? "Pause" : "Play")
                     }
                     Spacer(minLength: 2)
