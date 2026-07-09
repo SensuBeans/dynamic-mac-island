@@ -2,11 +2,21 @@ import AVFoundation
 import SwiftUI
 
 /// One-click webcam preview ("check yourself before the call").
-final class MirrorController: ObservableObject {
+final class MirrorController: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var denied = false
 
     let session = AVCaptureSession()
+    /// ONE preview layer for the app's lifetime. Creating a fresh layer per
+    /// tab visit re-plumbed the running session's connection graph each time,
+    /// which made AVFoundation throw runtime errors on the second visit —
+    /// camera "running" but drawing nothing (a dead mirror page). Host views
+    /// borrow this layer; the session graph never changes after setup.
+    lazy var previewLayer: AVCaptureVideoPreviewLayer = {
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        return layer
+    }()
     private var configured = false
     /// User intent, distinct from isRunning: start() flips it on before its
     /// async permission/session work, stop() flips it off — so a stop can
@@ -16,6 +26,32 @@ final class MirrorController: ObservableObject {
     /// Serial queue so start/stop can never interleave — a stop racing a
     /// start on a concurrent queue left the session in a broken state.
     private let sessionQueue = DispatchQueue(label: "notchbook.mirror.session")
+
+    override init() {
+        super.init()
+        // The session can die under us (another app grabs the camera, a
+        // runtime error). Without these the tab keeps showing a dead preview
+        // until relaunch — recover whenever the user still wants the camera.
+        let center = NotificationCenter.default
+        center.addObserver(forName: .AVCaptureSessionRuntimeError,
+                           object: session, queue: .main) { [weak self] _ in
+            guard let self, self.wantsRunning else { return }
+            self.isRunning = false
+            // Delayed single retry — an immediate restart here once produced
+            // a tight error→restart loop that recreated the preview per tick.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, self.wantsRunning, !self.isRunning else { return }
+                self.start()
+            }
+        }
+        center.addObserver(forName: .AVCaptureSessionInterruptionEnded,
+                           object: session, queue: .main) { [weak self] _ in
+            guard let self, self.wantsRunning else { return }
+            self.sessionQueue.async {
+                if !self.session.isRunning { self.session.startRunning() }
+            }
+        }
+    }
 
     /// Restart after a collapse: only if permission is already granted, so
     /// re-expanding the island can never surprise-prompt for the camera.
@@ -34,6 +70,7 @@ final class MirrorController: ObservableObject {
                     self.denied = true
                     return
                 }
+                self.denied = false
                 guard self.wantsRunning else { return }
                 if !self.configured {
                     self.session.sessionPreset = .medium
@@ -48,7 +85,14 @@ final class MirrorController: ObservableObject {
                 self.sessionQueue.async {
                     if !self.session.isRunning { self.session.startRunning() }
                     DispatchQueue.main.async {
-                        if self.wantsRunning { self.isRunning = true }
+                        guard self.wantsRunning else { return }
+                        self.isRunning = true
+                        // Selfie mirroring — the connection only exists once
+                        // the session is configured, so apply it here.
+                        if let c = self.previewLayer.connection, c.isVideoMirroringSupported {
+                            c.automaticallyAdjustsVideoMirroring = false
+                            c.isVideoMirrored = true
+                        }
                     }
                 }
             }
@@ -65,31 +109,38 @@ final class MirrorController: ObservableObject {
 }
 
 struct CameraPreview: NSViewRepresentable {
-    let session: AVCaptureSession
+    let layer: AVCaptureVideoPreviewLayer
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        view.wantsLayer = true
-        let layer = AVCaptureVideoPreviewLayer(session: session)
-        layer.videoGravity = .resizeAspectFill
-        layer.frame = view.bounds
-        layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        mirror(layer)
-        view.layer?.addSublayer(layer)
-        return view
-    }
+    /// Hosts the controller's persistent preview layer (adopting a layer
+    /// steals it from any previous superlayer, so at most one view shows it)
+    /// and sizes it in layout() so it can never be left at a stale frame —
+    /// autoresizingMask alone missed views created at their final size.
+    final class PreviewView: NSView {
+        let previewLayer: AVCaptureVideoPreviewLayer
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        if let layer = nsView.layer?.sublayers?.first as? AVCaptureVideoPreviewLayer {
-            layer.frame = nsView.bounds
-            mirror(layer)
+        init(layer: AVCaptureVideoPreviewLayer) {
+            previewLayer = layer
+            super.init(frame: .zero)
+            wantsLayer = true
+            self.layer?.addSublayer(layer)
+        }
+
+        required init?(coder: NSCoder) { nil }
+
+        override func layout() {
+            super.layout()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            previewLayer.frame = bounds
+            CATransaction.commit()
         }
     }
 
-    private func mirror(_ layer: AVCaptureVideoPreviewLayer) {
-        if let connection = layer.connection, connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = true
-        }
+    func makeNSView(context: Context) -> PreviewView {
+        PreviewView(layer: layer)
+    }
+
+    func updateNSView(_ nsView: PreviewView, context: Context) {
+        nsView.needsLayout = true
     }
 }

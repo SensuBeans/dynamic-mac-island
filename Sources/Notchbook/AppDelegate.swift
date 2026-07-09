@@ -62,11 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s: CGSize
             let x: CGFloat
             if self.state.isExpanded {
+                let onMirror = self.state.currentTab == .mirror
                 s = self.state.currentTab == .tray
                     ? self.metrics.trayExpandedSize(itemCount: self.tray.items.count)
-                    : self.metrics.expandedSize(zoomed: self.state.mirrorZoomed)
+                    : self.metrics.expandedSize(zoomed: onMirror,
+                                                large: onMirror && self.state.mirrorBig)
                 x = self.metrics.islandLeadingPad(expanded: true,
-                                                  zoomed: self.state.mirrorZoomed)
+                                                  zoomed: onMirror,
+                                                  large: onMirror && self.state.mirrorBig)
             } else {
                 s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || self.pomodoro.isRunning,
                                                toast: self.state.toast != nil)
@@ -440,7 +443,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard state.isExpanded else { return }
         stopMouseWatch()
         state.isExpanded = false
-        state.mirrorZoomed = false
+        state.pinned = false
+        state.mirrorBig = false
         state.saveNow()
         mirror.stop()
         media.setProgressPolling(false)
@@ -454,7 +458,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
-            if !visible.contains(NSEvent.mouseLocation) { self.collapse() }
+            if !visible.contains(NSEvent.mouseLocation), !self.state.pinned {
+                self.collapse()
+            }
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { _ in check() }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { event in

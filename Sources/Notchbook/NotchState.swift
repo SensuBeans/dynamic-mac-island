@@ -45,10 +45,14 @@ final class NotchState: ObservableObject {
     static let pageCount = 3
 
     @Published var isExpanded = false
+    /// Pinned: the panel ignores mouse-leave and stays expanded until the
+    /// user unpins it (or presses Esc).
+    @Published var pinned = false
     @Published var currentPage = 0
     @Published var currentTab: NotchTab = .media
-    /// Larger island while the mirror is zoomed in.
-    @Published var mirrorZoomed = false
+    /// Mirror at double size ("twice as big") — toggled from the mirror
+    /// overlay, reset whenever the mirror is left.
+    @Published var mirrorBig = false
     /// Cursor is over the collapsed island's sound-wave ear — it morphs
     /// into mini transport controls.
     @Published var earHovered = false

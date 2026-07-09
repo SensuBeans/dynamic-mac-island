@@ -31,9 +31,14 @@ struct NotchView: View {
     private var island: some View {
         let hasMedia = (media.nowPlaying != nil && !media.earHidden) || pomodoro.isRunning
         let hasToast = state.toast != nil
+        // The mirror always gets the big panel — a postage-stamp selfie
+        // preview isn't useful, so the old zoom toggle is gone. Its overlay
+        // button doubles it again (mirrorBig).
+        let onMirror = state.currentTab == .mirror
         let expandedSize = state.currentTab == .tray
             ? metrics.trayExpandedSize(itemCount: tray.items.count)
-            : metrics.expandedSize(zoomed: state.mirrorZoomed)
+            : metrics.expandedSize(zoomed: onMirror,
+                                   large: onMirror && state.mirrorBig)
         let size = state.isExpanded
             ? expandedSize
             : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
@@ -94,12 +99,13 @@ struct NotchView: View {
         .opacity(state.spaceTransitioning ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
         .padding(.leading, metrics.islandLeadingPad(expanded: state.isExpanded,
-                                                    zoomed: state.mirrorZoomed))
+                                                    zoomed: onMirror,
+                                                    large: onMirror && state.mirrorBig))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
-        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorZoomed)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
         .onChange(of: media.nowPlaying?.isPlaying) { playing in
@@ -141,7 +147,7 @@ struct NotchView: View {
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
-                state.mirrorZoomed = false
+                state.mirrorBig = false
             }
         }
     }
@@ -303,8 +309,18 @@ struct NotchView: View {
         VStack(spacing: 10) {
             ZStack {
                 tabBar
-                HStack {
+                HStack(spacing: 10) {
                     Spacer()
+                    Button { state.pinned.toggle() } label: {
+                        Image(systemName: state.pinned ? "pin.fill" : "pin")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
+                            .rotationEffect(.degrees(state.pinned ? 0 : 45))
+                    }
+                    .buttonStyle(.plain)
+                    .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
+                    .help(state.pinned ? "Unpin — collapse when the mouse leaves"
+                                       : "Pin the panel open")
                     Button { state.onQuit?() } label: {
                         Image(systemName: "power")
                             .font(.system(size: 11))

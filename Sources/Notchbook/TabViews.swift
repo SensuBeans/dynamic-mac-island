@@ -666,12 +666,12 @@ struct MirrorTab: View {
     @ViewBuilder
     private var content: some View {
         if mirror.isRunning {
-            CameraPreview(session: mirror.session)
+            CameraPreview(layer: mirror.previewLayer)
                 .clipShape(RoundedRectangle(cornerRadius: 14))
                 .overlay(alignment: .bottomTrailing) {
                     HStack(spacing: 6) {
-                        Button { state.mirrorZoomed.toggle() } label: {
-                            Image(systemName: state.mirrorZoomed
+                        Button { state.mirrorBig.toggle() } label: {
+                            Image(systemName: state.mirrorBig
                                   ? "arrow.down.right.and.arrow.up.left"
                                   : "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 11, weight: .semibold))
@@ -679,11 +679,8 @@ struct MirrorTab: View {
                                 .padding(7)
                                 .background(Circle().fill(.black.opacity(0.55)))
                         }
-                        .help(state.mirrorZoomed ? "Shrink mirror" : "Expand mirror")
-                        Button {
-                            mirror.stop()
-                            state.mirrorZoomed = false
-                        } label: {
+                        .help(state.mirrorBig ? "Shrink mirror" : "Double the mirror")
+                        Button { mirror.stop() } label: {
                             Image(systemName: "xmark")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.white)

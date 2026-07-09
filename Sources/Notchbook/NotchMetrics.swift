@@ -50,8 +50,20 @@ struct NotchMetrics {
         return CGSize(width: notchWidth + Self.wing * 2 + extra, height: notchHeight)
     }
 
-    func expandedSize(zoomed: Bool = false) -> CGSize {
-        let content = zoomed ? Self.zoomedContentSize : Self.expandedContentSize
+    /// "Twice as big" mirror: double the zoomed width, clamped so the island
+    /// (with notch and shadow margins) always fits on the screen.
+    var mirrorLargeContentSize: CGSize {
+        let f = screen.frame
+        return CGSize(width: min(Self.zoomedContentSize.width * 2,
+                                 f.width - Self.shadowPad * 2 - 40),
+                      height: min(Self.zoomedContentSize.height * 2,
+                                  f.height - notchHeight - Self.shadowPad - 80))
+    }
+
+    func expandedSize(zoomed: Bool = false, large: Bool = false) -> CGSize {
+        let content = large ? mirrorLargeContentSize
+                    : zoomed ? Self.zoomedContentSize
+                    : Self.expandedContentSize
         return CGSize(width: max(content.width, collapsedSize(withMedia: true).width),
                       height: notchHeight + content.height)
     }
@@ -77,7 +89,7 @@ struct NotchMetrics {
     /// Clicks in the window's fully transparent areas pass through to the
     /// windows beneath (standard behavior for borderless clear windows).
     var windowFrame: NSRect {
-        let biggest = expandedSize(zoomed: true)
+        let biggest = expandedSize(zoomed: true, large: true)
         let size = CGSize(width: biggest.width + Self.shadowPad * 2,
                           height: biggest.height + Self.shadowPad)
         let f = screen.frame
@@ -89,8 +101,9 @@ struct NotchMetrics {
     /// Leading padding of the island inside the fixed window. Collapsed, the
     /// island's left edge sits flush beside the notch (media ear grows right
     /// only); expanded, the panel is centered.
-    func islandLeadingPad(expanded: Bool, zoomed: Bool = false) -> CGFloat {
-        expanded ? (windowFrame.width - expandedSize(zoomed: zoomed).width) / 2
+    func islandLeadingPad(expanded: Bool, zoomed: Bool = false,
+                          large: Bool = false) -> CGFloat {
+        expanded ? (windowFrame.width - expandedSize(zoomed: zoomed, large: large).width) / 2
                  : windowFrame.width / 2 - notchWidth / 2 - Self.wing
     }
 
