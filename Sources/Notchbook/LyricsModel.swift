@@ -46,13 +46,11 @@ final class LyricsModel: ObservableObject {
         request.setValue("DynamicIsland/1.0 (github.com/SensuBeans/dynamic-mac-island)",
                          forHTTPHeaderField: "User-Agent")
         let expected = duration
-        task = URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+        task = URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
             var best: [Line] = []
             var plain = ""
-            var hitCount = -1
             if let data,
                let hits = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                hitCount = hits.count
                 // Prefer synced lyrics whose duration matches the track.
                 let ranked: [(Int, String)] = hits.compactMap { hit in
                     guard let lrc = hit["syncedLyrics"] as? String, !lrc.isEmpty else {
@@ -68,8 +66,6 @@ final class LyricsModel: ObservableObject {
                         .first { !$0.isEmpty } ?? ""
                 }
             }
-            NSLog("lyrics: hits=%d synced=%d plain=%d err=%@", hitCount, best.count,
-                  plain.count, error.map(String.init(describing:)) ?? "none")
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.fetchedKey == key else { return }
                 self.lines = best

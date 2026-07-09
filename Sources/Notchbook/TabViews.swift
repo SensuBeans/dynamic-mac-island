@@ -375,11 +375,14 @@ private struct LyricsTicker: View {
         }
     }
 
-    /// Player position, interpolated between the 1 Hz polls.
+    /// Player position, interpolated between the 1 Hz polls. Reads the
+    /// clock directly: the cached timer date starves under the media tab's
+    /// re-render churn, which froze the computed position (the growing
+    /// stale-now offset cancelled the advancing poll exactly).
     private var position: Double {
         let base = media.position
         guard media.nowPlaying?.isPlaying == true else { return base }
-        return base + now.timeIntervalSince(media.positionStamp)
+        return base + Date().timeIntervalSince(media.positionStamp)
     }
 
     private var currentIndex: Int {
