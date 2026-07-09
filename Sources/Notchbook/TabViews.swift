@@ -304,6 +304,21 @@ private struct LaunchButton: View {
 
 struct TimerTab: View {
     @EnvironmentObject var pomodoro: PomodoroModel
+    @State private var customTime = ""
+
+    private func applyCustomTime() {
+        let parts = customTime.split(separator: ":")
+        var seconds = 0
+        if parts.count == 2, let m = Int(parts[0]), let s = Int(parts[1]) {
+            seconds = m * 60 + s
+        } else if let m = Double(customTime.replacingOccurrences(of: ",", with: ".")) {
+            seconds = Int(m * 60)
+        }
+        if seconds > 0 {
+            pomodoro.setCustomFocus(seconds: min(seconds, 12 * 3600))
+        }
+        customTime = ""
+    }
 
     var body: some View {
         HStack(spacing: 24) {
@@ -381,6 +396,22 @@ struct TimerTab: View {
                         .buttonStyle(.plain)
                     }
                     Text("+ 5m break")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+
+                HStack(spacing: 6) {
+                    TextField("custom · 90 or 12:30", text: $customTime)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .frame(width: 130)
+                        .background(RoundedRectangle(cornerRadius: 6)
+                            .fill(.white.opacity(0.08)))
+                        .onSubmit { applyCustomTime() }
+                    Text("min")
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.35))
                 }

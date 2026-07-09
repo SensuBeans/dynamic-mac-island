@@ -9,14 +9,24 @@ final class PomodoroModel: ObservableObject {
     @Published var remaining: TimeInterval = 25 * 60
     @Published var isRunning = false
     @Published var sessions = 0
-    @Published var focusMinutes = 25 {
-        didSet {
-            if !isRunning, phase == .focus {
-                remaining = TimeInterval(focusMinutes * 60)
-            }
+    @Published var focusDuration: TimeInterval = 25 * 60
+    let restMinutes = 5
+
+    var focusMinutes: Int {
+        get { Int(focusDuration) / 60 }
+        set {
+            focusDuration = TimeInterval(newValue * 60)
+            if !isRunning, phase == .focus { remaining = focusDuration }
         }
     }
-    let restMinutes = 5
+
+    /// Manual entry: any duration in seconds becomes the focus length.
+    func setCustomFocus(seconds: Int) {
+        pause()
+        phase = .focus
+        focusDuration = TimeInterval(seconds)
+        remaining = focusDuration
+    }
 
     /// Called when a phase completes (the ENDED phase is passed).
     var onPhaseEnd: ((Phase) -> Void)?
@@ -29,7 +39,7 @@ final class PomodoroModel: ObservableObject {
     }
 
     var progress: Double {
-        let total = TimeInterval((phase == .focus ? focusMinutes : restMinutes) * 60)
+        let total = phase == .focus ? focusDuration : TimeInterval(restMinutes * 60)
         return total > 0 ? 1 - remaining / total : 0
     }
 
@@ -54,7 +64,7 @@ final class PomodoroModel: ObservableObject {
     func reset() {
         pause()
         phase = .focus
-        remaining = TimeInterval(focusMinutes * 60)
+        remaining = focusDuration
     }
 
     func skip() { advance() }
@@ -72,7 +82,7 @@ final class PomodoroModel: ObservableObject {
             remaining = TimeInterval(restMinutes * 60)
         } else {
             phase = .focus
-            remaining = TimeInterval(focusMinutes * 60)
+            remaining = focusDuration
         }
         onPhaseEnd?(ended)
     }
