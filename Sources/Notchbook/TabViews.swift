@@ -401,7 +401,7 @@ private struct LyricsTicker: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.top, 4)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: i)
+        .animation(.spring(response: 0.55, dampingFraction: 0.9), value: i)
     }
 
     @ViewBuilder
@@ -409,20 +409,25 @@ private struct LyricsTicker: View {
         if idx >= 0, idx < lyrics.lines.count {
             let line = lyrics.lines[idx]
             // Never truncate a lyric: the active line wraps as far as it
-            // needs, the upcoming one gets two lines.
+            // needs, the upcoming one gets two lines. Identity is the LINE
+            // (not line+role), so promotion from "next" to "current" is one
+            // view smoothly animating scale/opacity/position — a fade-up —
+            // rather than a hard swap of two copies.
             Text(line.text)
-                .font(.system(size: current ? 14 : 12,
-                              weight: .bold, design: .rounded))
+                .font(.system(size: 14, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(current ? 1 : 0.25))
                 .blur(radius: current ? 0 : 0.7)
+                .scaleEffect(current ? 1 : 0.86, anchor: .topLeading)
                 .lineLimit(current ? 3 : 2)
                 .minimumScaleFactor(current ? 0.8 : 1)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { media.seek(to: line.time) }
-                .transition(.opacity.combined(with: .move(edge: .bottom)))
-                .id("\(line.id)-\(current)")
+                .transition(.asymmetric(
+                    insertion: .opacity.combined(with: .move(edge: .bottom)),
+                    removal: .opacity.combined(with: .move(edge: .top))))
+                .id(line.id)
         } else if idx == -1, current {
             // Intro before the first line: show what's coming, dimmed.
             Text("…")
