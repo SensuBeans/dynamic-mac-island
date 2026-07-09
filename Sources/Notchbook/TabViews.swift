@@ -130,27 +130,27 @@ struct MediaTab: View {
             // Mirrors Apple's mini-player: artwork left at full card height;
             // title block with a small live waveform beside it, transport
             // centered, progress bar with elapsed/remaining at the bottom.
-            HStack(alignment: .center, spacing: 18) {
+            HStack(alignment: .center, spacing: 14) {
                 artwork
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .top, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 3) {
+                        VStack(alignment: .leading, spacing: 1) {
                             Text(np.source.displayName.uppercased())
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 8, weight: .semibold))
                                 .foregroundStyle(.white.opacity(0.4))
                                 .kerning(0.8)
                             Text(np.title)
-                                .font(.system(size: 17, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.white)
-                                .lineLimit(2)
+                                .lineLimit(1)
                             Text(np.artist)
-                                .font(.system(size: 13))
+                                .font(.system(size: 11))
                                 .foregroundStyle(.white.opacity(0.55))
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 4)
                         Button { media.playPause() } label: {
-                            EqualizerBars(barCount: 4, barWidth: 2.5, maxHeight: 14,
+                            EqualizerBars(barCount: 4, barWidth: 2.5, maxHeight: 12,
                                           color: media.accent,
                                           animating: np.isPlaying && state.isExpanded)
                                 .padding(.top, 2)
@@ -158,24 +158,24 @@ struct MediaTab: View {
                         .buttonStyle(.plain)
                         .help(np.isPlaying ? "Pause" : "Play")
                     }
-                    Spacer(minLength: 6)
-                    HStack(spacing: 30) {
+                    Spacer(minLength: 2)
+                    HStack(spacing: 24) {
                         Button { media.previousTrack() } label: {
-                            Image(systemName: "backward.fill").font(.system(size: 15))
+                            Image(systemName: "backward.fill").font(.system(size: 12))
                         }
                         Button { media.playPause() } label: {
                             Image(systemName: np.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 23))
-                                .frame(width: 28)
+                                .font(.system(size: 18))
+                                .frame(width: 22)
                         }
                         Button { media.nextTrack() } label: {
-                            Image(systemName: "forward.fill").font(.system(size: 15))
+                            Image(systemName: "forward.fill").font(.system(size: 12))
                         }
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: 2)
                     if np.source == .youtube {
                         Text(media.youtubeJSBlocked
                              ? "For volume: Chrome ▸ View ▸ Developer ▸ Allow JavaScript from Apple Events"
@@ -187,10 +187,10 @@ struct MediaTab: View {
                     } else {
                         progressBar
                     }
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 3)
                     volumeRow
                 }
-                .frame(height: 168)
+                .frame(height: 102)
             }
             .padding(.horizontal, 6)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -237,12 +237,12 @@ struct MediaTab: View {
                     .fill(.white.opacity(0.08))
                     .overlay(
                         Image(systemName: "music.note")
-                            .font(.system(size: 36))
+                            .font(.system(size: 24))
                             .foregroundStyle(.white.opacity(0.3))
                     )
             }
         }
-        .frame(width: 168, height: 168)
+        .frame(width: 102, height: 102)
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
     }
@@ -321,29 +321,29 @@ struct TimerTab: View {
     }
 
     var body: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 20) {
             ZStack {
-                Circle().stroke(.white.opacity(0.12), lineWidth: 6)
+                Circle().stroke(.white.opacity(0.12), lineWidth: 5)
                 Circle()
                     .trim(from: 0, to: max(0.003, pomodoro.progress))
                     .stroke(pomodoro.phase == .focus ? Color.orange : .green,
-                            style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 1), value: pomodoro.progress)
-                VStack(spacing: 2) {
+                VStack(spacing: 1) {
                     Text(pomodoro.timeString)
-                        .font(.system(size: 26, weight: .semibold))
+                        .font(.system(size: 20, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white)
                     Text(pomodoro.phase == .focus ? "FOCUS" : "BREAK")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.system(size: 8, weight: .semibold))
                         .kerning(1)
                         .foregroundStyle(.white.opacity(0.45))
                 }
             }
-            .frame(width: 132, height: 132)
+            .frame(width: 98, height: 98)
 
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 5) {
                     ForEach(0..<4, id: \.self) { i in
                         Circle()
@@ -357,20 +357,20 @@ struct TimerTab: View {
                         .padding(.leading, 4)
                 }
 
-                HStack(spacing: 14) {
+                HStack(spacing: 12) {
                     Button { pomodoro.startPause() } label: {
                         Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
-                            .font(.system(size: 20))
-                            .frame(width: 24)
+                            .font(.system(size: 16))
+                            .frame(width: 20)
                     }
                     Button { pomodoro.reset() } label: {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 14))
+                            .font(.system(size: 12))
                     }
                     .help("Reset")
                     Button { pomodoro.skip() } label: {
                         Image(systemName: "forward.end.fill")
-                            .font(.system(size: 13))
+                            .font(.system(size: 11))
                     }
                     .help("Skip phase")
                 }
@@ -384,8 +384,8 @@ struct TimerTab: View {
                         } label: {
                             Text("\(m)m")
                                 .font(.system(size: 10, weight: .medium))
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
                                 .background(
                                     Capsule().fill(pomodoro.focusMinutes == m
                                         ? .white.opacity(0.85) : .white.opacity(0.08))
@@ -403,11 +403,11 @@ struct TimerTab: View {
                 HStack(spacing: 6) {
                     TextField("custom · 90 or 12:30", text: $customTime)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .frame(width: 130)
+                        .padding(.vertical, 3)
+                        .frame(width: 120)
                         .background(RoundedRectangle(cornerRadius: 6)
                             .fill(.white.opacity(0.08)))
                         .onSubmit { applyCustomTime() }
@@ -728,10 +728,10 @@ struct MirrorTab: View {
 struct StatsTab: View {
     @EnvironmentObject var stats: StatsModel
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 6)
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 8) {
+        LazyVGrid(columns: columns, spacing: 6) {
             StatTile(title: "CPU",
                      center: pct(stats.cpu),
                      detail: nil,
@@ -778,40 +778,43 @@ private struct StatTile: View {
     var invertSeverity = false
 
     var body: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 3) {
             ZStack {
                 Circle()
-                    .stroke(.white.opacity(0.12), lineWidth: 4.5)
+                    .stroke(.white.opacity(0.12), lineWidth: 3.5)
                 Circle()
                     .trim(from: 0, to: max(0.02, min(fraction, 1)))
                     .stroke(ringColor,
-                            style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
+                            style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                 Text(center)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                    .padding(.horizontal, 7)
+                    .minimumScaleFactor(0.5)
+                    .padding(.horizontal, 5)
             }
-            .frame(width: 46, height: 46)
+            .frame(width: 38, height: 38)
             .animation(.easeOut(duration: 0.5), value: fraction)
             VStack(spacing: 1) {
                 Text(title.uppercased())
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: 7.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.45))
-                    .kerning(0.6)
+                    .kerning(0.4)
                 if let detail {
                     Text(detail)
-                        .font(.system(size: 8.5))
+                        .font(.system(size: 7))
                         .foregroundStyle(.white.opacity(0.3))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .padding(.vertical, 6)
+        .padding(.horizontal, 2)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
     }
 
     private var ringColor: Color {
@@ -828,8 +831,8 @@ struct TogglesTab: View {
     @EnvironmentObject var toggles: TogglesModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
                 ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
                     toggles.toggleDarkMode()
                 }
@@ -842,7 +845,7 @@ struct TogglesTab: View {
                     toggles.toggleDesktopIcons()
                 }
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if toggles.displaySliderAvailable {
                     BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
                                    read: { toggles.readDisplayBrightness() },
@@ -862,7 +865,7 @@ struct TogglesTab: View {
                                 plus: { toggles.keyboardBacklightUp() })
                 }
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 ToggleCard(icon: "speaker.slash.fill", label: "Mute", active: false) {
                     toggles.toggleMute()
                 }
@@ -873,9 +876,8 @@ struct TogglesTab: View {
                     toggles.screenshot()
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.top, 2)
     }
 }
 
@@ -917,8 +919,8 @@ private struct BrightnessCard: View {
         }
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 42)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
         .onAppear { level = read() }
     }
 }
@@ -952,8 +954,8 @@ private struct StepperCard: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 42)
-        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
     }
 }
 
@@ -965,17 +967,17 @@ private struct ToggleCard: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
+            HStack(spacing: 6) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(.system(size: 12))
                 Text(label)
                     .font(.system(size: 10, weight: .medium))
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 54)
+            .frame(height: 28)
             .foregroundStyle(active ? .black : .white.opacity(0.8))
             .background(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 9)
                     .fill(active ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.08)))
             )
         }

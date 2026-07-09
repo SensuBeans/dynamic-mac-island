@@ -14,7 +14,7 @@ struct NotchMetrics {
     var hoverZoneSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     static let topFlare: CGFloat = 6
 
-    static let expandedContentSize = CGSize(width: 460, height: 240)
+    static let expandedContentSize = CGSize(width: 460, height: 158)
     /// Larger island used while the mirror is zoomed.
     static let zoomedContentSize = CGSize(width: 620, height: 470)
     /// Transparent margin around the expanded shape so its shadow isn't clipped.
