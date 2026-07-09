@@ -96,6 +96,11 @@ struct NotchView: View {
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
             spectrum.setActive(expanded && state.currentTab == .media)
+            // MirrorTab stays mounted while hidden (the panel is opacity-0,
+            // not removed), so its onAppear never re-fires — restart here.
+            if expanded && state.currentTab == .mirror {
+                mirror.resumeIfAuthorized()
+            }
         }
         .onChange(of: state.currentTab) { tab in
             editorFocused = state.isExpanded && tab == .notes

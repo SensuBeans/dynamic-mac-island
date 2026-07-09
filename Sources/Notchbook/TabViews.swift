@@ -662,9 +662,7 @@ struct MirrorTab: View {
             .onAppear {
                 // Once permission is granted, opening the tab IS the intent —
                 // no extra click needed each time.
-                if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
-                    mirror.start()
-                }
+                mirror.resumeIfAuthorized()
             }
     }
 
@@ -737,10 +735,10 @@ struct MirrorTab: View {
 struct StatsTab: View {
     @EnvironmentObject var stats: StatsModel
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 6), count: 6)
-
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 6) {
+        // Plain HStack, not a grid: every tile stretches equally in both
+        // axes so the six cards are always identical and fill the panel.
+        HStack(spacing: 6) {
             StatTile(title: "CPU",
                      center: pct(stats.cpu),
                      detail: nil,
@@ -811,16 +809,16 @@ private struct StatTile: View {
                     .font(.system(size: 7.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.45))
                     .kerning(0.4)
-                if let detail {
-                    Text(detail)
-                        .font(.system(size: 7))
-                        .foregroundStyle(.white.opacity(0.3))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
+                // Always laid out (blank when absent) so tiles with a
+                // sublabel are exactly as tall as tiles without one.
+                Text(detail ?? " ")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.vertical, 6)
         .padding(.horizontal, 2)
         .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
