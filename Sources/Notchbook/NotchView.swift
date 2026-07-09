@@ -32,12 +32,17 @@ struct NotchView: View {
             : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
         // Everything lives inside one container clipped to the notch
         // silhouette, so nothing can ever paint outside the shape.
+        // Fully invisible when idle — the hardware notch already covers those
+        // pixels, and a visible black bar looks bad during Space swipes. The
+        // island only materializes when it has something to show.
+        let collapsedVisible = hasMedia || hasToast
         return ZStack(alignment: .top) {
-            // Apple-style frosted glass: the blur is always underneath, and a
-            // black overlay fades from opaque (collapsed island must match the
-            // physical notch) to a dark tint (expanded panel shows the glass).
-            VisualEffectBlur()
-            Color.black.opacity(state.isExpanded ? 0.32 : 1)
+            // Apple-style frosted glass: black fades from opaque (collapsed
+            // island matches the physical notch) to a dark tint over blur.
+            if state.isExpanded || collapsedVisible {
+                VisualEffectBlur()
+            }
+            Color.black.opacity(state.isExpanded ? 0.32 : (collapsedVisible ? 1 : 0))
             expandedContent
                 .frame(width: expandedSize.width,
                        height: expandedSize.height, alignment: .top)
