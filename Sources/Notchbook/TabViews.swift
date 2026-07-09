@@ -426,7 +426,7 @@ struct TimerTab: View {
 struct TrayTab: View {
     @EnvironmentObject var tray: FilesTray
 
-    private let columns = [GridItem(.adaptive(minimum: 72), spacing: 10)]
+    private let columns = [GridItem(.adaptive(minimum: 62), spacing: 8)]
 
     var body: some View {
         if tray.items.isEmpty {
@@ -447,40 +447,39 @@ struct TrayTab: View {
                     }
                 )
         } else {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: 10) {
+                    LazyVGrid(columns: columns, spacing: 8) {
                         ForEach(tray.items, id: \.self) { url in
                             TrayTile(url: url)
                         }
                     }
-                    .padding(.top, 2)
                 }
                 HStack(spacing: 8) {
                     Label("Drag all", systemImage: "square.stack")
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 3)
                         .background(Capsule().fill(.white.opacity(0.12)))
                         .overlay { MultiFileDragOverlay(urls: tray.items) }
                         .help("Drag every file out as one stack")
                     Button { tray.airDrop() } label: {
                         Label("AirDrop", systemImage: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 11, weight: .medium))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
                             .background(Capsule().fill(.white.opacity(0.12)))
                     }
                     Button { tray.clear() } label: {
                         Text("Clear")
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                            .font(.system(size: 10))
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 3)
                             .background(Capsule().fill(.white.opacity(0.07)))
                     }
                     Spacer()
                     Text("\(tray.items.count) item\(tray.items.count == 1 ? "" : "s")")
-                        .font(.system(size: 10))
+                        .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.35))
                 }
                 .buttonStyle(.plain)
@@ -497,7 +496,7 @@ private struct TrayTile: View {
     @State private var thumbnail: NSImage?
     @State private var hovered = false
 
-    private static let side: CGFloat = 64
+    private static let side: CGFloat = 54
 
     var body: some View {
         VStack(spacing: 4) {
@@ -511,7 +510,7 @@ private struct TrayTile: View {
                         Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
                             .resizable()
                             .aspectRatio(contentMode: .fit)
-                            .padding(10)
+                            .padding(8)
                     }
                 }
                 .frame(width: Self.side, height: Self.side)

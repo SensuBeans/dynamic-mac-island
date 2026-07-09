@@ -60,12 +60,12 @@ struct NotchMetrics {
     /// keeps the panel short; more rows grow it up to the standard height,
     /// after which the grid scrolls.
     func trayExpandedSize(itemCount: Int) -> CGSize {
-        let columns = 5  // 72pt tiles + 10pt gaps in the 428pt content width
+        let columns = 6  // 62pt tiles + 8pt gaps in the 428pt content width
         let rows = max(1, (itemCount + columns - 1) / columns)
-        // 80pt per tile row (tile + label), 10pt between rows; 38pt footer
+        // 74pt per tile row (tile + label), 8pt between rows; 28pt footer
         // block; 56pt tab bar + paddings.
-        let grid = CGFloat(rows) * 80 + CGFloat(rows - 1) * 10
-        let content = min(Self.expandedContentSize.height, 56 + grid + 38)
+        let grid = CGFloat(rows) * 74 + CGFloat(rows - 1) * 8
+        let content = min(Self.expandedContentSize.height, 56 + grid + 28)
         var size = expandedSize()
         size.height = notchHeight + content
         return size
