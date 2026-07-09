@@ -3,3 +3,4 @@ Notchbook.app/
 *.p12
 *.pem
 .DS_Store
+.claude/
