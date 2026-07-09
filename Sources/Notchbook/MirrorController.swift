@@ -1,19 +1,6 @@
 import AVFoundation
 import SwiftUI
 
-/// TEMPORARY mirror diagnostics — appends to /tmp/notchbook-debug.log.
-func mlog(_ s: String) {
-    let line = "\(Date()) \(s)\n"
-    let url = URL(fileURLWithPath: "/tmp/notchbook-debug.log")
-    if let h = try? FileHandle(forWritingTo: url) {
-        defer { try? h.close() }
-        h.seekToEndOfFile()
-        h.write(line.data(using: .utf8)!)
-    } else {
-        try? line.write(to: url, atomically: true, encoding: .utf8)
-    }
-}
-
 /// One-click webcam preview ("check yourself before the call").
 final class MirrorController: ObservableObject {
     @Published var isRunning = false
@@ -33,20 +20,16 @@ final class MirrorController: ObservableObject {
     /// Restart after a collapse: only if permission is already granted, so
     /// re-expanding the island can never surprise-prompt for the camera.
     func resumeIfAuthorized() {
-        let status = AVCaptureDevice.authorizationStatus(for: .video)
-        mlog("resumeIfAuthorized status=\(status.rawValue)")
-        if status == .authorized {
+        if AVCaptureDevice.authorizationStatus(for: .video) == .authorized {
             start()
         }
     }
 
     func start() {
-        mlog("start() called")
         wantsRunning = true
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self else { return }
-                mlog("start: granted=\(granted) wantsRunning=\(self.wantsRunning) configured=\(self.configured)")
                 guard granted else {
                     self.denied = true
                     return
@@ -60,14 +43,11 @@ final class MirrorController: ObservableObject {
                         self.session.addInput(input)
                         self.configured = true
                     }
-                    mlog("start: configure done configured=\(self.configured)")
                 }
                 guard self.configured else { return }
                 self.sessionQueue.async {
                     if !self.session.isRunning { self.session.startRunning() }
-                    let running = self.session.isRunning
                     DispatchQueue.main.async {
-                        mlog("start: session.isRunning=\(running) wantsRunning=\(self.wantsRunning)")
                         if self.wantsRunning { self.isRunning = true }
                     }
                 }
@@ -76,18 +56,11 @@ final class MirrorController: ObservableObject {
     }
 
     func stop() {
-        mlog("stop() called (was isRunning=\(isRunning) wantsRunning=\(wantsRunning))")
         wantsRunning = false
         isRunning = false
         sessionQueue.async {
             if self.session.isRunning { self.session.stopRunning() }
         }
-    }
-
-    var debugState: String {
-        "auth=\(AVCaptureDevice.authorizationStatus(for: .video).rawValue) "
-        + "configured=\(configured) wantsRunning=\(wantsRunning) "
-        + "isRunning=\(isRunning) session.isRunning=\(session.isRunning) denied=\(denied)"
     }
 }
 

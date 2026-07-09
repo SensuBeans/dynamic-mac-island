@@ -114,28 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupToasts()
 
-        // TEMPORARY mirror diagnostics: drive island states from the CLI via
-        //   distributed notification "notchbook.debug" with object
-        //   "expand" | "collapse" | "tab:<name>" | "dump".
-        observerTokens.append(DistributedNotificationCenter.default().addObserver(
-            forName: NSNotification.Name("notchbook.debug"),
-            object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, let action = note.object as? String else { return }
-            mlog("debug action=\(action)")
-            switch action {
-            case "expand": self.expand()
-            case "collapse": self.collapse()
-            case "dump":
-                mlog("dump: isExpanded=\(self.state.isExpanded) tab=\(self.state.currentTab) mirror[\(self.mirror.debugState)]")
-            default:
-                if action.hasPrefix("tab:"),
-                   let tab = NotchTab.allCases.first(where: { "\($0)" == String(action.dropFirst(4)) }) {
-                    self.state.currentTab = tab
-                }
-            }
-        })
-
         pomodoro.onPhaseEnd = { [weak self] ended in
             NSSound(named: "Glass")?.play()
             self?.state.showToast(NotchToast(
