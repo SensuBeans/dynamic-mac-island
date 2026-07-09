@@ -1,4 +1,4 @@
-# Notchbook
+# Dynamic Mac Island
 
 **A Dynamic Island for your MacBook's notch.** Hover the notch and it expands
 into a frosted-glass panel: media controls with album art, quick notes, a file
@@ -46,8 +46,8 @@ a notch too (it draws its own).
 Build from source (recommended — takes ~30 seconds):
 
 ```sh
-git clone https://github.com/SensuBeans/notchbook.git
-cd notchbook
+git clone https://github.com/SensuBeans/dynamic-mac-island.git
+cd dynamic-mac-island
 ./make-app.sh
 open Notchbook.app
 ```

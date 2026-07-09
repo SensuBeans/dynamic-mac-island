@@ -1,4 +1,4 @@
-# Notchbook — Open-Source Ship Checklist
+# Dynamic Mac Island — Open-Source Ship Checklist
 
 Goal: free, open-source release on GitHub. Each phase is shippable on its own;
 don't gate phase 1 on phase 3.
