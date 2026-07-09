@@ -24,6 +24,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var batteryTimer: Timer?
     private var lastBattery: (charging: Bool, low: Bool)?
     private var spaceWork: DispatchWorkItem?
+    private var lastWallpaper = ""
+
+    private func currentWallpaperID() -> String {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly],
+                                                    kCGNullWindowID) as? [[String: Any]]
+        else { return "?" }
+        for w in info where (w[kCGWindowOwnerName as String] as? String) == "Dock" {
+            if let name = w[kCGWindowName as String] as? String, name.hasPrefix("Wallpaper") {
+                return name
+            }
+        }
+        return "?"
+    }
     /// Block-observer tokens auto-unregister on dealloc — must be retained.
     private var observerTokens: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
@@ -111,7 +124,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // long-lived accessory panels, so a cheap poll also opens the panel
         // whenever the cursor is on the island. This path cannot break.
         hoverPoll = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
-            guard let self, !self.state.isExpanded else { return }
+            guard let self else { return }
+            // Space-switch detection: activeSpaceDidChange never fires on this
+            // macOS, but each Space has its own Dock wallpaper window — a
+            // change in its ID means the user is switching desktops.
+            let wallpaper = self.currentWallpaperID()
+            if self.lastWallpaper.isEmpty {
+                self.lastWallpaper = wallpaper
+            } else if wallpaper != self.lastWallpaper, wallpaper != "?" {
+                self.lastWallpaper = wallpaper
+                self.state.spaceTransitioning = true
+                self.spaceWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    self?.state.spaceTransitioning = false
+                }
+                self.spaceWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+            }
+            guard !self.state.isExpanded else { return }
             let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
             let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
             let islandScreen = self.panel.convertToScreen(
