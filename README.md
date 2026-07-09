@@ -6,7 +6,7 @@ tray, your calendar, a webcam mirror, live system stats, and system toggles.
 When music plays, the island grows an "ear" — album artwork and a live
 equalizer tinted with the album's colors — right beside the notch.
 
-<!-- TODO: hero GIF — docs/demo.gif -->
+![Dynamic Mac Island demo](docs/demo.gif)
 
 ## Why this one?
 
