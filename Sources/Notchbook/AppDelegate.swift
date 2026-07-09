@@ -73,16 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
-        // Hovering the sound-wave ear must NOT open the panel — it's a
-        // click target for play/pause.
+        // The expand trigger hugs the physical notch exactly; the ear and
+        // wings never open the panel.
         host.hoverZoneRect = { [weak self] in
             guard let self else { return .zero }
-            var r = self.host.islandRect()
-            if !self.state.isExpanded, self.media.nowPlaying != nil,
-               !self.media.earHidden, self.state.toast == nil {
-                r.size.width = max(0, r.width - self.metrics.mediaEarWidth)
-            }
-            return r
+            if self.state.isExpanded { return self.host.islandRect() }
+            let b = self.host.bounds
+            let s = self.metrics.hoverZoneSize
+            let y = self.host.isFlipped ? 0 : b.height - s.height
+            return NSRect(x: (b.width - s.width) / 2, y: y,
+                          width: s.width, height: s.height)
         }
         host.frame = NSRect(origin: .zero, size: metrics.windowFrame.size)
         host.autoresizingMask = [.width, .height]
@@ -150,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if zoneScreen.contains(mouse) {
                 self.expand()
             } else {
-                self.setEarHover(islandScreen.contains(mouse))
+                self.setEarHover(mouse.x > zoneScreen.maxX && islandScreen.contains(mouse))
             }
         }
     }

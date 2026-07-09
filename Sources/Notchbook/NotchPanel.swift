@@ -81,6 +81,9 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
         let zone = hoverZoneRect?() ?? islandRect()
         let inZone = zone.insetBy(dx: -2, dy: -2).contains(p)
         onMouseState?(inZone)
-        onEarHover?(!inZone && islandRect().insetBy(dx: -2, dy: -2).contains(p))
+        // The ear is strictly RIGHT of the notch — the left wing is neither
+        // trigger nor ear.
+        onEarHover?(!inZone && p.x > zone.maxX
+                    && islandRect().insetBy(dx: -2, dy: -2).contains(p))
     }
 }
