@@ -25,10 +25,11 @@ struct NotchView: View {
 
     private var island: some View {
         let hasMedia = media.nowPlaying != nil
+        let hasToast = state.toast != nil
         let expandedSize = metrics.expandedSize(zoomed: state.mirrorZoomed)
         let size = state.isExpanded
             ? expandedSize
-            : metrics.collapsedSize(withMedia: hasMedia)
+            : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
         // Everything lives inside one container clipped to the notch
         // silhouette, so nothing can ever paint outside the shape.
         return ZStack(alignment: .top) {
@@ -55,6 +56,7 @@ struct NotchView: View {
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorZoomed)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
         .onChange(of: dropTargeted) { targeted in
             if targeted && !state.isExpanded {
                 state.currentTab = .tray
@@ -81,7 +83,40 @@ struct NotchView: View {
     /// Dynamic Island ears: album art on the left, live activity on the right.
     private var ears: some View {
         Group {
-            if let np = media.nowPlaying, !state.isExpanded {
+            if let toast = state.toast, !state.isExpanded {
+                HStack(spacing: 8) {
+                    Spacer()
+                    if toast.useArtwork, let art = media.artwork {
+                        Image(nsImage: art)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: metrics.notchHeight - 10,
+                                   height: metrics.notchHeight - 10)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                    } else {
+                        Image(systemName: toast.icon)
+                            .font(.system(size: 12))
+                            .foregroundStyle(toast.color)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(toast.title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let sub = toast.subtitle {
+                            Text(sub)
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(width: 150, alignment: .leading)
+                }
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity)
+                .frame(height: metrics.notchHeight)
+                .transition(.opacity)
+            } else if let np = media.nowPlaying, !state.isExpanded {
                 // Right ear only: never cover the frontmost app's menu items.
                 HStack(spacing: 6) {
                     Spacer()

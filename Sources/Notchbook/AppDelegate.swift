@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import IOKit.ps
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel!
@@ -20,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localMouseMonitor: Any?
     private var expandWork: DispatchWorkItem?
     private var hoverPoll: Timer?
+    private var batteryTimer: Timer?
+    private var lastBattery: (charging: Bool, low: Bool)?
+    private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         metrics = NotchMetrics(screen: NotchMetrics.notchScreen())
@@ -44,7 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 x = self.metrics.islandLeadingPad(expanded: true,
                                                   zoomed: self.state.mirrorZoomed)
             } else {
-                s = self.metrics.collapsedSize(withMedia: self.media.nowPlaying != nil)
+                s = self.metrics.collapsedSize(withMedia: self.media.nowPlaying != nil,
+                                               toast: self.state.toast != nil)
                 x = self.metrics.islandLeadingPad(expanded: false)
             }
             let y = self.host.isFlipped ? 0 : self.host.bounds.height - s.height
@@ -57,7 +62,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.hoverZoneRect = { [weak self] in
             guard let self else { return .zero }
             var r = self.host.islandRect()
-            if !self.state.isExpanded, self.media.nowPlaying != nil {
+            if !self.state.isExpanded, self.media.nowPlaying != nil,
+               self.state.toast == nil {
                 r.size.width = max(0, r.width - self.metrics.mediaEarWidth)
             }
             return r
@@ -81,6 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil, queue: .main
         ) { [weak self] _ in self?.rebuildMetrics() }
 
+        setupToasts()
+
         // Belt-and-suspenders hover: tracking areas can stop delivering in
         // long-lived accessory panels, so a cheap poll also opens the panel
         // whenever the cursor is on the island. This path cannot break.
@@ -96,6 +104,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 self.setEarHover(islandScreen.contains(mouse))
             }
+        }
+    }
+
+    private func setupToasts() {
+        // Track changes → brief island toast with artwork.
+        media.$nowPlaying
+            .compactMap { $0 }
+            .removeDuplicates { $0.title == $1.title }
+            .dropFirst()
+            .sink { [weak self] np in
+                guard let self, !self.state.isExpanded else { return }
+                self.state.showToast(NotchToast(icon: "music.note", title: np.title,
+                                                subtitle: np.artist, useArtwork: true))
+            }
+            .store(in: &cancellables)
+
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            self?.checkBattery()
+        }
+    }
+
+    private func checkBattery() {
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef],
+              let ps = list.first,
+              let d = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any],
+              let cur = d[kIOPSCurrentCapacityKey] as? Int,
+              let max = d[kIOPSMaxCapacityKey] as? Int, max > 0 else { return }
+        let charging = (d[kIOPSIsChargingKey] as? Bool) ?? false
+        let pct = Int(Double(cur) / Double(max) * 100)
+        let low = pct <= 20
+        defer { lastBattery = (charging, low) }
+        guard let prev = lastBattery else { return }
+        if charging != prev.charging {
+            state.showToast(NotchToast(icon: charging ? "bolt.fill" : "battery.75",
+                                       title: charging ? "Charging" : "On Battery",
+                                       subtitle: "\(pct)%",
+                                       color: charging ? .green : .white))
+        } else if low && !prev.low && !charging {
+            state.showToast(NotchToast(icon: "battery.25", title: "Low Battery",
+                                       subtitle: "\(pct)%", color: .red))
         }
     }
 

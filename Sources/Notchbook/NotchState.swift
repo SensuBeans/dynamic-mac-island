@@ -1,5 +1,15 @@
 import Foundation
 import Combine
+import SwiftUI
+
+/// A transient notification shown in the collapsed island.
+struct NotchToast: Equatable {
+    var icon: String
+    var title: String
+    var subtitle: String?
+    var useArtwork = false
+    var color: Color = .white
+}
 
 enum NotchTab: String, CaseIterable {
     case media, notes, tray, calendar, mirror, stats, toggles
@@ -40,6 +50,18 @@ final class NotchState: ObservableObject {
     /// Cursor is over the collapsed island's sound-wave ear — it morphs
     /// into mini transport controls.
     @Published var earHovered = false
+    /// Transient notification shown beside the notch while collapsed.
+    @Published var toast: NotchToast?
+
+    private var toastWork: DispatchWorkItem?
+
+    func showToast(_ t: NotchToast, duration: Double = 3) {
+        toast = t
+        toastWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.toast = nil }
+        toastWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
     @Published var pages: [String]
 
     var onQuit: (() -> Void)?

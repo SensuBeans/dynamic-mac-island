@@ -43,9 +43,9 @@ struct NotchMetrics {
         (notchHeight - 10) + 6 + 30 + 8
     }
 
-    func collapsedSize(withMedia: Bool) -> CGSize {
-        CGSize(width: notchWidth + Self.wing * 2 + (withMedia ? mediaEarWidth : 0),
-               height: notchHeight)
+    func collapsedSize(withMedia: Bool, toast: Bool = false) -> CGSize {
+        let extra: CGFloat = toast ? 215 : (withMedia ? mediaEarWidth : 0)
+        return CGSize(width: notchWidth + Self.wing * 2 + extra, height: notchHeight)
     }
 
     func expandedSize(zoomed: Bool = false) -> CGSize {
