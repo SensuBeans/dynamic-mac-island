@@ -157,8 +157,8 @@ struct MediaTab: View {
                                               barWidth: 2.5, maxHeight: 26,
                                               color: media.accent,
                                               animating: np.isPlaying && state.isExpanded,
-                                              levels: spectrum.levels.isEmpty
-                                                  ? nil : spectrum.levels)
+                                              levels: np.isPlaying && !spectrum.levels.isEmpty
+                                                  ? spectrum.levels : nil)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
                         }
@@ -257,7 +257,8 @@ struct MediaTab: View {
     }
 
     private var progressBar: some View {
-        VStack(spacing: 5) {
+        HStack(spacing: 8) {
+            Text(timeString(media.position))
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(.white.opacity(0.2))
@@ -266,15 +267,11 @@ struct MediaTab: View {
                 }
             }
             .frame(height: 4)
-            HStack {
-                Text(timeString(media.position))
-                Spacer()
-                Text("-" + timeString(max(0, media.duration - media.position)))
-            }
-            .font(.system(size: 10))
-            .monospacedDigit()
-            .foregroundStyle(.white.opacity(0.45))
+            Text("-" + timeString(max(0, media.duration - media.position)))
         }
+        .font(.system(size: 10))
+        .monospacedDigit()
+        .foregroundStyle(.white.opacity(0.45))
     }
 
     private var fraction: CGFloat {
@@ -1022,6 +1019,7 @@ struct EqualizerBars: View {
         .onReceive(timer) { _ in
             if animating, levels == nil { t += 1.0 / 20.0 }
         }
+        .animation(.linear(duration: 0.09), value: levels)
     }
 
     private func height(_ i: Int) -> CGFloat {

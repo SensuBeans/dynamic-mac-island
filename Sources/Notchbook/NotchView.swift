@@ -85,6 +85,12 @@ struct NotchView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorZoomed)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
+        .onChange(of: media.nowPlaying?.isPlaying) { playing in
+            // The tap only listens while the player itself is playing —
+            // paused means a still wave, whatever else the system sounds.
+            spectrum.setActive(state.isExpanded && state.currentTab == .media
+                               && playing == true)
+        }
         .onChange(of: dropTargeted) { targeted in
             if targeted && !state.isExpanded {
                 state.currentTab = .tray
@@ -95,7 +101,8 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
-            spectrum.setActive(expanded && state.currentTab == .media)
+            spectrum.setActive(expanded && state.currentTab == .media
+                               && media.nowPlaying?.isPlaying == true)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
             if expanded && state.currentTab == .mirror {
@@ -106,7 +113,8 @@ struct NotchView: View {
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
-            spectrum.setActive(state.isExpanded && tab == .media)
+            spectrum.setActive(state.isExpanded && tab == .media
+                               && media.nowPlaying?.isPlaying == true)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()

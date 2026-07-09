@@ -21,7 +21,13 @@ final class AudioSpectrum: ObservableObject {
     /// view samples it down to however many bars fit.
     private let historyCount = 60
     private var history = [Float](repeating: 0, count: 60)
-    private var lastPublish: CFTimeInterval = 0
+    /// Loudness accumulates across IO callbacks and lands in the history as
+    /// one sample per this interval — the wave scrolls calmly instead of
+    /// jittering at callback rate (60 × 60 ms ≈ a 3.6 s window on screen).
+    private let sampleInterval: CFTimeInterval = 0.06
+    private var accumSumSquares: Float = 0
+    private var accumCount = 0
+    private var lastAppend: CFTimeInterval = 0
 
     func setActive(_ on: Bool) {
         guard on != active else { return }
@@ -107,16 +113,20 @@ final class AudioSpectrum: ObservableObject {
             count += n
         }
         guard count > 0 else { return }
-        let rms = (sumSquares / Float(count)).squareRoot()
+        accumSumSquares += sumSquares
+        accumCount += count
+
+        let now = CACurrentMediaTime()
+        guard now - lastAppend >= sampleInterval else { return }
+        lastAppend = now
+        let rms = (accumSumSquares / Float(accumCount)).squareRoot()
+        accumSumSquares = 0
+        accumCount = 0
         // Perceptual-ish scaling: quiet passages still visible, loud ones cap.
         let level = min(1, pow(rms * 5, 0.6))
 
         history.removeFirst()
         history.append(level)
-
-        let now = CACurrentMediaTime()
-        guard now - lastPublish > 0.04 else { return }
-        lastPublish = now
         let snapshot = history
         DispatchQueue.main.async { self.levels = snapshot }
     }
