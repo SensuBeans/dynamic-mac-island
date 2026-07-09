@@ -426,6 +426,8 @@ struct TimerTab: View {
 struct TrayTab: View {
     @EnvironmentObject var tray: FilesTray
 
+    private let columns = [GridItem(.adaptive(minimum: 72), spacing: 10)]
+
     var body: some View {
         if tray.items.isEmpty {
             RoundedRectangle(cornerRadius: 12)
@@ -447,15 +449,23 @@ struct TrayTab: View {
         } else {
             VStack(spacing: 8) {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(tray.items, id: \.self) { url in
-                            TrayRow(url: url)
+                            TrayTile(url: url)
                         }
                     }
+                    .padding(.top, 2)
                 }
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("Drag all", systemImage: "square.stack")
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(.white.opacity(0.12)))
+                        .overlay { MultiFileDragOverlay(urls: tray.items) }
+                        .help("Drag every file out as one stack")
                     Button { tray.airDrop() } label: {
-                        Label("AirDrop All", systemImage: "dot.radiowaves.left.and.right")
+                        Label("AirDrop", systemImage: "dot.radiowaves.left.and.right")
                             .font(.system(size: 11, weight: .medium))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
@@ -480,45 +490,76 @@ struct TrayTab: View {
     }
 }
 
-private struct TrayRow: View {
+private struct TrayTile: View {
     @EnvironmentObject var tray: FilesTray
     let url: URL
 
+    @State private var thumbnail: NSImage?
+    @State private var hovered = false
+
+    private static let side: CGFloat = 64
+
     var body: some View {
-        HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                .resizable()
-                .frame(width: 26, height: 26)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(url.lastPathComponent)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                Text(url.deletingLastPathComponent().path)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .lineLimit(1)
-                    .truncationMode(.head)
+        VStack(spacing: 4) {
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let thumbnail {
+                        Image(nsImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .padding(10)
+                    }
+                }
+                .frame(width: Self.side, height: Self.side)
+                .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(.white.opacity(hovered ? 0.3 : 0.1), lineWidth: 1)
+                )
+                .scaleEffect(hovered ? 1.04 : 1)
+
+                if hovered {
+                    Button { tray.remove(url) } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, .black.opacity(0.65))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(3)
+                    .help("Remove from tray")
+                    .transition(.opacity)
+                }
             }
-            Spacer()
-            Button { tray.airDrop([url]) } label: {
-                Image(systemName: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .help("AirDrop")
-            Button { tray.remove(url) } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.35))
-            }
-            .help("Remove from tray")
+            Text(url.lastPathComponent)
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(hovered ? 0.9 : 0.55))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: Self.side + 8)
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
         .onDrag { NSItemProvider(object: url as NSURL) }
+        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .contextMenu {
+            Button("Open") { NSWorkspace.shared.open(url) }
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+            Button("AirDrop") { tray.airDrop([url]) }
+            Divider()
+            Button("Remove") { tray.remove(url) }
+        }
+        .onAppear {
+            TrayThumbnails.shared.load(url, side: Self.side) { thumbnail = $0 }
+        }
     }
 }
 
