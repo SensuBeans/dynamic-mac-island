@@ -233,10 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
 
-    /// Two-finger swipe on the collapsed island: left/right skips tracks,
-    /// up/down nudges the player volume.
+    /// Two-finger swipes. Collapsed: left/right skips tracks, up/down nudges
+    /// player volume. Expanded: left/right switches tabs.
     private func handleIslandSwipe(_ event: NSEvent) {
-        guard !state.isExpanded, media.nowPlaying != nil else { return }
         switch event.phase {
         case .began:
             swipeX = 0
@@ -245,6 +244,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
         case .ended:
+            if state.isExpanded {
+                guard abs(swipeX) > 50, abs(swipeX) > abs(swipeY) * 1.5 else { return }
+                let tabs = NotchTab.allCases
+                guard let i = tabs.firstIndex(of: state.currentTab) else { return }
+                let next = swipeX < 0 ? min(i + 1, tabs.count - 1) : max(i - 1, 0)
+                state.currentTab = tabs[next]
+                return
+            }
+            guard media.nowPlaying != nil else { return }
             if abs(swipeX) > 40, abs(swipeX) > abs(swipeY) {
                 let next = swipeX < 0
                 next ? media.nextTrack() : media.previousTrack()
