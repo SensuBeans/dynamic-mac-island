@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var batteryTimer: Timer?
     private var lastBattery: (charging: Bool, low: Bool)?
     private var spaceWork: DispatchWorkItem?
+    /// Block-observer tokens auto-unregister on dealloc — must be retained.
+    private var observerTokens: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -83,15 +85,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        NotificationCenter.default.addObserver(
+        observerTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in self?.rebuildMetrics() }
+        ) { [weak self] _ in self?.rebuildMetrics() })
 
         setupToasts()
 
         // Vanish during Space switches so swipes between desktops look clean.
-        NSWorkspace.shared.notificationCenter.addObserver(
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
@@ -103,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.spaceWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
-        }
+        })
 
         // Belt-and-suspenders hover: tracking areas can stop delivering in
         // long-lived accessory panels, so a cheap poll also opens the panel
