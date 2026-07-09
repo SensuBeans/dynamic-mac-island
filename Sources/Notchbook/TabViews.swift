@@ -397,7 +397,6 @@ private struct LyricsTicker: View {
         return VStack(alignment: .leading, spacing: 7) {
             lyricLine(i, current: true)
             lyricLine(i + 1)
-            lyricLine(i + 2)
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -409,12 +408,16 @@ private struct LyricsTicker: View {
     private func lyricLine(_ idx: Int, current: Bool = false) -> some View {
         if idx >= 0, idx < lyrics.lines.count {
             let line = lyrics.lines[idx]
+            // Never truncate a lyric: the active line wraps as far as it
+            // needs, the upcoming one gets two lines.
             Text(line.text)
-                .font(.system(size: current ? 15 : 13,
+                .font(.system(size: current ? 14 : 12,
                               weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(current ? 1 : 0.25))
                 .blur(radius: current ? 0 : 0.7)
-                .lineLimit(current ? 2 : 1)
+                .lineLimit(current ? 3 : 2)
+                .minimumScaleFactor(current ? 0.8 : 1)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { media.seek(to: line.time) }
