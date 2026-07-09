@@ -55,6 +55,8 @@ struct NotchView: View {
         .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                               bottomRadius: state.isExpanded ? 26 : 10))
         .shadow(color: .black.opacity(state.isExpanded ? 0.55 : 0), radius: 18, y: 8)
+        .opacity(state.spaceTransitioning ? 0 : 1)
+        .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
         .padding(.leading, metrics.islandLeadingPad(expanded: state.isExpanded,
                                                     zoomed: state.mirrorZoomed))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)

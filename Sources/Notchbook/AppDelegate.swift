@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hoverPoll: Timer?
     private var batteryTimer: Timer?
     private var lastBattery: (charging: Bool, low: Bool)?
+    private var spaceWork: DispatchWorkItem?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -88,6 +89,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in self?.rebuildMetrics() }
 
         setupToasts()
+
+        // Vanish during Space switches so swipes between desktops look clean.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.state.spaceTransitioning = true
+            self.spaceWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.state.spaceTransitioning = false
+            }
+            self.spaceWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+        }
 
         // Belt-and-suspenders hover: tracking areas can stop delivering in
         // long-lived accessory panels, so a cheap poll also opens the panel

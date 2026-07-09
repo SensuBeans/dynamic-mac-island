@@ -52,6 +52,8 @@ final class NotchState: ObservableObject {
     @Published var earHovered = false
     /// Transient notification shown beside the notch while collapsed.
     @Published var toast: NotchToast?
+    /// Hidden entirely while the user swipes between Spaces.
+    @Published var spaceTransitioning = false
 
     private var toastWork: DispatchWorkItem?
 
