@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let toggles = TogglesModel()
     private let stats = StatsModel()
     private let pomodoro = PomodoroModel()
+    private let audioOutput = AudioOutputModel()
 
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
@@ -413,7 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(stats)
             .environmentObject(pomodoro)
             .environmentObject(spectrum)
-            .environmentObject(lyrics))
+            .environmentObject(lyrics)
+            .environmentObject(audioOutput))
     }
 
     /// Expand on hover, effectively instantly. SwiftUI can drop hover-exit
@@ -476,7 +478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      + NotchMetrics.islandGap + 16)
             let inNav = navZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
-            if !visible.contains(mouse), !self.state.pinned {
+            if !visible.contains(mouse), !self.state.pinned,
+               !self.state.menuHoldsOpen {
                 self.collapse()
             }
         }

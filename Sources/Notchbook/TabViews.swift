@@ -81,13 +81,19 @@ struct MediaTab: View {
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var spectrum: AudioSpectrum
     @EnvironmentObject var lyrics: LyricsModel
+    @EnvironmentObject var audioOutput: AudioOutputModel
     @State private var volume: Double = 50
     @State private var showLyrics = false
 
     var body: some View {
         if let np = media.nowPlaying {
             mediaCard(np)
-                .onAppear { volume = media.readPlayerVolume() }
+                .onAppear {
+                    volume = media.readPlayerVolume()
+                    // Music's AirPlay list needs network discovery — warm it
+                    // here so the output menu is populated at click time.
+                    audioOutput.prefetchAirPlay()
+                }
                 .onChange(of: np.source) { _ in volume = media.readPlayerVolume() }
                 .onChange(of: np.title) { _ in
                     if showLyrics {
@@ -223,6 +229,21 @@ struct MediaTab: View {
                             }
                             .help("Repeat: off → all → one")
                         }
+                        Button {
+                            // popUp blocks until the menu closes; the flag
+                            // keeps the mouse-away watcher from collapsing
+                            // the island while it's tracking.
+                            state.menuHoldsOpen = true
+                            audioOutput.presentMenu()
+                            state.menuHoldsOpen = false
+                        } label: {
+                            Image(systemName: "airplay.audio")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(
+                                    audioOutput.isRoutedExternally ? 0.95 : 0.35))
+                        }
+                        .help("Sound output"
+                              + (audioOutput.current.map { " — \($0.name)" } ?? ""))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.white)

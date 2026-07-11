@@ -67,6 +67,10 @@ final class NotchState: ObservableObject {
     @Published var tabSwipeProgress: CGFloat = 0
     /// Hidden entirely while the user swipes between Spaces.
     @Published var spaceTransitioning = false
+    /// A popped-up NSMenu (sound output picker) is tracking — the mouse-away
+    /// watcher must not collapse the panel out from under it. Not @Published:
+    /// only the AppKit watcher reads it.
+    var menuHoldsOpen = false
 
     private var toastWork: DispatchWorkItem?
 
