@@ -6,6 +6,32 @@ struct NotchMetrics {
     let screen: NSScreen
     let notchWidth: CGFloat
     let notchHeight: CGFloat
+    /// True on Macs with a physical notch; false on a Mac mini / external
+    /// display, where the island renders as a tiny free-floating pill instead
+    /// of hugging a notch silhouette.
+    let hasNotch: Bool
+
+    /// Height of the menu bar on this screen (0 if auto-hidden / none).
+    var menuBarHeight: CGFloat {
+        max(0, screen.frame.maxY - screen.visibleFrame.maxY)
+    }
+
+    /// True on a lower-DPI (non-retina) panel — e.g. the 1080p second monitor.
+    var isLowDPI: Bool { screen.backingScaleFactor < 2 }
+
+    /// Top offset of the standby pill on no-notch Macs. On retina panels it
+    /// sits vertically centered within the menu bar — neat among the status
+    /// icons. Lower-DPI panels render everything larger, so it rides a little
+    /// higher there. Taller media / toast states grow downward from here.
+    var pillDrop: CGFloat {
+        if screen.backingScaleFactor >= 2 {
+            return max(1, (menuBarHeight - notchHeight) / 2 - 2)
+        }
+        return 2
+    }
+
+    /// Height of the compact now-playing pill (pill mode): album art + waves.
+    static let pillMediaHeight: CGFloat = 28
 
     /// Visual wings either side of the notch — now ZERO: the collapsed island is
     /// exactly the physical notch footprint, extras grow rightward only. Kept as
@@ -52,12 +78,23 @@ struct NotchMetrics {
         if screen.safeAreaInsets.top > 0,
            let left = screen.auxiliaryTopLeftArea,
            let right = screen.auxiliaryTopRightArea {
+            hasNotch = true
             notchWidth = screen.frame.width - left.width - right.width
             notchHeight = screen.safeAreaInsets.top
         } else {
-            // No physical notch (external display, older Mac): fake one.
-            notchWidth = 190
-            notchHeight = 32
+            // No physical notch (Mac mini, external display): a tiny standby
+            // pill stands in — these are its collapsed dimensions and the
+            // hover/expand trigger zone. Lower-DPI panels (a non-retina 1080p
+            // display) render points larger, so the pill gets slimmer
+            // dimensions there to avoid looking chunky.
+            hasNotch = false
+            if screen.backingScaleFactor >= 2 {
+                notchWidth = 60
+                notchHeight = 20
+            } else {
+                notchWidth = 52
+                notchHeight = 15
+            }
         }
     }
 
@@ -70,6 +107,17 @@ struct NotchMetrics {
 
     func collapsedSize(withMedia: Bool, toast: Bool = false,
                        withAgent: Bool = false) -> CGSize {
+        if !hasNotch {
+            // Pill mode: a tiny standby pill. Playing music grows it into a
+            // compact centered now-playing pill (album art + live waveform);
+            // a toast (song change, volume, battery) grows it into a taller
+            // centered bubble with two lines of text. The agent pill widens
+            // the standby pill rightward, same as the notch bar's agent ear.
+            if toast { return CGSize(width: 280, height: 46) }
+            let agentExtra: CGFloat = withAgent ? Self.agentEar : 0
+            if withMedia { return CGSize(width: 96 + agentExtra, height: Self.pillMediaHeight) }
+            return CGSize(width: notchWidth + agentExtra, height: notchHeight)
+        }
         // Toast and the agent pill are mutually exclusive (the pill is hidden
         // while a toast is up); both float outboard of the media ear.
         let outboard: CGFloat = toast ? Self.toastEar : (withAgent ? Self.agentEar : 0)
@@ -149,10 +197,18 @@ struct NotchMetrics {
     /// Leading padding of the island inside the fixed window. Collapsed, the
     /// island's left edge sits flush beside the notch (media ear grows right
     /// only); expanded, the panel is centered.
-    func islandLeadingPad(expanded: Bool, zoomed: Bool = false,
-                          large: Bool = false) -> CGFloat {
-        expanded ? (windowFrame.width - expandedSize(zoomed: zoomed, large: large).width) / 2
-                 : windowFrame.width / 2 - notchWidth / 2
+    func islandLeadingPad(expanded: Bool, collapsed: CGSize = .zero,
+                          zoomed: Bool = false, large: Bool = false) -> CGFloat {
+        if expanded {
+            return (windowFrame.width - expandedSize(zoomed: zoomed, large: large).width) / 2
+        }
+        // Pill mode centers every collapsed state (standby, now-playing, toast)
+        // on screen by its own width.
+        if !hasNotch {
+            return (windowFrame.width - collapsed.width) / 2
+        }
+        // Notch mode anchors flush beside the notch (media ear grows right).
+        return windowFrame.width / 2 - notchWidth / 2
     }
 
     /// Leading pad that centers an expanded island of an explicit width — used
@@ -163,11 +219,16 @@ struct NotchMetrics {
         (windowFrame.width - width) / 2
     }
 
-    /// Prefer the screen that actually has a notch. Returns nil when no screen
-    /// is available — `NSScreen.screens` is momentarily empty during display
-    /// reconfiguration, and indexing `[0]` there would trap.
+    /// Which screen hosts the island. Prefer a notch (MacBooks); otherwise
+    /// pin it to the PRIMARY display — the one carrying the menu bar (origin
+    /// at 0,0) — so on a multi-monitor Mac mini it always lives on the main
+    /// monitor and never drifts to a secondary display when focus moves.
+    /// Returns nil when no screen is available — `NSScreen.screens` is
+    /// momentarily empty during display reconfiguration, and indexing `[0]`
+    /// there would trap.
     static func notchScreen() -> NSScreen? {
         NSScreen.screens.first { $0.safeAreaInsets.top > 0 }
+            ?? NSScreen.screens.first { $0.frame.origin == .zero }
             ?? NSScreen.main
             ?? NSScreen.screens.first
     }

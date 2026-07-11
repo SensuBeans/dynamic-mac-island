@@ -115,6 +115,9 @@ final class NotchState: ObservableObject {
     /// watcher must not collapse the panel out from under it. Not @Published:
     /// only the AppKit watcher reads it.
     var menuHoldsOpen = false
+    /// Google Chrome is the frontmost app. Used (on the low-DPI second monitor)
+    /// to hide the standby pill while browsing, without disabling hover-expand.
+    @Published var chromeActive = false
 
     private var toastWork: DispatchWorkItem?
     /// Default on-screen seconds for toasts whose caller doesn't specify one.

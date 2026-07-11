@@ -125,9 +125,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
                                                toast: self.state.toast != nil,
                                                withAgent: self.agentSessions.hasActivePill)
-                x = self.metrics.islandLeadingPad(expanded: false)
+                x = self.metrics.islandLeadingPad(expanded: false, collapsed: s)
             }
-            let y = self.host.isFlipped ? 0 : self.host.bounds.height - s.height
+            // The collapsed pill floats below the top edge (no-notch Macs); its
+            // hit rect must follow so hover still lands on it.
+            let drop = (!self.state.isExpanded && !self.metrics.hasNotch)
+                ? self.metrics.pillDrop : 0
+            let y = self.host.isFlipped ? drop
+                                        : self.host.bounds.height - s.height - drop
             return NSRect(x: x, y: y, width: s.width, height: s.height)
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
@@ -145,7 +150,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.state.isExpanded { return self.host.islandRect() }
             let b = self.host.bounds
             let s = self.metrics.hoverZoneSize
-            let y = self.host.isFlipped ? 0 : b.height - s.height
+            let drop = self.metrics.hasNotch ? 0 : self.metrics.pillDrop
+            let y = self.host.isFlipped ? drop : b.height - s.height - drop
             return NSRect(x: (b.width - s.width) / 2, y: y,
                           width: s.width, height: s.height)
         }
@@ -190,6 +196,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.state.showToast(NotchToast(icon: "note.text", title: title,
                                              subtitle: subtitle))
         }
+
+        // Track whether Chrome is frontmost, so the standby pill can hide while
+        // browsing on the second monitor (hover-expand still works).
+        let syncFrontApp: () -> Void = { [weak self] in
+            let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            self?.state.chromeActive = (id == "com.google.Chrome")
+        }
+        syncFrontApp()
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { _ in syncFrontApp() })
 
         setupToasts()
 
@@ -371,6 +389,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.spaceWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+            }
+            guard !self.state.isExpanded else { return }
+            let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
+            let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
+            let islandScreen = self.panel.convertToScreen(
+                self.host.convert(self.host.islandRect(), to: nil))
+            let mouse = NSEvent.mouseLocation
+            if zoneScreen.contains(mouse) {
+                self.expand()
+            } else {
+                let earX = islandScreen.minX + self.metrics.notchWidth
+                self.setEarHover(mouse.x > earX && islandScreen.contains(mouse))
             }
         }
         spacePoll?.tolerance = 0.1

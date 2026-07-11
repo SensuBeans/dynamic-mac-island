@@ -79,12 +79,18 @@ struct NotchView: View {
         // Fully invisible when idle — the hardware notch already covers those
         // pixels, and a visible black bar looks bad during Space swipes. The
         // island only materializes when it has something to show.
-        // The black notch bar materializes only for media/toast now — the agent
-        // pill floats as its own capsule (below), so it no longer widens the bar.
         // The black notch bar shows for media only. A toast is its OWN small
         // floating glass capsule beside the notch (like the agent pill), so it
-        // no longer fills / widens the bar.
-        let collapsedVisible = hasMedia
+        // no longer fills / widens the bar. On a Mac mini there is no notch,
+        // so the standby pill is always visible and waiting to be hovered
+        // (there, a toast still grows the pill itself into a bubble).
+        let collapsedVisible = hasMedia || !metrics.hasNotch
+        // On the low-DPI second monitor, hide the pitch-black standby pill while
+        // Chrome is frontmost (browsing) so it doesn't sit over the page — but
+        // only when idle; the hover zone stays live so it still expands, and
+        // media / toasts still appear.
+        let hideStandby = !metrics.hasNotch && metrics.isLowDPI && state.chromeActive
+            && !hasMedia && !hasToast && !state.isExpanded
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
@@ -98,41 +104,76 @@ struct NotchView: View {
             // with intrinsic width and NO clip — its position is a fixed offset,
             // not derived from an animating bar width, so it cannot drift left
             // under the notch or be truncated by the silhouette.
-            ZStack(alignment: .topLeading) {
-                ZStack {
-                    if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
-                    Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
-                }
-                .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
-                       height: metrics.notchHeight)
-                .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
-                                      bottomRadius: 10))
+            if metrics.hasNotch {
+                ZStack(alignment: .topLeading) {
+                    ZStack {
+                        if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                        Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                    }
+                    .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
+                           height: metrics.notchHeight)
+                    .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
+                                          bottomRadius: 10))
 
-                HStack(spacing: 0) {
-                    // Fixed notch-width block reserves the hardware notch; content
-                    // starts exactly at the notch's right edge and a trailing
-                    // Spacer keeps the whole row hard against the left. This can't
-                    // right-drift the way a padding+alignment combo did.
-                    Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
-                    ears
-                    // Toast + agent pill both float outboard of the media ear;
-                    // only one is present at a time (pill hides during a toast).
-                    toastCapsule.padding(.leading, hasMedia ? 8 : 2)
-                    agentPill.padding(.leading, 6)
-                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        // Fixed notch-width block reserves the hardware notch; content
+                        // starts exactly at the notch's right edge and a trailing
+                        // Spacer keeps the whole row hard against the left. This can't
+                        // right-drift the way a padding+alignment combo did.
+                        Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
+                        ears
+                        // Toast + agent pill both float outboard of the media ear;
+                        // only one is present at a time (pill hides during a toast).
+                        toastCapsule.padding(.leading, hasMedia ? 8 : 2)
+                        agentPill.padding(.leading, 6)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: metrics.notchHeight)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(height: metrics.notchHeight)
+                // Own its constant collapsed anchor (left edge flush at the notch).
+                // Nothing here animates horizontally on expand — the bar just fades
+                // IN PLACE, killing the old diagonal drag.
+                .padding(.leading, metrics.islandLeadingPad(expanded: false))
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(state.isExpanded ? 0 : 1)
+                // Quick fade, its own curve (closer than the container spring) so the
+                // bar never rides the expanded panel's bubble motion.
+                .animation(.easeOut(duration: 0.2), value: state.isExpanded)
+            } else {
+                // Pill mode (no notch): a centered floating capsule. Media grows
+                // it into the now-playing pill; a toast grows it into the two-line
+                // bubble (both rendered by `ears`). The agent pill floats as its
+                // own glass capsule beside it, mirroring the notch bar's layout.
+                // Centered by the container's .top alignment — matches the
+                // `collapsed:` leading pad AppDelegate uses for hit-testing.
+                HStack(spacing: 6) {
+                    ZStack {
+                        if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                        Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                    }
+                    .frame(width: metrics.collapsedSize(withMedia: hasMedia,
+                                                        toast: hasToast).width,
+                           height: metrics.collapsedSize(withMedia: hasMedia,
+                                                         toast: hasToast).height)
+                    .overlay(alignment: .top) { ears }
+                    .clipShape(Capsule())
+                    .overlay {
+                        // A hairline lifts the floating pill off the wallpaper.
+                        if !state.isExpanded {
+                            Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+                        }
+                    }
+                    .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+
+                    agentPill
+                }
+                // The pill floats a few points below the top edge.
+                .offset(y: metrics.pillDrop)
+                .opacity(state.isExpanded || hideStandby ? 0 : 1)
+                .animation(.easeInOut(duration: 0.2), value: hideStandby)
+                .animation(.easeOut(duration: 0.2), value: state.isExpanded)
             }
-            // Own its constant collapsed anchor (left edge flush at the notch).
-            // Nothing here animates horizontally on expand — the bar just fades
-            // IN PLACE, killing the old diagonal drag.
-            .padding(.leading, metrics.islandLeadingPad(expanded: false))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(state.isExpanded ? 0 : 1)
-            // Quick fade, its own curve (closer than the container spring) so the
-            // bar never rides the expanded panel's bubble motion.
-            .animation(.easeOut(duration: 0.2), value: state.isExpanded)
 
             // Expanded: the nav bar and the content panel are each their
             // OWN floating island, stacked below the notch.
@@ -184,13 +225,9 @@ struct NotchView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
-        .onChange(of: media.nowPlaying?.isPlaying) { playing in
-            // The tap only listens while the player itself is playing —
-            // paused means a still wave, whatever else the system sounds.
-            // Off via settings: never create the audio tap (privacy); the
-            // waveform falls back to synthetic bars.
-            spectrum.setActive(settings.liveWaveform && state.isExpanded && playing == true)
-        }
+        .onAppear { syncSpectrum() }
+        .onChange(of: hasMedia) { _ in syncSpectrum() }
+        .onChange(of: media.nowPlaying?.isPlaying) { _ in syncSpectrum() }
         .onChange(of: spectrum.levels) { levels in
             // Each fresh audio sample nudges the ambient colors along,
             // loudness sets the pace; no samples (paused) — no motion.
@@ -208,7 +245,7 @@ struct NotchView: View {
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
             servers.setPolling(expanded && state.currentTab == .servers)
-            spectrum.setActive(settings.liveWaveform && expanded && media.nowPlaying?.isPlaying == true)
+            syncSpectrum()
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
             if expanded && state.currentTab == .mirror {
@@ -228,7 +265,7 @@ struct NotchView: View {
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
             servers.setPolling(state.isExpanded && tab == .servers)
-            spectrum.setActive(settings.liveWaveform && state.isExpanded && media.nowPlaying?.isPlaying == true)
+            syncSpectrum()
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
@@ -260,7 +297,39 @@ struct NotchView: View {
     /// (Toasts moved OUT of the bar into their own floating capsule — `toastCapsule`.)
     private var ears: some View {
         Group {
-            if pomodoro.isRunning, settings.timerCountdownEar,
+            if let toast = state.toast, !state.isExpanded, !metrics.hasNotch {
+                // Pill mode: a centered song-change bubble — artwork + two
+                // lines of text, filling the taller toast pill. (On notch Macs
+                // the toast is its own floating capsule — `toastCapsule`.)
+                HStack(spacing: 10) {
+                    if toast.useArtwork, let art = media.artwork {
+                        Image(nsImage: art)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    } else {
+                        Image(systemName: toast.icon)
+                            .font(.system(size: 15))
+                            .foregroundStyle(toast.color)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(toast.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let sub = toast.subtitle {
+                            Text(sub)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+            } else if pomodoro.isRunning, settings.timerCountdownEar,
                       media.nowPlaying == nil || media.earHidden,
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
@@ -279,56 +348,89 @@ struct NotchView: View {
                         .monospacedDigit()
                         .foregroundStyle(pomodoro.phase == .focus ? Color.orange : .green)
                 }
-                .frame(height: metrics.notchHeight)
+                // Notch: intrinsic width in the outboard content row.
+                // Pill: fill and center inside the standby pill.
+                .frame(height: metrics.hasNotch ? metrics.notchHeight : nil)
+                .frame(maxWidth: metrics.hasNotch ? nil : .infinity,
+                       maxHeight: metrics.hasNotch ? nil : .infinity)
                 .transition(.opacity)
             } else if let np = media.nowPlaying, !media.earHidden, !state.isExpanded {
-                // Right ear only: never cover the frontmost app's menu items.
+                // Album art + a LIVE waveform driven by the same real-audio
+                // levels the expanded player uses; hovering morphs it into mini
+                // transport controls without opening the panel.
+                let levels = np.isPlaying && !spectrum.levels.isEmpty
+                    ? spectrum.levels : nil
+                let artSide = metrics.hasNotch ? metrics.notchHeight - 10
+                                               : NotchMetrics.pillMediaHeight - 8
+                if metrics.hasNotch {
+                    // Notch: intrinsic-width ear content — it sits in the
+                    // outboard row anchored at the notch's right edge.
+                    mediaEar(isPlaying: np.isPlaying, levels: levels, artSide: artSide)
+                        .frame(height: metrics.notchHeight)
+                        .transition(.opacity)
+                } else {
+                    // Pill: album art + waves centered in the now-playing pill.
+                    mediaEar(isPlaying: np.isPlaying, levels: levels, artSide: artSide)
+                        .padding(.horizontal, 12)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity)
+                }
+            }
+            // Standby (pill mode): no content — just the pitch-black pill.
+        }
+    }
+
+    /// Runs the system-audio tap whenever the waveform is actually on screen:
+    /// the expanded player, or — in pill mode — the collapsed now-playing pill.
+    /// (On a notch Mac the collapsed ear keeps its cheap synthetic animation.)
+    private func syncSpectrum() {
+        // Off via settings: never create the audio tap (privacy); the
+        // waveform falls back to synthetic bars.
+        let playing = media.nowPlaying?.isPlaying == true
+        spectrum.setActive(settings.liveWaveform && playing
+                           && (state.isExpanded || !metrics.hasNotch))
+    }
+
+    /// The now-playing ear's inner content: artwork + live waveform, or (when
+    /// hovered) mini transport controls. Shared by the notch ear and the pill.
+    @ViewBuilder
+    private func mediaEar(isPlaying: Bool, levels: [Float]?, artSide: CGFloat) -> some View {
+        Group {
+            if state.earHovered {
+                HStack(spacing: 9) {
+                    Button { media.previousTrack() } label: {
+                        Image(systemName: "backward.fill").font(.system(size: 9))
+                    }
+                    Button { media.playPause() } label: {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 12))
+                    }
+                    Button { media.nextTrack() } label: {
+                        Image(systemName: "forward.fill").font(.system(size: 9))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(media.accent)
+                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+            } else {
                 HStack(spacing: 6) {
-                    // The ear: art + waves normally; hovering morphs it into
-                    // mini transport controls without opening the panel.
+                    artworkThumb(side: artSide)
                     Group {
-                        if state.earHovered {
-                            HStack(spacing: 9) {
-                                Button { media.previousTrack() } label: {
-                                    Image(systemName: "backward.fill")
-                                        .font(.system(size: 9))
-                                }
-                                Button { media.playPause() } label: {
-                                    Image(systemName: np.isPlaying ? "pause.fill" : "play.fill")
-                                        .font(.system(size: 12))
-                                }
-                                Button { media.nextTrack() } label: {
-                                    Image(systemName: "forward.fill")
-                                        .font(.system(size: 9))
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(media.accent)
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                        if isPlaying {
+                            EqualizerBars(barCount: 4, maxHeight: 14,
+                                          color: media.accent, levels: levels)
                         } else {
-                            HStack(spacing: 6) {
-                                artworkThumb(side: metrics.notchHeight - 10)
-                                Group {
-                                    if np.isPlaying {
-                                        EqualizerBars(barCount: 4, maxHeight: 14,
-                                                      color: media.accent)
-                                    } else {
-                                        Image(systemName: "play.fill")
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(media.accent)
-                                    }
-                                }
-                                .frame(width: 30)
-                            }
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(media.accent)
                         }
                     }
-                    .animation(.easeOut(duration: 0.15), value: state.earHovered)
+                    .frame(width: 30)
                 }
-                .frame(height: metrics.notchHeight)
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
+        .animation(.easeOut(duration: 0.15), value: state.earHovered)
     }
 
     /// Transient notification as its OWN small floating glass capsule beside the

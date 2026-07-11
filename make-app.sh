@@ -45,8 +45,9 @@ PLIST
 # changes on every rebuild, so every rebuild would look like a new app and lose
 # its grants. Signing with the self-signed "Notchbook Signing" cert AND pinning
 # the identifier makes the requirement cert-anchored and identity-stable.
+# Detect via find-certificate: find-identity misses login-keychain certs here.
 IDENTIFIER="com.sensubeans.notchbook"
-if security find-identity -v -p codesigning | grep -q "Notchbook Signing"; then
+if security find-certificate -c "Notchbook Signing" >/dev/null 2>&1; then
     codesign --force --sign "Notchbook Signing" --identifier "$IDENTIFIER" "$APP"
     echo "Signed with 'Notchbook Signing'. Designated requirement:"
     codesign -dr - "$APP" 2>&1 | grep '^designated' || true
