@@ -413,6 +413,207 @@ final class MediaWatcher: ObservableObject {
         }
     }
 
+    /// A Library sub-tab in Music's sidebar.
+    enum LibrarySection: String {
+        case songs = "Songs"
+        case albums = "Albums"
+    }
+
+    /// Show the playing track in Music — its album, for the Albums tab.
+    ///
+    /// **There are two kinds of track and conflating them was the bug.** A song you
+    /// ADDED to your library has a row in `library playlist 1` that `reveal` can
+    /// select. A song you are merely STREAMING from the Apple Music catalog
+    /// (`class = URL track`) has no such row at all: the database-ID lookup matches
+    /// zero tracks and `reveal` silently does nothing — no error, no effect. Most
+    /// songs people actually play are the second kind.
+    ///
+    /// The old code selected the sidebar row FIRST and revealed SECOND. So for a
+    /// streamed track it had already thrown Music onto a library tab, and then the
+    /// reveal quietly failed — dumping you at the top of the list ("first album,
+    /// first song") or stranding you on whatever album you last had open. It seized
+    /// Music's navigation and gave nothing back.
+    ///
+    /// So: **nothing touches Music's navigation until we know we can land
+    /// somewhere.**
+    ///   - In the library → select the sidebar row, then reveal. Order still
+    ///     matters: the row select resets the view, so revealing first is discarded.
+    ///   - Catalog only → leave the library alone entirely and open the album (or
+    ///     the song inside it) straight from the catalog by URL.
+    ///   - Neither → do nothing. Standing still beats moving the user somewhere
+    ///     wrong.
+    func openMusicLibrary(_ section: LibrarySection = .songs) {
+        guard nowPlaying?.source == .music else { return }
+
+        // UI scripting needs Accessibility, and the app is NOT trusted by default.
+        // Ask explicitly (shows the system prompt once) — otherwise `select` throws.
+        let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        let trusted = AXIsProcessTrustedWithOptions(prompt as CFDictionary)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            if self.revealInLibrary(section, trusted: trusted) { return }
+            self.openInCatalog(section)
+        }
+    }
+
+    /// Select the sub-tab and reveal the playing track. Returns `false` — **without
+    /// having moved Music at all** — when the track has no library row.
+    ///
+    /// System Events is the only way to select a sub-tab: `set view` is refused
+    /// (-10006) and there is no View-menu item. It must be `select`, not `click` —
+    /// a synthesized click resolves against stale coordinates and picks the wrong
+    /// row. The track is matched on database ID (an Int) rather than by name, so no
+    /// track metadata is ever interpolated into AppleScript source, where a title
+    /// containing a quote could inject code.
+    private func revealInLibrary(_ section: LibrarySection, trusted: Bool) -> Bool {
+        let script = """
+        -- Resolve BEFORE moving anything. This guard is the whole fix: a streamed
+        -- track has no library row, and if we bail out here Music is left exactly
+        -- where the user had it.
+        set target to missing value
+        tell application "Music"
+            try
+                set dbid to database ID of current track
+                set target to (some track of library playlist 1 ¬
+                               whose database ID is dbid)
+            end try
+        end tell
+        if target is missing value then return "NO_TARGET"
+
+        -- `reopen` first: with its window closed Music still runs, System Events
+        -- sees zero windows, and the sidebar lookup dies with -1719.
+        tell application "Music"
+            reopen
+            activate
+        end tell
+        delay 0.4
+
+        try
+            tell application "System Events" to tell process "Music"
+                set wanted to missing value
+                repeat with r in (rows of outline 1 of scroll area 1 ¬
+                                  of splitter group 1 of window 1)
+                    try
+                        if (name of static text 1 of UI element 1 of r) ¬
+                            is "\(section.rawValue)" then
+                            set wanted to r
+                            exit repeat
+                        end if
+                    end try
+                end repeat
+                if wanted is missing value then error "no \(section.rawValue) row"
+                select wanted
+            end tell
+        on error
+            -- No Accessibility: reveal anyway, so we still land on the track
+            -- rather than the top of the library.
+            tell application "Music"
+                try
+                    reveal target
+                end try
+            end tell
+            return "REVEALED_ONLY"
+        end try
+
+        -- The row select resets the view, so the reveal has to come after it.
+        delay 0.5
+        tell application "Music"
+            try
+                reveal target
+            end try
+        end tell
+        return "OK"
+        """
+        var err: NSDictionary?
+        let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue
+        if let err {
+            NSLog("notchbook revealInLibrary(%@) trusted=%d error=%@",
+                  section.rawValue, trusted ? 1 : 0, err)
+            return false
+        }
+        return out != "NO_TARGET"
+    }
+
+    /// Open the playing track's album in the Apple Music catalog — for the Songs
+    /// tab, the song highlighted inside it.
+    ///
+    /// Only reached when the track isn't in the library, where AppleScript has no
+    /// handle on it whatsoever. The catalog is looked up by name, so this is the
+    /// one path that needs the network; if it finds nothing we do nothing.
+    private func openInCatalog(_ section: LibrarySection) {
+        guard let meta = currentTrackMeta() else { return }
+        let wantSong = (section == .songs)
+
+        var comps = URLComponents(string: "https://itunes.apple.com/search")!
+        comps.queryItems = [
+            .init(name: "term", value: "\(meta.artist) \(wantSong ? meta.title : meta.album)"),
+            .init(name: "entity", value: wantSong ? "song" : "album"),
+            .init(name: "limit", value: "10"),
+        ]
+        guard let url = comps.url else { return }
+
+        // Synchronous is fine — we are already off the main thread.
+        let sem = DispatchSemaphore(value: 0)
+        var payload: Data?
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            payload = data
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 8)
+
+        guard let payload,
+              let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+              let results = json["results"] as? [[String: Any]],
+              !results.isEmpty
+        else {
+            NSLog("notchbook: no catalog match for %@ — %@", meta.artist, meta.album)
+            return
+        }
+
+        // Prefer an exact album match. A search for a popular song cheerfully
+        // returns the "Deluxe"/"Exclusive Edition" first, which is a different
+        // album page than the one actually playing.
+        let wanted = meta.album.lowercased()
+        let hit = results.first { ($0["collectionName"] as? String)?.lowercased() == wanted }
+            ?? results[0]
+
+        // trackViewUrl lands on the song INSIDE its album; collectionViewUrl on the
+        // album itself. Both carry the right storefront — hardcoding "us" would not.
+        let link = (wantSong ? hit["trackViewUrl"] as? String : nil)
+            ?? hit["collectionViewUrl"] as? String
+        guard let link, let musicURL = Self.musicScheme(link) else { return }
+        NSWorkspace.shared.open(musicURL)
+    }
+
+    /// `https://music.apple.com/…` → `music://music.apple.com/…`, so the link opens
+    /// in Music rather than bouncing through the browser.
+    private static func musicScheme(_ web: String) -> URL? {
+        guard var comps = URLComponents(string: web) else { return nil }
+        comps.scheme = "music"
+        comps.queryItems = comps.queryItems?.filter { $0.name != "uo" }  // analytics
+        if comps.queryItems?.isEmpty == true { comps.queryItems = nil }
+        return comps.url
+    }
+
+    /// Title / artist / album of whatever Music is playing right now. `nowPlaying`
+    /// only carries title and artist, and the catalog lookup needs the album too.
+    private func currentTrackMeta() -> (title: String, artist: String, album: String)? {
+        let script = """
+        tell application "Music"
+            set ct to current track
+            return (name of ct) & "\\n" & (artist of ct) & "\\n" & (album of ct)
+        end tell
+        """
+        var err: NSDictionary?
+        guard let out = NSAppleScript(source: script)?
+            .executeAndReturnError(&err).stringValue, err == nil
+        else { return nil }
+        let parts = out.components(separatedBy: "\n")
+        guard parts.count >= 3 else { return nil }
+        return (parts[0], parts[1], parts[2])
+    }
+
     private func fireScript(_ script: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -544,12 +745,52 @@ final class MediaWatcher: ObservableObject {
     }
 
     /// Launches a fully closed player and starts playback (resumes its last
-    /// queue) — "tell … to play" both opens the app and plays.
+    /// queue). Opening the app via NSWorkspace needs no permission and reliably
+    /// launches it even when fully quit; the follow-up "play" is sent
+    /// in-process (not via a spawned osascript) so macOS attributes the
+    /// one-time Automation prompt to this app and actually shows it.
     func launchAndPlay(_ source: Source) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", "tell application \"\(source.rawValue)\" to play"]
-        try? p.run()
+        let play = "tell application \"\(source.rawValue)\" to play"
+        guard let url = NSWorkspace.shared
+            .urlForApplication(withBundleIdentifier: source.bundleID) else {
+            // App not found — try the direct tell as a last resort.
+            _ = runAppleScript(play)
+            return
+        }
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = false
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { [weak self] _, _ in
+            // Give a freshly launched player a moment to be scriptable, then
+            // resume playback on the main thread (NSAppleScript is main-only).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                _ = self?.runAppleScript(play)
+                // A cold "play" no-ops if nothing is queued (or the app wasn't
+                // scriptable yet). Shortly after, if it still isn't playing,
+                // start the whole library so the button always produces sound.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    _ = self?.runAppleScript(Self.resumeFallback(source))
+                }
+            }
+        }
+    }
+
+    /// Second attempt for `launchAndPlay`: if the player still isn't playing,
+    /// kick off a default queue so something actually starts.
+    private static func resumeFallback(_ source: Source) -> String {
+        switch source {
+        case .music:
+            return """
+            tell application "Music"
+                try
+                    if player state is not playing then play library playlist 1
+                end try
+            end tell
+            """
+        case .spotify:
+            return "tell application \"Spotify\" to play"
+        case .youtube:
+            return ""
+        }
     }
 
     private func tapMediaKey(_ key: Int32) {

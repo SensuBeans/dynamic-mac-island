@@ -84,6 +84,7 @@ struct MediaTab: View {
     @EnvironmentObject var audioOutput: AudioOutputModel
     @State private var volume: Double = 50
     @State private var showLyrics = false
+    @State private var artHovered = false
 
     var body: some View {
         if let np = media.nowPlaying {
@@ -318,7 +319,45 @@ struct MediaTab: View {
         }
         .frame(width: 102, height: 102)
         .clipShape(RoundedRectangle(cornerRadius: 10))
+        // Hovering the cover dims it and offers a jump into the Music library.
+        // Apple Music only — the shortcut is meaningless over a Spotify or
+        // YouTube session.
+        .overlay {
+            if artHovered, media.nowPlaying?.source == .music {
+                VStack(spacing: 6) {
+                    libraryButton(.albums, icon: "square.stack",
+                                  help: "Show this song's album in your Apple Music library")
+                    libraryButton(.songs, icon: "music.note.list",
+                                  help: "Show this song in your Apple Music library")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .transition(.opacity)
+            }
+        }
+        .onHover { artHovered = $0 }
+        .animation(.easeOut(duration: 0.15), value: artHovered)
         .shadow(color: .black.opacity(0.5), radius: 10, y: 4)
+    }
+
+    /// One row of the artwork hover overlay: a jump into a Library sub-tab.
+    /// Sized for the 102pt cover, so icon + label sit on a single line.
+    private func libraryButton(_ section: MediaWatcher.LibrarySection,
+                               icon: String, help: String) -> some View {
+        Button { media.openMusicLibrary(section) } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(section.rawValue)
+                    .font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 84, height: 26)
+            .background(Capsule().fill(.white.opacity(0.18)))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private var progressBar: some View {
