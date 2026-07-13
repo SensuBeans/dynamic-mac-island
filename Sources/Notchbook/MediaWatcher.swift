@@ -419,58 +419,101 @@ final class MediaWatcher: ObservableObject {
         case albums = "Albums"
     }
 
-    /// Show the playing track in Music — its album, for the Albums tab.
+    /// Jump into Music from the playing track. Each button does exactly ONE
+    /// deterministic thing — combining a sidebar select with `reveal` was the
+    /// bug: `reveal` navigates the content view to the track's own context,
+    /// hijacking whatever tab was selected half a second earlier.
     ///
-    /// **There are two kinds of track and conflating them was the bug.** A song you
-    /// ADDED to your library has a row in `library playlist 1` that `reveal` can
-    /// select. A song you are merely STREAMING from the Apple Music catalog
-    /// (`class = URL track`) has no such row at all: the database-ID lookup matches
-    /// zero tracks and `reveal` silently does nothing — no error, no effect. Most
-    /// songs people actually play are the second kind.
-    ///
-    /// The old code selected the sidebar row FIRST and revealed SECOND. So for a
-    /// streamed track it had already thrown Music onto a library tab, and then the
-    /// reveal quietly failed — dumping you at the top of the list ("first album,
-    /// first song") or stranding you on whatever album you last had open. It seized
-    /// Music's navigation and gave nothing back.
-    ///
-    /// So: **nothing touches Music's navigation until we know we can land
-    /// somewhere.**
-    ///   - In the library → select the sidebar row, then reveal. Order still
-    ///     matters: the row select resets the view, so revealing first is discarded.
-    ///   - Catalog only → leave the library alone entirely and open the album (or
-    ///     the song inside it) straight from the catalog by URL.
-    ///   - Neither → do nothing. Standing still beats moving the user somewhere
-    ///     wrong.
+    ///   - Songs → select the "Songs" sidebar row and STOP: the full library
+    ///     song list. No reveal — it would immediately yank the view away.
+    ///   - Albums → select the "Albums" sidebar row FIRST, then `reveal` the
+    ///     playing track. The reveal drill-in is hosted inside whichever tab
+    ///     is selected, so anchoring it to Albums keeps the Songs page clean.
+    ///     A streamed catalog track has no library row for reveal to act on
+    ///     (the database-ID lookup matches zero tracks), so that case opens
+    ///     the album straight from the catalog by URL.
     func openMusicLibrary(_ section: LibrarySection = .songs) {
         guard nowPlaying?.source == .music else { return }
 
-        // UI scripting needs Accessibility, and the app is NOT trusted by default.
-        // Ask explicitly (shows the system prompt once) — otherwise `select` throws.
+        // UI scripting needs Accessibility, and the app is NOT trusted by
+        // default. Ask explicitly (shows the system prompt once) —
+        // otherwise `select` throws.
         let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        let trusted = AXIsProcessTrustedWithOptions(prompt as CFDictionary)
+        _ = AXIsProcessTrustedWithOptions(prompt as CFDictionary)
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            if self.revealInLibrary(section, trusted: trusted) { return }
-            self.openInCatalog(section)
+            switch section {
+            case .songs:
+                self.selectLibraryTab("Songs")
+            case .albums:
+                if self.revealInAlbumsPage() { return }
+                self.openInCatalog(section)
+            }
         }
     }
 
-    /// Select the sub-tab and reveal the playing track. Returns `false` — **without
-    /// having moved Music at all** — when the track has no library row.
+    /// Select a Library sub-tab in Music's sidebar and leave the view there.
     ///
-    /// System Events is the only way to select a sub-tab: `set view` is refused
-    /// (-10006) and there is no View-menu item. It must be `select`, not `click` —
-    /// a synthesized click resolves against stale coordinates and picks the wrong
-    /// row. The track is matched on database ID (an Int) rather than by name, so no
-    /// track metadata is ever interpolated into AppleScript source, where a title
-    /// containing a quote could inject code.
-    private func revealInLibrary(_ section: LibrarySection, trusted: Bool) -> Bool {
+    /// System Events is the only way: `set view` is refused (-10006) and there
+    /// is no View-menu item. It must be `select`, not `click` — a synthesized
+    /// click resolves against stale coordinates and picks the wrong row.
+    private func selectLibraryTab(_ rowName: String) {
         let script = """
-        -- Resolve BEFORE moving anything. This guard is the whole fix: a streamed
-        -- track has no library row, and if we bail out here Music is left exactly
-        -- where the user had it.
+        -- `reopen` first: with its window closed Music still runs, System Events
+        -- sees zero windows, and the sidebar lookup dies with -1719.
+        tell application "Music"
+            reopen
+            activate
+        end tell
+        delay 0.4
+        tell application "System Events" to tell process "Music"
+            set targetRow to missing value
+            set bounceRow to missing value
+            repeat with r in (rows of outline 1 of scroll area 1 ¬
+                              of splitter group 1 of window 1)
+                try
+                    set rn to (name of static text 1 of UI element 1 of r)
+                    if rn is "\(rowName)" then
+                        set targetRow to r
+                    else if rn is "Recently Added" then
+                        set bounceRow to r
+                    end if
+                end try
+            end repeat
+            if targetRow is missing value then return "NO_ROW"
+            -- ALWAYS bounce through another row first. Selecting a row that
+            -- Music considers already selected is a no-op (it keeps showing
+            -- an album drill-in that reveal left behind), and the row's
+            -- AX "selected" state can't be trusted after a reveal — so an
+            -- unconditional reset is the only deterministic path to the list.
+            if bounceRow is not missing value then
+                select bounceRow
+                delay 0.35
+            end if
+            select targetRow
+            return "OK"
+        end tell
+        """
+        var err: NSDictionary?
+        let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue
+        if out != "OK" {
+            NSLog("notchbook selectLibraryTab(%@) result=%@ error=%@",
+                  rowName, out ?? "nil", String(describing: err))
+        }
+    }
+
+    /// Land on the playing track's album INSIDE the Albums page: bounce-select
+    /// the Albums sidebar row, then `reveal` the track — the drill-in opens
+    /// anchored to whichever tab is selected. Returns `false` — without having
+    /// moved Music at all — when the track has no library row (streamed
+    /// catalog track). The track is matched on database ID (an Int) rather
+    /// than by name, so no track metadata is ever interpolated into
+    /// AppleScript source, where a title containing a quote could inject code.
+    /// Without Accessibility the tab select fails silently and the reveal
+    /// still lands on the album, just hosted in the current tab.
+    private func revealInAlbumsPage() -> Bool {
+        let script = """
         set target to missing value
         tell application "Music"
             try
@@ -480,44 +523,35 @@ final class MediaWatcher: ObservableObject {
             end try
         end tell
         if target is missing value then return "NO_TARGET"
-
-        -- `reopen` first: with its window closed Music still runs, System Events
-        -- sees zero windows, and the sidebar lookup dies with -1719.
         tell application "Music"
             reopen
             activate
         end tell
         delay 0.4
-
         try
             tell application "System Events" to tell process "Music"
-                set wanted to missing value
+                set targetRow to missing value
+                set bounceRow to missing value
                 repeat with r in (rows of outline 1 of scroll area 1 ¬
                                   of splitter group 1 of window 1)
                     try
-                        if (name of static text 1 of UI element 1 of r) ¬
-                            is "\(section.rawValue)" then
-                            set wanted to r
-                            exit repeat
+                        set rn to (name of static text 1 of UI element 1 of r)
+                        if rn is "Albums" then
+                            set targetRow to r
+                        else if rn is "Recently Added" then
+                            set bounceRow to r
                         end if
                     end try
                 end repeat
-                if wanted is missing value then error "no \(section.rawValue) row"
-                select wanted
+                if targetRow is missing value then error "no Albums row"
+                if bounceRow is not missing value then
+                    select bounceRow
+                    delay 0.35
+                end if
+                select targetRow
             end tell
-        on error
-            -- No Accessibility: reveal anyway, so we still land on the track
-            -- rather than the top of the library.
-            tell application "Music"
-                try
-                    reveal target
-                end try
-            end tell
-            return "REVEALED_ONLY"
+            delay 0.5
         end try
-
-        -- The row select resets the view, so the reveal has to come after it.
-        delay 0.5
         tell application "Music"
             try
                 reveal target
@@ -528,8 +562,7 @@ final class MediaWatcher: ObservableObject {
         var err: NSDictionary?
         let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue
         if let err {
-            NSLog("notchbook revealInLibrary(%@) trusted=%d error=%@",
-                  section.rawValue, trusted ? 1 : 0, err)
+            NSLog("notchbook revealInAlbumsPage error=%@", err)
             return false
         }
         return out != "NO_TARGET"
