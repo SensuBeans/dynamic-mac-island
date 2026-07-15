@@ -99,6 +99,7 @@ private struct SessionMeta {
     var pid: Int
     var name: String?
     var status: String   // "busy" | "waiting" | "idle"
+    var cwd: String
 }
 
 /// Account-wide Claude usage limits (the 5-hour rolling "session" window and the
@@ -199,6 +200,10 @@ final class AgentSessionsModel: ObservableObject {
 
     /// path -> incremental parser state. Touched only on `ioQueue`.
     private var parsers: [String: FileParser] = [:]
+    /// sessionId -> current state + when it entered that state. Keyed by session,
+    /// NOT by transcript, so a brand-new terminal with no transcript yet still
+    /// tracks state/transitions. Touched only on `ioQueue`.
+    private var sessionStates: [String: (state: AgentState, since: Date)] = [:]
     /// Complete sessions the user has acknowledged. Touched only on `ioQueue`.
     private var acknowledgedCompleteIDs: Set<String> = []
 
@@ -246,9 +251,9 @@ final class AgentSessionsModel: ObservableObject {
     func acknowledgeCompletes() {
         ioQueue.async { [weak self] in
             guard let self else { return }
-            let completeIDs = Set(self.parsers.values
-                .filter { $0.currentState == .complete }
-                .map { $0.id })
+            let completeIDs = Set(self.sessionStates
+                .filter { $0.value.state == .complete }
+                .map { $0.key })
             self.acknowledgedCompleteIDs.formUnion(completeIDs)
             self.lastAckCount = 0
             DispatchQueue.main.async { self.unacknowledgedCompleteCount = 0 }
@@ -355,58 +360,76 @@ final class AgentSessionsModel: ObservableObject {
         if size > p.byteOffset { ingest(into: p) }
     }
 
-    /// Recompute each tracked session's state from its message clock, drop the
-    /// idle-expired, emit transitions, and publish. No file IO — runs from both
-    /// the FSEvents scan and the 1.5 s poll timer, cheaply.
+    /// Rebuild the session list. TERMINAL-DRIVEN: a running Claude Code process
+    /// (a `~/.claude/sessions/<pid>.json` with a live pid) is shown until its
+    /// terminal closes, no matter how long it sits idle — this page is a hub
+    /// that tracks open terminals. Transcripts only enrich (model, context,
+    /// tokens, interrupt). A transcript with no live session file is still shown
+    /// as a fallback, but ages out after 30 min. No file IO beyond the tiny
+    /// session/usage files; runs from FSEvents and the 1.5 s timer.
     private func rebuild() {
         let now = Date()
-        let metas = readSessionMetas()   // authoritative live status by sessionId
-        var built: [(session: AgentSession, old: AgentState?)] = []
-        var expired: [String] = []
+        let metas = readSessionMetas()   // live terminals, by sessionId
 
-        for (path, p) in parsers {
-            // File deleted out from under us (no FSEvents walk to catch it now).
-            if !FileManager.default.fileExists(atPath: path) { expired.append(path); continue }
-
-            let meta = metas[p.id]
-
-            // Activity = newest USER/ASSISTANT (incl. sidechain) timestamp, never
-            // a bare file write (system/attachment/queue-op/mtime) — those fire
-            // long after a turn ends and would resurrect a finished session and
-            // keep it from ever dropping. No real message yet => don't surface a
-            // phantom (e.g. an all-sidechain file), but keep watching it.
-            guard let lastActivity = p.newestEntryTs, p.messageCount > 0 else { continue }
-            let age = now.timeIntervalSince(lastActivity)
-
-            // The transcript clock derives state; a LIVE session file (its process
-            // still running) overrides it — busy/waiting are authoritative, and a
-            // live process is never dropped even if its transcript went quiet
-            // (a session parked >30 min at a permission prompt must stay).
-            var state = computeState(p, age: age)
-            if state == nil {
-                if meta != nil { state = .idle }   // alive but quiet => keep, dim
-                else { expired.append(path); continue }
-            }
-            let resolved = applyStatus(base: state!, meta: meta)
-
-            let old = p.currentState
-            if old == nil {
-                // First classification of this file — anchor stateSince to the
-                // real last-activity instant, so a relaunch doesn't replay a long-
-                // finished run as a "just now" complete (green pill / recency).
-                p.stateSince = min(now, lastActivity)
-                p.currentState = resolved
-            } else if resolved != old {
-                p.stateSince = now
-                p.currentState = resolved
-            }
-            built.append((makeSession(p, state: resolved, lastActivity: lastActivity,
-                                      meta: meta), old))
+        // Drop parsers whose transcript file vanished.
+        for (path, _) in parsers where !FileManager.default.fileExists(atPath: path) {
+            parsers.removeValue(forKey: path)
         }
-        for key in expired { parsers.removeValue(forKey: key) }
+        // Index transcripts by sessionId (most-recently-active wins on the rare
+        // collision), so each session finds its enrichment.
+        var parserByID: [String: FileParser] = [:]
+        for p in parsers.values where !p.id.isEmpty && p.messageCount > 0 {
+            if let existing = parserByID[p.id],
+               (existing.newestEntryTs ?? .distantPast) >= (p.newestEntryTs ?? .distantPast) {
+                continue
+            }
+            parserByID[p.id] = p
+        }
 
-        // Toasts: only real changes, never on first observation (old == nil) so
-        // relaunch doesn't replay historical completes.
+        // Candidate sessions: every live terminal, plus any recently-active
+        // transcript without a session file (fallback for non-interactive runs).
+        var ids = Set(metas.keys)
+        for (id, p) in parserByID {
+            if let last = p.newestEntryTs, now.timeIntervalSince(last) < idleMax { ids.insert(id) }
+        }
+
+        var built: [(session: AgentSession, old: AgentState?)] = []
+        var liveIDs = Set<String>()
+
+        for id in ids {
+            let meta = metas[id]
+            let p = parserByID[id]
+            let lastActivity = p?.newestEntryTs
+            let age = lastActivity.map { now.timeIntervalSince($0) } ?? .infinity
+
+            // Liveness: a live process stays forever; a transcript-only session
+            // ages out. Anything else is closed → drop.
+            let live = meta != nil || (lastActivity != nil && age < idleMax)
+            guard live else { continue }
+            liveIDs.insert(id)
+
+            let base = p.map { classify($0, age: age) } ?? .idle
+            let resolved = resolveState(base: base, meta: meta, hasTranscript: p != nil)
+
+            // Transition tracking keyed by session (survives having no transcript).
+            let prev = sessionStates[id]
+            if prev == nil {
+                // Anchor stateSince to the real last-activity instant so a relaunch
+                // doesn't replay a long-finished run as a "just now" complete.
+                sessionStates[id] = (resolved, lastActivity.map { min(now, $0) } ?? now)
+            } else if prev!.state != resolved {
+                sessionStates[id] = (resolved, now)
+            }
+            let since = sessionStates[id]!.since
+
+            built.append((makeSession(id: id, parser: p, meta: meta, state: resolved,
+                                      since: since, lastActivity: lastActivity ?? since),
+                          prev?.state))
+        }
+        // Forget state for sessions that closed.
+        sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
+
+        // Toasts: only real changes, never on first observation (old == nil).
         for item in built {
             if let old = item.old, old != item.session.state {
                 let s = item.session
@@ -464,7 +487,8 @@ final class AgentSessionsModel: ObservableObject {
                   kill(pid, 0) == 0 else { continue }   // pid alive?
             out[sid] = SessionMeta(pid: Int(pid),
                                    name: obj["name"] as? String,
-                                   status: obj["status"] as? String ?? "idle")
+                                   status: obj["status"] as? String ?? "idle",
+                                   cwd: obj["cwd"] as? String ?? "")
         }
         return out
     }
@@ -599,14 +623,12 @@ final class AgentSessionsModel: ObservableObject {
         return false
     }
 
-    // MARK: - State machine (spec §2)
+    // MARK: - State machine
 
-    /// Returns nil when the session should be dropped (no message activity for
-    /// >= 30 min). `.waiting` is never produced here — see the type doc.
-    private func computeState(_ p: FileParser, age: TimeInterval) -> AgentState? {
-        // Drop first: nothing from the agent for half an hour => gone.
-        if age >= idleMax { return nil }
-
+    /// Classify a session from its transcript alone (never drops — liveness is
+    /// decided in `rebuild` from the live session file). `.waiting` is never
+    /// produced here; that comes from the process status.
+    private func classify(_ p: FileParser, age: TimeInterval) -> AgentState {
         // Interrupted — sticky until a newer non-interrupt message lands.
         if p.lastMsgIsInterrupt { return .interrupted }
 
@@ -614,44 +636,62 @@ final class AgentSessionsModel: ObservableObject {
         if age < workingWindow { return .working }
 
         if p.lastMsgIsAssistant {
-            // Turn finished => resting green ("your move") until it ages out.
-            if p.lastMsgStopReason == "end_turn" { return .complete }
-            // Mid-turn (tool_use, or streaming with nil stop_reason): Claude is
-            // blocked on a tool that can legitimately run for minutes (a build, a
-            // long test, `sleep`) — still working, NOT idle.
+            // Turn just finished => green "your move" briefly, then settle to idle
+            // (a session left untouched for a while reads as idle, not fresh).
+            if p.lastMsgStopReason == "end_turn" { return age < idleMin ? .complete : .idle }
+            // Mid-turn (tool_use / streaming): a tool can run for minutes — still
+            // working, NOT idle.
             return .working
         }
 
-        // Last message is a user prompt: the assistant is presumed to be
-        // spinning up its reply; if it stays quiet past 5 min, call it idle.
+        // Last message is a user prompt: assistant presumed spinning up.
         return age < idleMin ? .working : .idle
     }
 
-    private func makeSession(_ p: FileParser, state: AgentState,
-                             lastActivity: Date, meta: SessionMeta?) -> AgentSession {
-        let (display, window) = Self.resolveModel(p.latestModel,
-                                                  observedContextTokens: p.maxContextTokens)
+    /// Fold the authoritative process status over the transcript classification.
+    /// Interrupt wins; then busy→working, waiting→waiting; "idle" defers to the
+    /// transcript but never reports "working" (the process says it's not busy),
+    /// so a quiet session settles to complete (just finished) or idle.
+    private func resolveState(base: AgentState, meta: SessionMeta?,
+                              hasTranscript: Bool) -> AgentState {
+        if base == .interrupted { return .interrupted }
+        guard let meta else { return base }
+        switch meta.status {
+        case "busy":    return .working
+        case "waiting": return .waiting
+        default:        return base == .complete ? .complete : .idle
+        }
+    }
+
+    private func makeSession(id: String, parser p: FileParser?, meta: SessionMeta?,
+                             state: AgentState, since: Date,
+                             lastActivity: Date) -> AgentSession {
+        let (display, window) = Self.resolveModel(p?.latestModel ?? nil,
+                                                  observedContextTokens: p?.maxContextTokens ?? 0)
         let branch: String? = {
-            guard let b = p.gitBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+            guard let b = p?.gitBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !b.isEmpty, b != "HEAD" else { return nil }
             return b
         }()
-        let project = p.cwd.isEmpty
-            ? URL(fileURLWithPath: p.path).deletingPathExtension().lastPathComponent
-            : URL(fileURLWithPath: p.cwd).lastPathComponent
+        // Prefer the transcript's cwd, then the session file's, then the name.
+        let cwd = (p.map { $0.cwd.isEmpty ? nil : $0.cwd } ?? nil)
+            ?? (meta.map { $0.cwd.isEmpty ? nil : $0.cwd } ?? nil) ?? ""
+        let project = cwd.isEmpty
+            ? (meta?.name ?? String(id.prefix(8)))
+            : URL(fileURLWithPath: cwd).lastPathComponent
         return AgentSession(
-            id: p.id,
+            id: id,
             project: project,
             gitBranch: branch,
             modelDisplay: display,
             state: state,
-            stateSince: p.stateSince,
+            stateSince: since,
             lastActivity: lastActivity,
-            contextTokens: p.contextTokens,
+            contextTokens: p?.contextTokens ?? 0,
             contextWindow: window,
-            outputTokens: p.outputTokens,
-            messageCount: p.messageCount,
-            cwd: p.cwd,
+            outputTokens: p?.outputTokens ?? 0,
+            messageCount: p?.messageCount ?? 0,
+            cwd: cwd,
             tty: nil,
             pid: meta?.pid,
             name: meta?.name)
