@@ -7,9 +7,10 @@ struct NotchMetrics {
     let notchWidth: CGFloat
     let notchHeight: CGFloat
 
-    /// Extra width either side of the physical notch (visual only, when the
-    /// island is showing content). The hover zone hugs the notch exactly.
-    static let wing: CGFloat = 14
+    /// Visual wings either side of the notch — now ZERO: the collapsed island is
+    /// exactly the physical notch footprint, extras grow rightward only. Kept as
+    /// a named constant (not deleted) so existing call sites stay valid.
+    static let wing: CGFloat = 0
     /// The hover/expand trigger zone: the physical notch bounds, exactly.
     var hoverZoneSize: CGSize { CGSize(width: notchWidth, height: notchHeight) }
     static let topFlare: CGFloat = 6
@@ -65,7 +66,10 @@ struct NotchMetrics {
                        withAgent: Bool = false) -> CGSize {
         let ears = (withMedia ? mediaEarWidth : 0) + (withAgent ? Self.agentEar : 0)
         let extra: CGFloat = toast ? 215 : ears
-        return CGSize(width: notchWidth + Self.wing * 2 + extra, height: notchHeight)
+        // EXACTLY the physical notch width, plus right-side content only — no
+        // wings. The bar's left edge sits flush at the notch's left edge; all
+        // extras (ear, toast, pill slot) grow rightward from the notch.
+        return CGSize(width: notchWidth + extra, height: notchHeight)
     }
 
     /// "Twice as big" mirror: double the zoomed width, clamped so the island
@@ -140,7 +144,7 @@ struct NotchMetrics {
     func islandLeadingPad(expanded: Bool, zoomed: Bool = false,
                           large: Bool = false) -> CGFloat {
         expanded ? (windowFrame.width - expandedSize(zoomed: zoomed, large: large).width) / 2
-                 : windowFrame.width / 2 - notchWidth / 2 - Self.wing
+                 : windowFrame.width / 2 - notchWidth / 2
     }
 
     /// Leading pad that centers an expanded island of an explicit width — used

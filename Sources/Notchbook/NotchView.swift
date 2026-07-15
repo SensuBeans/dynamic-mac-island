@@ -85,33 +85,38 @@ struct NotchView: View {
         let totalExpandedHeight = metrics.notchHeight + gap
             + NotchMetrics.navIslandHeight + gap + expandedSize.height
         return ZStack(alignment: .top) {
-            // Collapsed bar: hugs the notch silhouette, hosts the ears.
-            // Fully invisible when idle — the hardware notch covers it.
-            ZStack(alignment: .top) {
-                if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
-                Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
-            }
-            .frame(width: metrics.collapsedSize(withMedia: hasMedia,
-                                                toast: hasToast).width,
-                   height: metrics.notchHeight)
-            .overlay(alignment: .top) { ears }
-            .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
-                                  bottomRadius: 10))
-            .opacity(state.isExpanded ? 0 : 1)
-            // Pin the notch bar to the leading edge so it stays flush with the
-            // hardware notch. The island frame is wider than the bar when the
-            // agent pill reserves its slot on the right — without this the bar
-            // would center in that extra width and drift right.
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Collapsed island. Two SEPARATE layers so content can never hide
+            // under the notch: (1) the dark notch-shaped backing, clipped to the
+            // silhouette and sized to notch+ear; (2) the content row (ear + agent
+            // pill) ANCHORED at the notch's RIGHT edge (leading pad = notchWidth)
+            // with intrinsic width and NO clip — its position is a fixed offset,
+            // not derived from an animating bar width, so it cannot drift left
+            // under the notch or be truncated by the silhouette.
+            ZStack(alignment: .topLeading) {
+                ZStack {
+                    if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                    Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                }
+                .frame(width: metrics.collapsedSize(withMedia: hasMedia,
+                                                    toast: hasToast).width,
+                       height: metrics.notchHeight)
+                .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
+                                      bottomRadius: 10))
 
-            // Agent-status pill — its OWN floating glass capsule that sits just
-            // to the right of the notch bar (a small gap), NOT out at the far
-            // edge. Offset by the bar width so it hugs the notch / media cluster.
-            agentPill
+                HStack(spacing: 0) {
+                    // Fixed notch-width block reserves the hardware notch; content
+                    // starts exactly at the notch's right edge and a trailing
+                    // Spacer keeps the whole row hard against the left. This can't
+                    // right-drift the way a padding+alignment combo did.
+                    Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
+                    ears
+                    agentPill.padding(.leading, 6)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: metrics.notchHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .offset(x: metrics.collapsedSize(withMedia: hasMedia,
-                                                  toast: hasToast).width + 4)
-                .opacity(state.isExpanded ? 0 : 1)
+            }
+            .opacity(state.isExpanded ? 0 : 1)
 
             // Expanded: the nav bar and the content panel are each their
             // OWN floating island, stacked below the notch.
@@ -127,6 +132,10 @@ struct NotchView: View {
                     .allowsHitTesting(navShown)
                     .animation(.easeOut(duration: 0.18), value: navShown)
             }
+            // Pin the (wider) expanded content to the island's current width so
+            // it can't inflate the ZStack when collapsed — otherwise the outer
+            // centered frame would shift the collapsed bar left under the notch.
+            .frame(width: size.width)
             .padding(.top, metrics.notchHeight + gap)
             .opacity(state.isExpanded ? 1 : 0)
             .offset(y: state.isExpanded ? 0 : -totalExpandedHeight)
@@ -222,7 +231,6 @@ struct NotchView: View {
         Group {
             if let toast = state.toast, !state.isExpanded {
                 HStack(spacing: 8) {
-                    Spacer()
                     if toast.useArtwork, let art = media.artwork {
                         Image(nsImage: art)
                             .resizable()
@@ -249,8 +257,6 @@ struct NotchView: View {
                     }
                     .frame(width: 150, alignment: .leading)
                 }
-                .padding(.trailing, 10)
-                .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
             } else if pomodoro.isRunning, settings.timerCountdownEar,
@@ -258,7 +264,6 @@ struct NotchView: View {
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
                 HStack(spacing: 5) {
-                    Spacer()
                     ZStack {
                         Circle().stroke(.white.opacity(0.25), lineWidth: 2)
                         Circle()
@@ -273,15 +278,11 @@ struct NotchView: View {
                         .monospacedDigit()
                         .foregroundStyle(pomodoro.phase == .focus ? Color.orange : .green)
                 }
-                // Keep the countdown ear INBOARD of the agent pill (outer slot).
-                .padding(.trailing, 10)
-                .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
             } else if let np = media.nowPlaying, !media.earHidden, !state.isExpanded {
                 // Right ear only: never cover the frontmost app's menu items.
                 HStack(spacing: 6) {
-                    Spacer()
                     // The ear: art + waves normally; hovering morphs it into
                     // mini transport controls without opening the panel.
                     Group {
@@ -323,9 +324,6 @@ struct NotchView: View {
                     }
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
                 }
-                // Keep the media ear INBOARD of the agent pill (outer slot).
-                .padding(.trailing, 8)
-                .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
             }
