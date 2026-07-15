@@ -55,6 +55,9 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
     var onMouseState: ((Bool) -> Void)?
     /// Cursor is over the island but outside the hover zone (i.e., the ear).
     var onEarHover: ((Bool) -> Void)?
+    /// A click landed inside the hover zone (the notch itself, not the ear).
+    /// Used to open the panel when "hover to expand" is turned off.
+    var onZoneClick: (() -> Void)?
 
     private var hoverArea: NSTrackingArea?
 
@@ -89,6 +92,13 @@ final class PassThroughHostingView: NSHostingView<AnyView> {
         super.mouseExited(with: event)
         onMouseState?(false)
         onEarHover?(false)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let zone = hoverZoneRect?() ?? islandRect()
+        if zone.insetBy(dx: -2, dy: -2).contains(p) { onZoneClick?() }
+        super.mouseDown(with: event)
     }
 
     private func reportHover(_ event: NSEvent) {

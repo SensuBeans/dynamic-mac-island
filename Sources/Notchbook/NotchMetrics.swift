@@ -21,12 +21,24 @@ struct NotchMetrics {
     static let expandedContentSize = CGSize(width: 460, height: 158)
     /// Larger island used while the mirror is zoomed.
     static let zoomedContentSize = CGSize(width: 620, height: 470)
+    /// The terminal tab needs real estate — roughly 90×20 cells at 11pt mono.
+    /// This is the final island size (chips + terminal), not a "content" size,
+    /// so it is used verbatim rather than run through `expandedSize`.
+    static let terminalIslandSize = CGSize(width: 620, height: 320)
+    /// The Agents tab is a session dashboard — tall enough for ~5 rows before
+    /// the list scrolls. Final island size, used verbatim like the terminal's.
+    static let agentsIslandSize = CGSize(width: 470, height: 300)
     /// Transparent margin around the expanded shape so its shadow isn't clipped.
     static let shadowPad: CGFloat = 40
     /// Extra ear width either side of the notch while media is active, so the
     /// island can show album art and a now-playing indicator like the iPhone's
     /// Dynamic Island.
     static let mediaEar: CGFloat = 12
+    /// Extra ear width on the RIGHT for the collapsed agent-status pill
+    /// (state glyph + count capsule). Like the media ear, it grows the island
+    /// rightward only; the left side stays at notch width. Sits OUTBOARD of the
+    /// media ear when both are present.
+    static let agentEar: CGFloat = 46
 
     init(screen: NSScreen) {
         self.screen = screen
@@ -49,8 +61,10 @@ struct NotchMetrics {
         (notchHeight - 10) + 6 + 30 + 8
     }
 
-    func collapsedSize(withMedia: Bool, toast: Bool = false) -> CGSize {
-        let extra: CGFloat = toast ? 215 : (withMedia ? mediaEarWidth : 0)
+    func collapsedSize(withMedia: Bool, toast: Bool = false,
+                       withAgent: Bool = false) -> CGSize {
+        let ears = (withMedia ? mediaEarWidth : 0) + (withAgent ? Self.agentEar : 0)
+        let extra: CGFloat = toast ? 215 : ears
         return CGSize(width: notchWidth + Self.wing * 2 + extra, height: notchHeight)
     }
 
@@ -79,15 +93,29 @@ struct NotchMetrics {
     /// The tray hugs its content like a proper drop shelf: one row of files
     /// keeps the panel short; more rows grow it up to the standard height,
     /// after which the grid scrolls.
-    func trayExpandedSize(itemCount: Int) -> CGSize {
-        let columns = 6  // 62pt tiles + 8pt gaps in the 428pt content width
+    /// `cell` is the grid tile edge (the tray tile-size setting: 62 normal,
+    /// 54 compact). Columns and row height derive from it so the island height
+    /// never drifts from the actual grid. At 62 this reproduces the original
+    /// 6-column / 74pt-row layout exactly.
+    func trayExpandedSize(itemCount: Int, cell: CGFloat = 62) -> CGSize {
+        let gap: CGFloat = 8
+        let contentWidth: CGFloat = 428  // usable grid width
+        let columns = max(1, Int((contentWidth + gap) / (cell + gap)))
         let rows = max(1, (itemCount + columns - 1) / columns)
-        // 74pt per tile row (tile + label), 8pt between rows; 28pt footer
-        // block; 56pt tab bar + paddings.
-        let grid = CGFloat(rows) * 74 + CGFloat(rows - 1) * 8
+        let rowHeight = cell + 12  // tile + label
+        let grid = CGFloat(rows) * rowHeight + CGFloat(rows - 1) * gap
         let content = min(Self.expandedContentSize.height, 56 + grid + 28)
         var size = expandedSize()
         size.height = content - 30
+        return size
+    }
+
+    /// The calendar tab grows taller in month mode to fit a comfortable month
+    /// grid beside the selected day's events; list mode uses the standard size.
+    func calendarExpandedSize(monthMode: Bool) -> CGSize {
+        guard monthMode else { return expandedSize() }
+        var size = expandedSize()
+        size.height = 210
         return size
     }
 
@@ -115,10 +143,20 @@ struct NotchMetrics {
                  : windowFrame.width / 2 - notchWidth / 2 - Self.wing
     }
 
-    /// Prefer the screen that actually has a notch.
-    static func notchScreen() -> NSScreen {
+    /// Leading pad that centers an expanded island of an explicit width — used
+    /// by tabs whose island isn't sized by `expandedSize` (tray, terminal,
+    /// calendar month mode). Keeps hover hit-testing aligned with the rendered
+    /// island whatever its width.
+    func expandedLeadingPad(width: CGFloat) -> CGFloat {
+        (windowFrame.width - width) / 2
+    }
+
+    /// Prefer the screen that actually has a notch. Returns nil when no screen
+    /// is available — `NSScreen.screens` is momentarily empty during display
+    /// reconfiguration, and indexing `[0]` there would trap.
+    static func notchScreen() -> NSScreen? {
         NSScreen.screens.first { $0.safeAreaInsets.top > 0 }
             ?? NSScreen.main
-            ?? NSScreen.screens[0]
+            ?? NSScreen.screens.first
     }
 }

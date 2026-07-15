@@ -1,0 +1,677 @@
+import Foundation
+import Combine
+import SwiftUI
+import CoreServices
+
+/// Watches every Claude Code transcript under `~/.claude/projects` and derives a
+/// live `AgentSession` per running session — zero config, pure transcript
+/// tailing. Everything expensive (FSEvents, stat, byte-offset reads, JSON) runs
+/// on `ioQueue`; only the two `@Published` mirrors and `onTransition` toasts
+/// ever touch the main thread.
+///
+/// Why a poll timer AND FSEvents: FSEvents makes appends land fast, but some
+/// states are *time* transitions with no file write behind them — a session
+/// stops being `.working` after 10 s of quiet, and a live session drops off the
+/// list after 30 min of no message activity. A ~1.5 s timer re-evaluates the
+/// clock (over the already-tracked parsers, no directory walk) so those fire
+/// even when nothing is being written.
+///
+/// `.waiting` (needs a human) is NOT derived here — without hooks the transcript
+/// can't reliably tell "asking a question" from "just finished". The resting
+/// state after a turn is `.complete` (green, your move). `.waiting` is reserved
+/// for the Phase C hook enhancer, which sees permission prompts directly.
+
+// MARK: - Public model types
+
+enum AgentState {
+    case working, complete, interrupted, idle, waiting
+
+    /// SF Symbol for the row's state glyph.
+    var glyph: String {
+        switch self {
+        case .working:     return "circle.fill"
+        case .complete:    return "checkmark.circle.fill"
+        case .interrupted: return "stop.circle.fill"
+        case .idle:        return "moon.zzz.fill"
+        case .waiting:     return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .working:     return .blue
+        case .complete:    return .green
+        case .interrupted: return .gray
+        case .idle:        return .secondary
+        case .waiting:     return .orange
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .working:     return "Working"
+        case .complete:    return "Done"
+        case .interrupted: return "Interrupted"
+        case .idle:        return "Idle"
+        case .waiting:     return "Waiting"
+        }
+    }
+
+    /// Grouping order for the sessions list: needs-attention first, then busy,
+    /// then recently-finished, then dim/idle.
+    var sortRank: Int {
+        switch self {
+        case .waiting, .interrupted: return 0
+        case .working:               return 1
+        case .complete:              return 2
+        case .idle:                  return 3
+        }
+    }
+}
+
+struct AgentSession: Identifiable {
+    let id: String            // sessionId (filename stem fallback)
+    var project: String       // cwd basename
+    var gitBranch: String?    // nil if "HEAD"/empty
+    var modelDisplay: String  // "Opus 4.8","Fable","Sonnet","Haiku 4.5", or raw id
+    var state: AgentState
+    var stateSince: Date
+    var lastActivity: Date
+    var contextTokens: Int    // latest assistant usage: input + cache_read + cache_creation
+    var contextWindow: Int?   // nil => render raw tokens, no percent
+    var outputTokens: Int     // running sum across assistant entries
+    var messageCount: Int
+    var cwd: String           // full path (for future jump-back)
+    var tty: String?          // nil in Phase A
+}
+
+final class AgentSessionsModel: ObservableObject {
+
+    /// Ordered: needs-attention (waiting/interrupted), then working, then recent
+    /// complete, then idle; most-recent activity first within a group.
+    @Published private(set) var sessions: [AgentSession] = []
+
+    /// Additive convenience for the collapsed ear pill: how many `.complete`
+    /// sessions the user has NOT yet seen (cleared by `acknowledgeCompletes`).
+    /// Not in the original contract — the pill's "✓ N" needs an ack-aware count,
+    /// and the fixed `AgentSession` struct has no per-row ack field to carry it.
+    @Published private(set) var unacknowledgedCompleteCount: Int = 0
+
+    /// Collapsed ear-pill descriptor for the notch, by priority: any `.waiting`
+    /// (needs a human) beats any `.working` beats a recently-`.complete` run
+    /// (finished within 5 min). `nil` => no pill, so the collapsed bar stays
+    /// hidden. Single source of truth so the pill's drawing (NotchView.agentEar),
+    /// the collapsed island width (three sites) and AppDelegate.islandRect all
+    /// agree on WHEN — and thus how wide — the pill is. Additive convenience,
+    /// like `unacknowledgedCompleteCount`.
+    enum CollapsedPill: Equatable {
+        case waiting(Int), working(Int), complete(Int)
+    }
+
+    var collapsedPill: CollapsedPill? {
+        var waiting = 0, working = 0
+        for s in sessions {
+            switch s.state {
+            case .waiting: waiting += 1
+            case .working: working += 1
+            default: break
+            }
+        }
+        if waiting > 0 { return .waiting(waiting) }
+        if working > 0 { return .working(working) }
+        // Recent, still-unacknowledged completes (see `updateAckCount`: recency
+        // <5 min AND not yet seen). Viewing the Agents tab clears this, so the
+        // green "✓ N" pill actually goes away — the ack machinery now drives it.
+        if unacknowledgedCompleteCount > 0 { return .complete(unacknowledgedCompleteCount) }
+        return nil
+    }
+
+    /// Does the collapsed pill have anything to show? Gates the collapsed
+    /// island's width + visibility, mirroring `mediaEarWidth`'s role.
+    var hasActivePill: Bool { collapsedPill != nil }
+
+    /// Fired on the MAIN queue on debounced per-session state changes.
+    /// Arguments: (session carrying the NEW state, the OLD state).
+    var onTransition: ((AgentSession, AgentState) -> Void)?
+
+    // MARK: State constants (spec §2, tunable)
+
+    private let workingWindow: TimeInterval = 10      // fresh message => working
+    private let idleMin:       TimeInterval = 5 * 60  // dim row (user-prompt-last, quiet)
+    private let idleMax:       TimeInterval = 30 * 60 // drop from the live list
+
+    // MARK: Threading
+
+    /// Single serial queue owns ALL mutable parsing state (`parsers`,
+    /// `acknowledgedCompleteIDs`, publish throttle). Confinement, not locks.
+    private let ioQueue = DispatchQueue(label: "com.sensubeans.notchbook.agents",
+                                        qos: .utility)
+
+    private let projectsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/projects", isDirectory: true)
+
+    /// path -> incremental parser state. Touched only on `ioQueue`.
+    private var parsers: [String: FileParser] = [:]
+    /// Complete sessions the user has acknowledged. Touched only on `ioQueue`.
+    private var acknowledgedCompleteIDs: Set<String> = []
+
+    private var stream: FSEventStreamRef?
+    private var timer: DispatchSourceTimer?
+
+    // Publish throttle (<= 2 Hz), all on `ioQueue`.
+    private var pendingPublish: [AgentSession]?
+    private var lastPublish = Date.distantPast
+    private var publishScheduled = false
+    /// Last value pushed to `unacknowledgedCompleteCount` — publish only on a
+    /// real change so a fast-appending transcript can't storm SwiftUI with
+    /// no-op `objectWillChange` for a count that never moved.
+    private var lastAckCount = -1
+
+    // MARK: - Lifecycle
+
+    func start() {
+        ioQueue.async { [weak self] in self?.scan() }   // immediate initial scan
+        startFSEvents()
+        startTimer()
+    }
+
+    func shutdown() {
+        stopFSEvents()
+        timer?.cancel()
+        timer = nil
+    }
+
+    /// Called when the Agents tab is viewed — clears the "recent complete"
+    /// highlight so the ear pill stops flagging finished runs the user has seen.
+    func acknowledgeCompletes() {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            let completeIDs = Set(self.parsers.values
+                .filter { $0.currentState == .complete }
+                .map { $0.id })
+            self.acknowledgedCompleteIDs.formUnion(completeIDs)
+            self.lastAckCount = 0
+            DispatchQueue.main.async { self.unacknowledgedCompleteCount = 0 }
+        }
+    }
+
+    // MARK: - FSEvents
+
+    /// C callback carries no capture — it hops back to the instance through the
+    /// `info` pointer, then does the scan on the queue FSEvents delivers on.
+    private static let fsCallback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        guard let info else { return }
+        let model = Unmanaged<AgentSessionsModel>.fromOpaque(info).takeUnretainedValue()
+        model.scan()   // already on ioQueue (set via FSEventStreamSetDispatchQueue)
+    }
+
+    private func startFSEvents() {
+        // passUnretained: the app delegate owns us for the process lifetime, so
+        // FSEvents must not add a retain (it would outlive shutdown otherwise).
+        var ctx = FSEventStreamContext(version: 0,
+                                       info: Unmanaged.passUnretained(self).toOpaque(),
+                                       retain: nil, release: nil, copyDescription: nil)
+        let flags = UInt32(kFSEventStreamCreateFlagFileEvents |
+                           kFSEventStreamCreateFlagNoDefer)
+        guard let s = FSEventStreamCreate(kCFAllocatorDefault,
+                                          Self.fsCallback,
+                                          &ctx,
+                                          [projectsURL.path] as CFArray,
+                                          FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                                          0.3,     // coalesce bursts
+                                          flags) else { return }
+        FSEventStreamSetDispatchQueue(s, ioQueue)
+        guard FSEventStreamStart(s) else {
+            // Start failed — no events will arrive; the 1.5 s timer still keeps
+            // known sessions' clocks moving. Don't retain a dead stream.
+            FSEventStreamInvalidate(s)
+            FSEventStreamRelease(s)
+            return
+        }
+        stream = s
+    }
+
+    private func stopFSEvents() {
+        guard let s = stream else { return }
+        FSEventStreamStop(s)
+        FSEventStreamInvalidate(s)
+        FSEventStreamRelease(s)
+        stream = nil
+    }
+
+    private func startTimer() {
+        let t = DispatchSource.makeTimerSource(queue: ioQueue)
+        t.schedule(deadline: .now() + 1.5, repeating: 1.5)
+        // Timer only re-evaluates the clock over already-tracked parsers — no
+        // directory walk / stat storm. Directory discovery is FSEvents-driven.
+        t.setEventHandler { [weak self] in self?.rebuild() }
+        t.resume()
+        timer = t
+    }
+
+    // MARK: - Scan (ioQueue only)
+
+    /// Directory discovery + append reads. FSEvents-driven (and the one-shot
+    /// initial scan). Walks the tree, adopts new live files, ingests appended
+    /// bytes, forgets vanished files — then hands off to `rebuild()`.
+    private func scan() {
+        let now = Date()
+        var seen = Set<String>()
+
+        for path in jsonlFiles() {
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { continue }
+            let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+            let mtime = (attrs[.modificationDate] as? Date) ?? now
+
+            var parser = parsers[path]
+            if parser == nil {
+                // New file: only adopt it if it's live (initial-scan rule —
+                // ignore transcripts idle beyond the drop threshold).
+                guard now.timeIntervalSince(mtime) < idleMax else { continue }
+                let p = FileParser(path: path, now: now)
+                parsers[path] = p
+                parser = p
+            }
+            guard let p = parser else { continue }
+            seen.insert(path)
+
+            // Truncation / rotation: size shrank => start over from scratch.
+            if size < p.byteOffset { p.reset(now: now) }
+            if size > p.byteOffset { ingest(into: p) }
+        }
+
+        // Forget parsers whose files vanished.
+        for key in parsers.keys where !seen.contains(key) { parsers.removeValue(forKey: key) }
+
+        rebuild()
+    }
+
+    /// Recompute each tracked session's state from its message clock, drop the
+    /// idle-expired, emit transitions, and publish. No file IO — runs from both
+    /// the FSEvents scan and the 1.5 s poll timer, cheaply.
+    private func rebuild() {
+        let now = Date()
+        var built: [(session: AgentSession, old: AgentState?)] = []
+        var expired: [String] = []
+
+        for (path, p) in parsers {
+            // Activity = newest USER/ASSISTANT (incl. sidechain) timestamp, never
+            // a bare file write (system/attachment/queue-op/mtime) — those fire
+            // long after a turn ends and would resurrect a finished session and
+            // keep it from ever dropping. No real message yet => don't surface a
+            // phantom (e.g. an all-sidechain file), but keep watching it.
+            guard let lastActivity = p.newestEntryTs, p.messageCount > 0 else { continue }
+            let age = now.timeIntervalSince(lastActivity)
+
+            guard let state = computeState(p, age: age) else {
+                expired.append(path)   // no message activity >= 30 min => drop
+                continue
+            }
+
+            let old = p.currentState
+            if old == nil {
+                // First classification of this file — anchor stateSince to the
+                // real last-activity instant, so a relaunch doesn't replay a long-
+                // finished run as a "just now" complete (green pill / recency).
+                p.stateSince = min(now, lastActivity)
+                p.currentState = state
+            } else if state != old {
+                p.stateSince = now
+                p.currentState = state
+            }
+            built.append((makeSession(p, state: state, lastActivity: lastActivity), old))
+        }
+        for key in expired { parsers.removeValue(forKey: key) }
+
+        // Toasts: only real changes, never on first observation (old == nil) so
+        // relaunch doesn't replay historical completes.
+        for item in built {
+            if let old = item.old, old != item.session.state {
+                let s = item.session
+                DispatchQueue.main.async { [weak self] in self?.onTransition?(s, old) }
+            }
+        }
+
+        let ordered = built.map(\.session).sorted {
+            if $0.state.sortRank != $1.state.sortRank {
+                return $0.state.sortRank < $1.state.sortRank
+            }
+            return $0.lastActivity > $1.lastActivity
+        }
+
+        updateAckCount(ordered)
+        publish(ordered)
+    }
+
+    private func jsonlFiles() -> [String] {
+        guard let en = FileManager.default.enumerator(
+            at: projectsURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]) else { return [] }
+        var out: [String] = []
+        for case let url as URL in en where url.pathExtension == "jsonl" {
+            out.append(url.path)
+        }
+        return out
+    }
+
+    // MARK: - Incremental read + parse (ioQueue only)
+
+    /// Read only the bytes appended since last time, holding any unterminated
+    /// final line in `partial` so a mid-append write is never mis-parsed.
+    private func ingest(into p: FileParser) {
+        guard let fh = try? FileHandle(forReadingFrom: URL(fileURLWithPath: p.path)) else { return }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: p.byteOffset)
+        let delta = (try? fh.readToEnd()) ?? Data()
+        guard !delta.isEmpty else { return }
+
+        // byteOffset always advances past everything we read; the incomplete
+        // tail lives in `partial` (out of the offset) until its newline arrives.
+        p.byteOffset += UInt64(delta.count)
+
+        var combined = p.partial
+        combined.append(delta)
+
+        // Split ONLY on literal 0x0A — safe because JSON escapes newlines inside
+        // string values, so no unescaped LF ever appears mid-record.
+        var lines = combined.split(separator: 0x0A, omittingEmptySubsequences: false)
+            .map { Data($0) }
+        if combined.last == 0x0A {
+            if lines.last?.isEmpty == true { lines.removeLast() }
+            p.partial = Data()
+        } else {
+            p.partial = lines.popLast() ?? Data()
+        }
+
+        for line in lines where !line.isEmpty { parse(line, into: p) }
+    }
+
+    private func parse(_ line: Data, into p: FileParser) {
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else {
+            return   // skip garbage / partial — never abort the file
+        }
+
+        let type = obj["type"] as? String ?? ""
+        let isSidechain = obj["isSidechain"] as? Bool ?? false
+
+        // Latest-wins metadata, present on every entry type (cwd can change mid-file).
+        if let cwd = obj["cwd"] as? String, !cwd.isEmpty { p.cwd = cwd }
+        if let gb = obj["gitBranch"] as? String { p.gitBranch = gb }
+        if let sid = obj["sessionId"] as? String, !sid.isEmpty { p.id = sid }
+
+        // Only user/assistant are agent activity. Non-message types
+        // (system/attachment/queue-operation/mode/ai-title/…) must NOT touch the
+        // activity clock — they land long after a turn ends and would keep a
+        // finished session pinned to "working" and never let it drop.
+        guard type == "user" || type == "assistant",
+              let message = obj["message"] as? [String: Any] else { return }
+
+        // Newest user/assistant timestamp is the keep-alive clock — sidechain
+        // INCLUDED (a subagent burst means the parent is still working).
+        if let tsStr = obj["timestamp"] as? String, let ts = Self.parseDate(tsStr),
+           ts > (p.newestEntryTs ?? .distantPast) {
+            p.newestEntryTs = ts
+        }
+
+        // Sidechain (subagent) counts as activity above, but must NOT set
+        // lastMsg / latestAssistant / messageCount or flip the parent's state.
+        guard !isSidechain else { return }
+
+        p.messageCount += 1
+
+        if type == "assistant" {
+            if let model = message["model"] as? String { p.latestModel = model }
+            p.lastMsgIsAssistant = true
+            p.lastMsgIsInterrupt = false
+            p.lastMsgStopReason = message["stop_reason"] as? String   // nil = streaming
+
+            if let usage = message["usage"] as? [String: Any] {
+                let input = usage["input_tokens"] as? Int ?? 0
+                let read  = usage["cache_read_input_tokens"] as? Int ?? 0
+                let creat = usage["cache_creation_input_tokens"] as? Int ?? 0
+                let ctx = input + read + creat           // live window occupancy
+                p.contextTokens = ctx
+                if ctx > p.maxContextTokens { p.maxContextTokens = ctx }
+                p.outputTokens += usage["output_tokens"] as? Int ?? 0
+            }
+        } else {   // user
+            p.lastMsgIsAssistant = false
+            p.lastMsgStopReason = nil
+            p.lastMsgIsInterrupt = Self.isInterrupt(message["content"])
+        }
+    }
+
+    /// Interrupt marker: an array item {type:"text", text:"[Request interrupted..."}
+    /// (verified form) — also defensively check a plain-string content.
+    private static func isInterrupt(_ content: Any?) -> Bool {
+        let prefix = "[Request interrupted by user"
+        if let s = content as? String {
+            return s.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(prefix)
+        }
+        if let arr = content as? [Any] {
+            for case let item as [String: Any] in arr {
+                if (item["type"] as? String) == "text",
+                   let t = item["text"] as? String,
+                   t.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(prefix) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    // MARK: - State machine (spec §2)
+
+    /// Returns nil when the session should be dropped (no message activity for
+    /// >= 30 min). `.waiting` is never produced here — see the type doc.
+    private func computeState(_ p: FileParser, age: TimeInterval) -> AgentState? {
+        // Drop first: nothing from the agent for half an hour => gone.
+        if age >= idleMax { return nil }
+
+        // Interrupted — sticky until a newer non-interrupt message lands.
+        if p.lastMsgIsInterrupt { return .interrupted }
+
+        // Working — a message landed in the last few seconds (streaming/tools).
+        if age < workingWindow { return .working }
+
+        if p.lastMsgIsAssistant {
+            // Turn finished => resting green ("your move") until it ages out.
+            if p.lastMsgStopReason == "end_turn" { return .complete }
+            // Mid-turn (tool_use, or streaming with nil stop_reason): Claude is
+            // blocked on a tool that can legitimately run for minutes (a build, a
+            // long test, `sleep`) — still working, NOT idle.
+            return .working
+        }
+
+        // Last message is a user prompt: the assistant is presumed to be
+        // spinning up its reply; if it stays quiet past 5 min, call it idle.
+        return age < idleMin ? .working : .idle
+    }
+
+    private func makeSession(_ p: FileParser, state: AgentState,
+                             lastActivity: Date) -> AgentSession {
+        let (display, window) = Self.resolveModel(p.latestModel,
+                                                  observedContextTokens: p.maxContextTokens)
+        let branch: String? = {
+            guard let b = p.gitBranch?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !b.isEmpty, b != "HEAD" else { return nil }
+            return b
+        }()
+        let project = p.cwd.isEmpty
+            ? URL(fileURLWithPath: p.path).deletingPathExtension().lastPathComponent
+            : URL(fileURLWithPath: p.cwd).lastPathComponent
+        return AgentSession(
+            id: p.id,
+            project: project,
+            gitBranch: branch,
+            modelDisplay: display,
+            state: state,
+            stateSince: p.stateSince,
+            lastActivity: lastActivity,
+            contextTokens: p.contextTokens,
+            contextWindow: window,
+            outputTokens: p.outputTokens,
+            messageCount: p.messageCount,
+            cwd: p.cwd,
+            tty: nil)
+    }
+
+    // MARK: - Ack count + publish throttle (ioQueue only)
+
+    private func updateAckCount(_ sessions: [AgentSession]) {
+        let completeIDs = Set(sessions.filter { $0.state == .complete }.map(\.id))
+        acknowledgedCompleteIDs.formIntersection(completeIDs)   // forget acks for no-longer-complete
+        // Only recently-finished completes (<5 min) drive the pill, and only
+        // those the user hasn't cleared by opening the tab.
+        let now = Date()
+        let recent = Set(sessions
+            .filter { $0.state == .complete && now.timeIntervalSince($0.stateSince) < 5 * 60 }
+            .map(\.id))
+        let count = recent.subtracting(acknowledgedCompleteIDs).count
+        guard count != lastAckCount else { return }   // publish only on a real change
+        lastAckCount = count
+        DispatchQueue.main.async { [weak self] in self?.unacknowledgedCompleteCount = count }
+    }
+
+    /// Coalesce to <= 2 Hz: publish immediately if >= 0.5 s since the last one,
+    /// otherwise schedule a single trailing flush.
+    private func publish(_ list: [AgentSession]) {
+        pendingPublish = list
+        let since = Date().timeIntervalSince(lastPublish)
+        if since >= 0.5 {
+            flushPublish()
+        } else if !publishScheduled {
+            publishScheduled = true
+            ioQueue.asyncAfter(deadline: .now() + (0.5 - since)) { [weak self] in
+                self?.flushPublish()
+            }
+        }
+    }
+
+    private func flushPublish() {
+        publishScheduled = false
+        guard let list = pendingPublish else { return }
+        pendingPublish = nil
+        lastPublish = Date()
+        DispatchQueue.main.async { [weak self] in self?.sessions = list }
+    }
+
+    // MARK: - Model resolution (catalog + 1M heuristic)
+
+    // Base id -> (short display name, standard 200k/1M window).
+    private static let modelCatalog: [String: (name: String, window: Int)] = [
+        "claude-fable-5":            ("Fable",       1_000_000),
+        "claude-mythos-5":           ("Mythos",      1_000_000),
+        "claude-opus-4-8":           ("Opus 4.8",      200_000),
+        "claude-opus-4-7":           ("Opus 4.7",      200_000),
+        "claude-opus-4-6":           ("Opus 4.6",      200_000),
+        "claude-sonnet-5":           ("Sonnet",        200_000),
+        "claude-sonnet-4-6":         ("Sonnet 4.6",    200_000),
+        "claude-haiku-4-5":          ("Haiku 4.5",     200_000),
+        "claude-haiku-4-5-20251001": ("Haiku 4.5",     200_000),
+    ]
+
+    // Ids that expose a 1M-context variant ("[1m]" suffix). Haiku has none.
+    private static let has1MVariant: Set<String> = [
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-sonnet-5", "claude-sonnet-4-6",
+        "claude-fable-5", "claude-mythos-5",
+    ]
+
+    /// (displayName, contextWindow?). Window nil => unknown id => UI shows raw
+    /// tokens. Heuristic: the id alone can't tell 200k from 1M, so treat as 1M
+    /// when it carries the `[1m]` suffix OR observed context has exceeded 200k.
+    static func resolveModel(_ rawId: String?, observedContextTokens: Int)
+            -> (displayName: String, contextWindow: Int?) {
+        guard let rawId, !rawId.isEmpty else { return ("Claude", nil) }
+
+        let is1MSuffix = rawId.lowercased().hasSuffix("[1m]")
+        let baseId = is1MSuffix ? String(rawId.dropLast(4)) : rawId
+
+        var entry = modelCatalog[baseId]
+        if entry == nil, baseId.hasPrefix("claude-haiku-4-5") {
+            entry = ("Haiku 4.5", 200_000)   // dated haiku variants
+        }
+        guard let (name, window) = entry else { return (rawId, nil) }
+
+        if has1MVariant.contains(baseId), is1MSuffix || observedContextTokens > 200_000 {
+            return (name, 1_000_000)
+        }
+        return (name, window)
+    }
+
+    // MARK: - Date parsing
+
+    private static let isoFrac: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+    static func parseDate(_ s: String) -> Date? {
+        isoFrac.date(from: s) ?? iso.date(from: s)
+    }
+}
+
+// MARK: - Per-file incremental parser state
+
+/// Reference type so mutations persist inside the `parsers` dictionary and are
+/// confined to `ioQueue` (no locking needed).
+private final class FileParser {
+    let path: String
+    var id: String                 // sessionId; filename stem until first seen
+
+    // Incremental read cursor.
+    var byteOffset: UInt64 = 0
+    var partial = Data()           // unterminated final line, held out of offset
+
+    // Running tallies (exact — first ingest reads from offset 0, i.e. whole file).
+    var outputTokens = 0
+    var messageCount = 0
+    var maxContextTokens = 0       // latches the 1M inference
+    var contextTokens = 0          // latest assistant occupancy
+
+    // Latest-state drivers.
+    var latestModel: String?
+    var newestEntryTs: Date?       // newest user/assistant ts incl. sidechain (keep-alive clock)
+    var cwd = ""
+    var gitBranch: String?
+
+    var lastMsgIsAssistant = false
+    var lastMsgStopReason: String?
+    var lastMsgIsInterrupt = false
+
+    // Debounce / transition tracking.
+    var currentState: AgentState?
+    var stateSince: Date
+
+    init(path: String, now: Date) {
+        self.path = path
+        self.id = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        self.stateSince = now
+    }
+
+    /// File truncated/rotated — discard everything and re-cold-start from 0.
+    func reset(now: Date) {
+        byteOffset = 0
+        partial = Data()
+        outputTokens = 0
+        messageCount = 0
+        maxContextTokens = 0
+        contextTokens = 0
+        latestModel = nil
+        newestEntryTs = nil
+        cwd = ""
+        gitBranch = nil
+        lastMsgIsAssistant = false
+        lastMsgStopReason = nil
+        lastMsgIsInterrupt = false
+        currentState = nil
+        stateSince = now
+    }
+}

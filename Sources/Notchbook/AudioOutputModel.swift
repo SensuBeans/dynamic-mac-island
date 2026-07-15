@@ -115,7 +115,11 @@ final class AudioOutputModel: NSObject, ObservableObject {
 
     @objc private func pickAirPlay(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        let escaped = name.replacingOccurrences(of: "\"", with: "\\\"")
+        // Escape backslashes FIRST, then quotes — otherwise a name ending in
+        // `\` (or containing one) would produce a broken/`\"`-mangled script.
+        let escaped = name
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
         runOSAScript(
             "tell application \"Music\" to set current AirPlay devices" +
             " to {AirPlay device \"\(escaped)\"}", wait: false)

@@ -55,6 +55,13 @@ final class MediaWatcher: ObservableObject {
     private(set) var positionStamp = Date.distantPast
     /// "off" | "all" | "one" (Spotify only knows off/all)
     @Published var repeatMode = "off"
+    /// "Auto-switch to YouTube": ON = symmetric arbitration (only a PLAYING
+    /// source may take the island); OFF = native players always win (the old
+    /// behavior). settings: Media page toggle, default ON.
+    @Published var autoSwitchYouTube: Bool =
+        (UserDefaults.standard.object(forKey: "autoSwitchYouTube") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(autoSwitchYouTube, forKey: "autoSwitchYouTube") }
+    }
 
     private var earHideWork: DispatchWorkItem?
     private var earCancellable: AnyCancellable?
@@ -62,9 +69,27 @@ final class MediaWatcher: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObserver: NSObjectProtocol?
     private var artworkKey: String?
+    /// The Accessibility prompt is shown at most once per app run; further
+    /// Songs/Albums clicks while untrusted route through `onNeedsAccessibility`
+    /// (a toast + the Privacy pane) instead of stacking system dialogs.
+    private var didPromptAccessibility = false
+    /// Set by the app delegate: called on the main thread when a Music-library
+    /// jump needs Accessibility but the one-time prompt has already fired.
+    var onNeedsAccessibility: (() -> Void)?
     private var progressTimer: Timer?
     private var youtubeTimer: Timer?
     private var youtubeVideoID: String?
+    /// Settings-driven: whether YouTube-in-Chrome detection runs at all.
+    private var youtubeEnabled = true
+    /// Seconds before the paused media ear hides; < 0 means never hide.
+    var pausedEarHideDelay: Double = 90
+    /// Full watch URL of the current YouTube session — used to jump to the tab.
+    private(set) var youtubeURL: String?
+    /// Every hot-path AppleScript runs through here as a spawned `osascript`
+    /// process. NSAppleScript is main-thread-only and blocks the UI, so it's
+    /// reserved for the rare one-shot on the main thread (`launchAndPlay`).
+    private let scriptQueue = DispatchQueue(label: "com.sensubeans.notchbook.applescript",
+                                            qos: .userInitiated)
 
     init() {
         let dnc = DistributedNotificationCenter.default()
@@ -96,32 +121,64 @@ final class MediaWatcher: ObservableObject {
 
         // YouTube-in-Chrome has no notifications — poll lightly, and only
         // when no real player owns the session.
-        youtubeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.pollYouTube()
-        }
-        youtubeTimer?.tolerance = 1
+        startYouTubeTimer()
 
         earCancellable = $nowPlaying.sink { [weak self] np in
             guard let self else { return }
             self.earHideWork?.cancel()
-            if let np, !np.isPlaying {
+            // A negative delay means "never hide the paused ear".
+            if let np, !np.isPlaying, self.pausedEarHideDelay >= 0 {
                 let work = DispatchWorkItem { [weak self] in self?.earHidden = true }
                 self.earHideWork = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 90, execute: work)
+                DispatchQueue.main.asyncAfter(deadline: .now() + self.pausedEarHideDelay,
+                                              execute: work)
             } else {
                 self.earHidden = false
             }
         }
     }
 
+    private func startYouTubeTimer() {
+        guard youtubeTimer == nil else { return }
+        youtubeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            self?.pollYouTube()
+        }
+        youtubeTimer?.tolerance = 1
+    }
+
+    /// Turn YouTube detection on/off from settings. Off: stop polling and drop
+    /// any active YouTube session (and never touch Chrome again until re-enabled).
+    func setYouTubeEnabled(_ enabled: Bool) {
+        youtubeEnabled = enabled
+        if enabled {
+            startYouTubeTimer()
+        } else {
+            youtubeTimer?.invalidate()
+            youtubeTimer = nil
+            clearYouTube()
+        }
+    }
+
     private func pollYouTube() {
-        if let np = nowPlaying, np.source != .youtube { return }  // players win
+        guard youtubeEnabled else { return }
+        let current = nowPlaying
+        if autoSwitchYouTube {
+            // Never poll-steal from a native player that is actively playing.
+            if let current, current.source != .youtube, current.isPlaying { return }
+        } else if let current, current.source != .youtube {
+            return  // auto-switch off: native players always win
+        }
         guard !NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.google.Chrome").isEmpty
         else {
             clearYouTube()
             return
         }
+        // A *paused* native player currently owns the island: YouTube may take
+        // it only when verifiably playing (JS), or — JS blocked — when the
+        // watch tab is the active tab of the front Chrome window (user intent).
+        let nativePausedOwns = (current?.source ?? .youtube) != .youtube
+
         let script = """
         tell application "Google Chrome"
             repeat with w in windows
@@ -134,46 +191,123 @@ final class MediaWatcher: ObservableObject {
             return ""
         end tell
         """
-        guard let out = runAppleScript(script)?.stringValue, !out.isEmpty else {
-            clearYouTube()
-            return
-        }
-        let parts = out.components(separatedBy: "\n")
-        guard parts.count >= 2 else { return }
-        let url = parts[0]
-        var title = parts[1...].joined(separator: " ")
-        if title.hasSuffix(" - YouTube") { title = String(title.dropLast(10)) }
+        runScriptAsync(script) { [weak self] out in
+            guard let self else { return }
+            guard let out, !out.isEmpty else {
+                self.clearYouTube()
+                return
+            }
+            let parts = out.components(separatedBy: "\n")
+            guard parts.count >= 2 else { return }
+            let url = parts[0]
+            var title = parts[1...].joined(separator: " ")
+            if title.hasSuffix(" - YouTube") { title = String(title.dropLast(10)) }
 
-        // With JS allowed we know the real paused state; otherwise assume playing.
-        var playing = nowPlaying?.source == .youtube ? (nowPlaying?.isPlaying ?? true) : true
-        if !youtubeJSBlocked,
-           let paused = runAppleScript(
-               youtubeJS("document.querySelector('video').paused"))?.stringValue {
-            playing = (paused != "true")
-        }
-        let np = NowPlaying(title: title, artist: "YouTube · Chrome",
-                            isPlaying: playing, source: .youtube)
-        if np.title != nowPlaying?.title { position = 0 }
-        nowPlaying = np
-
-        // Video thumbnail as artwork.
-        if let range = url.range(of: "v=") {
-            let id = String(url[range.upperBound...].prefix(while: {
-                $0 != "&" && $0 != "#"
-            }))
-            if id != youtubeVideoID, !id.isEmpty,
-               let thumbURL = URL(string: "https://i.ytimg.com/vi/\(id)/hqdefault.jpg") {
-                youtubeVideoID = id
-                URLSession.shared.dataTask(with: thumbURL) { [weak self] data, _, _ in
-                    guard let data, let image = NSImage(data: data) else { return }
-                    DispatchQueue.main.async {
-                        guard self?.youtubeVideoID == id,
-                              self?.nowPlaying?.source == .youtube else { return }
-                        self?.artwork = image
+            // Commit a YouTube now-playing, publishing only on an actual change
+            // (republishing an unchanged paused video every 3 s would reschedule
+            // the ear-hide timer forever). Taking over from a native player
+            // resets position/duration/artwork so a later takeback refetches.
+            let commit: (Bool) -> Void = { playing in
+                let takingOver = self.nowPlaying?.source != .youtube
+                let np = NowPlaying(title: title, artist: "YouTube · Chrome",
+                                    isPlaying: playing, source: .youtube)
+                self.youtubeURL = url
+                if np != self.nowPlaying {
+                    if takingOver {
+                        self.position = 0
+                        self.duration = 0
+                        self.artworkKey = nil
+                    } else if np.title != self.nowPlaying?.title {
+                        self.position = 0
                     }
-                }.resume()
+                    self.nowPlaying = np
+                }
+                self.updateYouTubeArtwork(url: url)
+            }
+
+            if self.youtubeJSBlocked {
+                if nativePausedOwns {
+                    // No JS: gate takeover on the watch tab being the front
+                    // window's active tab.
+                    let vid = Self.youtubeID(from: url)
+                    self.runScriptAsync(
+                        "tell application \"Google Chrome\" to return URL of active tab of front window"
+                    ) { activeURL in
+                        if let vid, activeURL.flatMap(Self.youtubeID(from:)) == vid {
+                            commit(true)
+                        }
+                    }
+                } else {
+                    // YouTube already owns or island empty — assume playing for
+                    // a fresh tab, keep prior state for an existing session.
+                    let assumed = self.nowPlaying?.source == .youtube
+                        ? (self.nowPlaying?.isPlaying ?? true) : true
+                    commit(assumed)
+                }
+            } else {
+                self.runScriptAsync(self.youtubeJS("document.querySelector('video').paused")) { paused in
+                    let definitePlaying = paused.map { $0 != "true" }  // Bool?
+                    if nativePausedOwns {
+                        if definitePlaying == true { commit(true) }  // only a clear "playing" takes over
+                    } else {
+                        let assumed = self.nowPlaying?.source == .youtube
+                            ? (self.nowPlaying?.isPlaying ?? true) : true
+                        commit(definitePlaying ?? assumed)
+                    }
+                }
             }
         }
+    }
+
+    /// The `v=` video id from a YouTube watch URL (nil if none).
+    static func youtubeID(from url: String) -> String? {
+        guard let range = url.range(of: "v=") else { return nil }
+        let id = String(url[range.upperBound...].prefix(while: { $0 != "&" && $0 != "#" }))
+        return id.isEmpty ? nil : id
+    }
+
+    /// YouTube video thumbnail as artwork; skips the fetch when the id is
+    /// unchanged so a steady video doesn't re-download every poll.
+    private func updateYouTubeArtwork(url: String) {
+        guard let id = Self.youtubeID(from: url), id != youtubeVideoID,
+              let thumbURL = URL(string: "https://i.ytimg.com/vi/\(id)/hqdefault.jpg")
+        else { return }
+        youtubeVideoID = id
+        URLSession.shared.dataTask(with: thumbURL) { [weak self] data, _, _ in
+            guard let data, let image = NSImage(data: data) else { return }
+            DispatchQueue.main.async {
+                guard self?.youtubeVideoID == id,
+                      self?.nowPlaying?.source == .youtube else { return }
+                self?.artwork = image
+            }
+        }.resume()
+    }
+
+    /// Bring the current YouTube video's Chrome tab forward and select it.
+    /// Matches by video id (the URL mutates with timestamps/playlist params);
+    /// if the tab is gone this no-ops and the next poll clears the session.
+    func openYouTubeTab() {
+        guard let vid = youtubeVideoID else { return }
+        let script = """
+        tell application "Google Chrome"
+            set done to false
+            repeat with w in windows
+                set idx to 0
+                repeat with t in tabs of w
+                    set idx to idx + 1
+                    if URL of t contains "v=\(vid)" then
+                        set active tab index of w to idx
+                        set index of w to 1
+                        set done to true
+                        exit repeat
+                    end if
+                end repeat
+                if done then exit repeat
+            end repeat
+            if done then activate
+        end tell
+        """
+        runScriptAsync(script) { _ in }
     }
 
     private func clearYouTube() {
@@ -182,6 +316,9 @@ final class MediaWatcher: ObservableObject {
         artwork = nil
         artworkKey = nil
         youtubeVideoID = nil
+        youtubeURL = nil
+        // Restore a paused-in-background native player instead of going blank.
+        refresh()
     }
 
     deinit {
@@ -206,6 +343,13 @@ final class MediaWatcher: ObservableObject {
                             artist: info["Artist"] as? String ?? "",
                             isPlaying: playerState == "Playing",
                             source: source)
+        // Symmetric arbitration: a paused update from a DIFFERENT source can't
+        // steal the island from whoever currently owns it — only a PLAYING
+        // source takes over. A playing event always wins (last action wins).
+        if autoSwitchYouTube, !np.isPlaying,
+           let current = nowPlaying, current.source != source {
+            return
+        }
         if np.title != nowPlaying?.title { position = 0 }
         nowPlaying = np
         fetchArtworkIfNeeded(for: np)
@@ -241,20 +385,22 @@ final class MediaWatcher: ObservableObject {
             end try
         end tell
         """
-        guard let out = runAppleScript(script)?.stringValue, !out.isEmpty else { return }
-        let parts = out.components(separatedBy: "|")
-            .map { $0.replacingOccurrences(of: ",", with: ".") }
-        guard parts.count >= 2,
-              let pos = Double(parts[0]), var dur = Double(parts[1]) else { return }
-        if np.source == .spotify { dur /= 1000 }  // Spotify reports ms
-        position = pos
-        positionStamp = Date()
-        duration = dur
-        if parts.count == 4 {
-            shuffleOn = parts[2] == "true"
-            repeatMode = np.source == .music
-                ? parts[3]
-                : (parts[3] == "true" ? "all" : "off")
+        runScriptAsync(script) { [weak self] out in
+            guard let self, let out, !out.isEmpty else { return }
+            let parts = out.components(separatedBy: "|")
+                .map { $0.replacingOccurrences(of: ",", with: ".") }
+            guard parts.count >= 2,
+                  let pos = Double(parts[0]), var dur = Double(parts[1]) else { return }
+            if np.source == .spotify { dur /= 1000 }  // Spotify reports ms
+            self.position = pos
+            self.positionStamp = Date()
+            self.duration = dur
+            if parts.count == 4 {
+                self.shuffleOn = parts[2] == "true"
+                self.repeatMode = np.source == .music
+                    ? parts[3]
+                    : (parts[3] == "true" ? "all" : "off")
+            }
         }
     }
 
@@ -301,37 +447,101 @@ final class MediaWatcher: ObservableObject {
 
         switch np.source {
         case .music:
-            let script = """
-            tell application "Music"
-                try
-                    return data of artwork 1 of current track
-                on error
-                    return ""
-                end try
-            end tell
-            """
-            if let desc = runAppleScript(script), desc.data.count > 32,
-               let image = NSImage(data: desc.data) {
-                artwork = image
-            } else {
-                artwork = nil
-            }
+            fetchMusicArtworkAsync(key: key, title: np.title)
         case .spotify:
             let script = "tell application \"Spotify\" to get artwork url of current track"
             guard let urlString = runAppleScript(script)?.stringValue,
                   let url = URL(string: urlString) else {
+                // No URL: don't leave the previous track's art stranded under
+                // the new key — clear the key so the next event refetches.
                 artwork = nil
+                artworkKey = nil
                 return
             }
             URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                guard let data, let image = NSImage(data: data) else { return }
+                let image = data.flatMap { NSImage(data: $0) }
                 DispatchQueue.main.async {
-                    guard self?.artworkKey == key else { return }
-                    self?.artwork = image
+                    guard let self, self.artworkKey == key else { return }
+                    if let image {
+                        self.artwork = image
+                    } else {
+                        // Failed download → don't cache stale art under this
+                        // key; reset so a later player event tries again.
+                        self.artwork = nil
+                        self.artworkKey = nil
+                    }
                 }
             }.resume()
         case .youtube:
             break  // thumbnail fetched in pollYouTube()
+        }
+    }
+
+    /// Music artwork is binary, so we have `osascript` write the raw bytes to a
+    /// temp file off the main thread, then decode it there — no full-image
+    /// Apple Event blocking the UI on every track change.
+    ///
+    /// The script returns the current track's NAME alongside writing the art, in
+    /// one round trip. Clicking a new song in Music posts `playerInfo` before its
+    /// scripting interface catches up, so `artwork 1 of current track` can still
+    /// serve the PREVIOUS track's art (or error while streamed art downloads). We
+    /// accept the bytes only when the returned name matches `title`; on a
+    /// mismatch/empty/error we retry a few times, and if it never resolves we
+    /// clear the key so the next player event starts fresh instead of caching
+    /// stale art forever.
+    private func fetchMusicArtworkAsync(key: String, title: String, attempt: Int = 0) {
+        let tmp = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("notchbook-art-\(UUID().uuidString)")
+        let escaped = tmp.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Music"
+            try
+                set n to name of current track
+                set d to data of artwork 1 of current track
+                set f to open for access POSIX file "\(escaped)" with write permission
+                set eof f to 0
+                write d to f
+                close access f
+                return "OK" & linefeed & n
+            on error
+                try
+                    close access POSIX file "\(escaped)"
+                end try
+                return ""
+            end try
+        end tell
+        """
+        scriptQueue.async { [weak self] in
+            let raw = Self.runOsascript(script)
+            var image: NSImage?
+            var returnedName: String?
+            if let raw, raw.hasPrefix("OK") {
+                let lines = raw.components(separatedBy: "\n")
+                returnedName = lines.count > 1
+                    ? lines[1...].joined(separator: "\n") : ""
+                image = NSImage(contentsOfFile: tmp)
+            }
+            try? FileManager.default.removeItem(atPath: tmp)
+            DispatchQueue.main.async {
+                guard let self, self.artworkKey == key else { return }
+                if let image, returnedName == title {
+                    self.artwork = image
+                } else if attempt < 3 {
+                    // Streamed art needs a beat to arrive; give it up to
+                    // ~4 tries. Re-check the key on the main thread before
+                    // each retry so a track change cancels the chain.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                        guard let self, self.artworkKey == key else { return }
+                        self.fetchMusicArtworkAsync(key: key, title: title,
+                                                    attempt: attempt + 1)
+                    }
+                } else {
+                    // Gave up: don't poison the key with stale/failed art —
+                    // reset so the next player event refetches.
+                    self.artwork = nil
+                    self.artworkKey = nil
+                }
+            }
         }
     }
 
@@ -435,13 +645,23 @@ final class MediaWatcher: ObservableObject {
     func openMusicLibrary(_ section: LibrarySection = .songs) {
         guard nowPlaying?.source == .music else { return }
 
-        // UI scripting needs Accessibility, and the app is NOT trusted by
-        // default. Ask explicitly (shows the system prompt once) —
-        // otherwise `select` throws.
-        let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        _ = AXIsProcessTrustedWithOptions(prompt as CFDictionary)
+        // UI scripting (the sidebar `select`) needs Accessibility. Check
+        // WITHOUT prompting first — a granted app just proceeds. While
+        // untrusted, show the system prompt exactly once; every click after
+        // that routes to a toast + the Privacy pane instead of another dialog.
+        // We still fall through and run the script: the Albums `reveal` lands
+        // (just in the wrong tab) even without Accessibility.
+        if !AXIsProcessTrusted() {
+            if !didPromptAccessibility {
+                didPromptAccessibility = true
+                let prompt = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+                _ = AXIsProcessTrustedWithOptions(prompt as CFDictionary)
+            } else {
+                onNeedsAccessibility?()
+            }
+        }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        scriptQueue.async { [weak self] in
             guard let self else { return }
             switch section {
             case .songs:
@@ -495,11 +715,9 @@ final class MediaWatcher: ObservableObject {
             return "OK"
         end tell
         """
-        var err: NSDictionary?
-        let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue
+        let out = runScriptSync(script)
         if out != "OK" {
-            NSLog("notchbook selectLibraryTab(%@) result=%@ error=%@",
-                  rowName, out ?? "nil", String(describing: err))
+            NSLog("notchbook selectLibraryTab(%@) result=%@", rowName, out ?? "nil")
         }
     }
 
@@ -559,13 +777,9 @@ final class MediaWatcher: ObservableObject {
         end tell
         return "OK"
         """
-        var err: NSDictionary?
-        let out = NSAppleScript(source: script)?.executeAndReturnError(&err).stringValue
-        if let err {
-            NSLog("notchbook revealInAlbumsPage error=%@", err)
-            return false
-        }
-        return out != "NO_TARGET"
+        // OK → handled (stop); NO_TARGET or a script failure (nil) → fall
+        // through to the catalog lookup.
+        return runScriptSync(script) == "OK"
     }
 
     /// Open the playing track's album in the Apple Music catalog — for the Songs
@@ -638,10 +852,7 @@ final class MediaWatcher: ObservableObject {
             return (name of ct) & "\\n" & (artist of ct) & "\\n" & (album of ct)
         end tell
         """
-        var err: NSDictionary?
-        guard let out = NSAppleScript(source: script)?
-            .executeAndReturnError(&err).stringValue, err == nil
-        else { return nil }
+        guard let out = runScriptSync(script) else { return nil }
         let parts = out.components(separatedBy: "\n")
         guard parts.count >= 3 else { return nil }
         return (parts[0], parts[1], parts[2])
@@ -841,5 +1052,36 @@ final class MediaWatcher: ObservableObject {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)
         return error == nil ? result : nil
+    }
+
+    /// The single mechanism for hot-path script execution: run `source` via a
+    /// spawned `osascript` off the main thread, delivering trimmed stdout back
+    /// on the main thread (nil if empty or the process failed).
+    private func runScriptAsync(_ source: String, completion: @escaping (String?) -> Void) {
+        scriptQueue.async {
+            let text = Self.runOsascript(source)
+            DispatchQueue.main.async { completion(text) }
+        }
+    }
+
+    /// Synchronous osascript — ONLY call off the main thread (e.g. already
+    /// inside `scriptQueue` or another background queue).
+    private func runScriptSync(_ source: String) -> String? {
+        Self.runOsascript(source)
+    }
+
+    private static func runOsascript(_ source: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", source]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        do { try p.run() } catch { return nil }
+        p.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                          encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text?.isEmpty ?? true) ? nil : text
     }
 }

@@ -19,9 +19,19 @@ final class FilesTray: ObservableObject {
     init() {
         if let data = try? Data(contentsOf: Self.storeURL),
            let paths = try? JSONDecoder().decode([String].self, from: data) {
+            // Keep every saved entry — do NOT prune by existence here. Files on
+            // a not-yet-mounted external/network volume look "missing" at launch;
+            // filtering them out (then persisting via the `items` didSet) would
+            // permanently drop them the moment the volume was offline. The UI
+            // marks unreachable items instead (see `isAvailable`).
             items = paths.map(URL.init(fileURLWithPath:))
-                .filter { FileManager.default.fileExists(atPath: $0.path) }
         }
+    }
+
+    /// Whether a tray item's file is currently reachable (mounted). Unreachable
+    /// items are kept and shown dimmed rather than removed.
+    func isAvailable(_ url: URL) -> Bool {
+        FileManager.default.fileExists(atPath: url.path)
     }
 
     func add(_ urls: [URL]) {

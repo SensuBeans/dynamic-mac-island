@@ -19,12 +19,21 @@ final class LyricsModel: ObservableObject {
     @Published private(set) var status: Status = .idle
 
     private var fetchedKey = ""
+    /// Whether the fetch that set `fetchedKey` knew the track duration. A fetch
+    /// racing in before the duration is known can't rank candidates by it, so
+    /// once the duration arrives we allow exactly one re-fetch to re-rank.
+    private var fetchedDurationKnown = false
     private var task: URLSessionDataTask?
 
     func fetch(title: String, artist: String, duration: Double) {
         let key = "\(title)|\(artist)"
-        guard !title.isEmpty, key != fetchedKey else { return }
+        guard !title.isEmpty else { return }
+        let durationKnown = duration > 0
+        // Skip only if we already fetched this track AND nothing improved —
+        // i.e. we already had the duration, or we still don't.
+        if key == fetchedKey, fetchedDurationKnown || !durationKnown { return }
         fetchedKey = key
+        fetchedDurationKnown = durationKnown
         task?.cancel()
         lines = []
         plainText = ""
@@ -46,7 +55,8 @@ final class LyricsModel: ObservableObject {
         request.setValue("DynamicIsland/1.0 (github.com/SensuBeans/dynamic-mac-island)",
                          forHTTPHeaderField: "User-Agent")
         let expected = duration
-        task = URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+        task = URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+            let failed = (error != nil) || (data == nil)
             var best: [Line] = []
             var plain = ""
             if let data,
@@ -68,6 +78,14 @@ final class LyricsModel: ObservableObject {
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.fetchedKey == key else { return }
+                if failed {
+                    // Transient (offline / timeout): clear the key so the same
+                    // track can be retried rather than being blocked forever.
+                    self.fetchedKey = ""
+                    self.fetchedDurationKnown = false
+                    self.status = .unavailable
+                    return
+                }
                 self.lines = best
                 self.plainText = plain
                 self.status = (best.isEmpty && plain.isEmpty) ? .unavailable : .loaded

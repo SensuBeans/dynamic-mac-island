@@ -11,6 +11,8 @@ struct NotchView: View {
     @EnvironmentObject var stats: StatsModel
     @EnvironmentObject var pomodoro: PomodoroModel
     @EnvironmentObject var spectrum: AudioSpectrum
+    @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var agentSessions: AgentSessionsModel
     let metrics: NotchMetrics
 
     @FocusState private var editorFocused: Bool
@@ -29,25 +31,42 @@ struct NotchView: View {
     }
 
     private var island: some View {
-        let hasMedia = (media.nowPlaying != nil && !media.earHidden) || pomodoro.isRunning
+        let hasMedia = (media.nowPlaying != nil && !media.earHidden)
+            || (pomodoro.isRunning && settings.timerCountdownEar)
         let hasToast = state.toast != nil
+        let hasAgent = agentSessions.hasActivePill
         // The mirror always gets the big panel — a postage-stamp selfie
         // preview isn't useful, so the old zoom toggle is gone. Its overlay
         // button doubles it again (mirrorBig).
         let onMirror = state.currentTab == .mirror
-        let expandedSize = state.currentTab == .tray
-            ? metrics.trayExpandedSize(itemCount: tray.items.count)
-            : metrics.expandedSize(zoomed: onMirror,
-                                   large: onMirror && state.mirrorBig)
+        let expandedSize: CGSize = {
+            // Settings pages always use the standard panel size, whatever tab
+            // they were opened from (so settings on mirror/tray/terminal isn't
+            // oversized). Must stay in lockstep with AppDelegate.islandRect.
+            if state.showingSettings {
+                return metrics.expandedSize()
+            }
+            if state.currentTab == .tray {
+                return metrics.trayExpandedSize(itemCount: tray.items.count,
+                                                cell: settings.trayTileSize)
+            } else if state.currentTab == .terminal {
+                return NotchMetrics.terminalIslandSize
+            } else if state.currentTab == .agents {
+                return NotchMetrics.agentsIslandSize
+            } else if state.currentTab == .calendar {
+                return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
+            }
+            return metrics.expandedSize(zoomed: onMirror, large: onMirror && state.mirrorBig)
+        }()
         let size = state.isExpanded
             ? expandedSize
-            : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast)
+            : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast, withAgent: hasAgent)
         // Everything lives inside one container clipped to the notch
         // silhouette, so nothing can ever paint outside the shape.
         // Fully invisible when idle — the hardware notch already covers those
         // pixels, and a visible black bar looks bad during Space swipes. The
         // island only materializes when it has something to show.
-        let collapsedVisible = hasMedia || hasToast
+        let collapsedVisible = hasMedia || hasToast || hasAgent
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
@@ -61,9 +80,11 @@ struct NotchView: View {
                 Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
             }
             .frame(width: metrics.collapsedSize(withMedia: hasMedia,
-                                                toast: hasToast).width,
+                                                toast: hasToast,
+                                                withAgent: hasAgent).width,
                    height: metrics.notchHeight)
             .overlay(alignment: .top) { ears }
+            .overlay(alignment: .top) { agentEar }
             .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                   bottomRadius: 10))
             .opacity(state.isExpanded ? 0 : 1)
@@ -92,9 +113,9 @@ struct NotchView: View {
                alignment: .top)
         .opacity(state.spaceTransitioning && !state.pinned ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
-        .padding(.leading, metrics.islandLeadingPad(expanded: state.isExpanded,
-                                                    zoomed: onMirror,
-                                                    large: onMirror && state.mirrorBig))
+        .padding(.leading, state.isExpanded
+                 ? metrics.expandedLeadingPad(width: expandedSize.width)
+                 : metrics.islandLeadingPad(expanded: false))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
         .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
@@ -105,7 +126,9 @@ struct NotchView: View {
         .onChange(of: media.nowPlaying?.isPlaying) { playing in
             // The tap only listens while the player itself is playing —
             // paused means a still wave, whatever else the system sounds.
-            spectrum.setActive(state.isExpanded && playing == true)
+            // Off via settings: never create the audio tap (privacy); the
+            // waveform falls back to synthetic bars.
+            spectrum.setActive(settings.liveWaveform && state.isExpanded && playing == true)
         }
         .onChange(of: spectrum.levels) { levels in
             // Each fresh audio sample nudges the ambient colors along,
@@ -114,7 +137,7 @@ struct NotchView: View {
             colorPhase += 0.5 + 2.0 * Double(ambientPulse)
         }
         .onChange(of: dropTargeted) { targeted in
-            if targeted && !state.isExpanded {
+            if targeted && !state.isExpanded && settings.trayOpenOnDrag {
                 state.currentTab = .tray
                 state.onExpandRequest?()
             }
@@ -123,22 +146,30 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
-            spectrum.setActive(expanded && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(settings.liveWaveform && expanded && media.nowPlaying?.isPlaying == true)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
             if expanded && state.currentTab == .mirror {
                 mirror.resumeIfAuthorized()
             }
         }
+        .onChange(of: state.showingSettings) { showing in
+            // The overlay replaces the tab's content — pause the camera under
+            // it and hand focus/polling back when it closes.
+            editorFocused = state.isExpanded && !showing && state.currentTab == .notes
+            if state.currentTab == .mirror {
+                showing ? mirror.stop() : mirror.resumeIfAuthorized()
+            }
+        }
         .onChange(of: state.currentTab) { tab in
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
-            spectrum.setActive(state.isExpanded && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(settings.liveWaveform && state.isExpanded && media.nowPlaying?.isPlaying == true)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
-                state.mirrorBig = false
+                if !settings.mirrorRememberBig { state.mirrorBig = false }
             }
         }
     }
@@ -198,7 +229,8 @@ struct NotchView: View {
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
-            } else if pomodoro.isRunning, media.nowPlaying == nil || media.earHidden,
+            } else if pomodoro.isRunning, settings.timerCountdownEar,
+                      media.nowPlaying == nil || media.earHidden,
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
                 HStack(spacing: 5) {
@@ -217,7 +249,8 @@ struct NotchView: View {
                         .monospacedDigit()
                         .foregroundStyle(pomodoro.phase == .focus ? Color.orange : .green)
                 }
-                .padding(.trailing, 10)
+                // Keep the countdown ear INBOARD of the agent pill (outer slot).
+                .padding(.trailing, 10 + (agentSessions.hasActivePill ? NotchMetrics.agentEar : 0))
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
@@ -266,11 +299,94 @@ struct NotchView: View {
                     }
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
                 }
+                // Keep the media ear INBOARD of the agent pill (outer slot).
+                .padding(.trailing, 8 + (agentSessions.hasActivePill ? NotchMetrics.agentEar : 0))
+                .frame(maxWidth: .infinity)
+                .frame(height: metrics.notchHeight)
+                .transition(.opacity)
+            }
+        }
+    }
+
+    /// Collapsed agent-status pill: pinned to the far-right (OUTER) slot, so it
+    /// coexists with the media/countdown ear (shifted inboard above). Priority
+    /// comes from `agentSessions.collapsedPill`: any waiting (orange ⚠ N) beats
+    /// any working (pulsing dot ● N) beats a recent complete (green ✓ N). A tap
+    /// expands straight into the Agents tab. Renders nothing when there's no
+    /// pill content — `collapsedVisible` then drops the whole bar.
+    private var agentEar: some View {
+        Group {
+            // Suppressed while a toast is up: the toast reuses the same right
+            // slot (and the collapsed width drops the agent ear when toast != nil),
+            // so drawing the pill too would paint it over the toast text.
+            if let pill = agentSessions.collapsedPill, !state.isExpanded, state.toast == nil {
+                HStack {
+                    Spacer()
+                    Button {
+                        state.currentTab = .agents
+                        state.onExpandRequest?()
+                    } label: {
+                        AgentPillLabel(pill: pill)
+                    }
+                    .buttonStyle(.plain)
+                }
                 .padding(.trailing, 8)
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
             }
+        }
+    }
+
+    /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
+    private struct AgentPillLabel: View {
+        let pill: AgentSessionsModel.CollapsedPill
+        @State private var pulse = false
+
+        private var count: Int {
+            switch pill {
+            case .waiting(let n), .working(let n), .complete(let n): return n
+            }
+        }
+        /// Bounded so a big fan-out ("● 14") can't overflow the reserved
+        /// `agentEar` width and clip into the media ear.
+        private var countLabel: String { count > 9 ? "9+" : "\(count)" }
+        private var tint: Color {
+            switch pill {
+            case .waiting:  return .orange
+            case .working:  return .blue
+            case .complete: return .green
+            }
+        }
+
+        var body: some View {
+            HStack(spacing: 3) {
+                switch pill {
+                case .working:
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 7, height: 7)
+                        .opacity(pulse ? 0.3 : 1)
+                        .onAppear { pulse = true }
+                        .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
+                                   value: pulse)
+                case .waiting:
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(tint)
+                case .complete:
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(tint)
+                }
+                Text(countLabel)
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 18)
+            .background(Capsule().fill(.white.opacity(0.14)))
         }
     }
 
@@ -310,6 +426,16 @@ struct NotchView: View {
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
             .help(state.pinned ? "Unpin — collapse when the mouse leaves"
                                : "Pin the panel open")
+            Button {
+                // Gear toggles the whole section: open at the root list, or close.
+                state.settingsRoute = state.settingsRoute == nil ? .root : nil
+            } label: {
+                Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(state.showingSettings ? 0.9 : 0.4))
+            }
+            .buttonStyle(.plain)
+            .help("Settings")
             Button { state.onQuit?() } label: {
                 Image(systemName: "power")
                     .font(.system(size: 11))
@@ -332,8 +458,9 @@ struct NotchView: View {
             Color.black.opacity(0.32)
             // Ambient glow: the album cover, blown up and heavily blurred,
             // tints the panel with the artwork's palette on every tab.
-            // While music plays it breathes with the song's loudness.
-            if let art = media.artwork {
+            // While music plays it breathes with the song's loudness. The
+            // glow-intensity setting scales the whole layer's opacity.
+            if let art = media.artwork, settings.ambientGlow {
                 let pulse = ambientPulse
                 ZStack {
                     ambientLayer(art, side: size.width)
@@ -348,7 +475,7 @@ struct NotchView: View {
                 }
                 .blur(radius: 46)
                 .saturation(1.5 + 0.5 * pulse)
-                .opacity(0.32 + 0.2 * pulse)
+                .opacity((0.32 + 0.2 * pulse) * settings.glowIntensity)
                 .frame(width: size.width, height: size.height)
                 .allowsHitTesting(false)
                 .animation(.linear(duration: 0.14), value: colorPhase)
@@ -362,15 +489,21 @@ struct NotchView: View {
     private var expandedContent: some View {
         VStack(spacing: 10) {
             Group {
-                switch state.currentTab {
-                case .notes: NotesTab(focus: $editorFocused)
-                case .timer: TimerTab()
-                case .media: MediaTab()
-                case .tray: TrayTab()
-                case .calendar: CalendarTab()
-                case .mirror: MirrorTab()
-                case .stats: StatsTab()
-                case .toggles: TogglesTab()
+                if let route = state.settingsRoute {
+                    SettingsContainer(route: route)
+                } else {
+                    switch state.currentTab {
+                    case .notes: NotesTab(focus: $editorFocused)
+                    case .timer: TimerTab()
+                    case .media: MediaTab()
+                    case .tray: TrayTab()
+                    case .terminal: TerminalTab()
+                    case .agents: AgentsTab()
+                    case .calendar: CalendarTab()
+                    case .mirror: MirrorTab()
+                    case .stats: StatsTab()
+                    case .toggles: TogglesTab()
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -390,7 +523,7 @@ struct NotchView: View {
     /// threshold (half of full progress), wrapping at the ends.
     private var swipeTarget: NotchTab? {
         guard abs(state.tabSwipeProgress) >= 0.5 else { return nil }
-        let tabs = NotchTab.allCases
+        let tabs = state.visibleTabs
         guard let i = tabs.firstIndex(of: state.currentTab) else { return nil }
         let step = state.tabSwipeProgress < 0 ? 1 : -1
         return tabs[(i + step + tabs.count) % tabs.count]
@@ -398,10 +531,13 @@ struct NotchView: View {
 
     private var tabBar: some View {
         HStack(spacing: 2) {
-            ForEach(NotchTab.allCases, id: \.self) { tab in
+            ForEach(state.visibleTabs, id: \.self) { tab in
                 let selected = state.currentTab == tab
                 let targeted = swipeTarget == tab
-                Button { state.currentTab = tab } label: {
+                Button {
+                    state.currentTab = tab
+                    state.settingsRoute = nil
+                } label: {
                     HStack(spacing: 4) {
                         Image(systemName: tab.icon)
                             .font(.system(size: 11, weight: .medium))

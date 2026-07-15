@@ -119,7 +119,10 @@ final class TogglesModel: ObservableObject {
     private func startCaffeinate() {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        p.arguments = ["-dis"]
+        // -w ties the assertion to our PID: on a crash or force-quit the
+        // spawned caffeinate exits with us instead of keeping the Mac awake
+        // until reboot.
+        p.arguments = ["-dis", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
         try? p.run()
         caffeinate = p
     }
@@ -182,11 +185,23 @@ final class TogglesModel: ObservableObject {
     }
 
     func lockScreen() {
-        shell("/usr/bin/pmset", "displaysleepnow")
+        // pmset displaysleepnow only sleeps the display — the Mac stays
+        // unlocked. CGSession -suspend actually locks to the login window.
+        shell("/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
+              "-suspend")
     }
 
+    /// Screenshot capture mode (settings-driven).
+    /// selection★ → interactive selection; window → interactive window-only;
+    /// full → whole screen immediately. All land on the clipboard.
+    var screenshotMode = "selection"
+
     func screenshot() {
-        shell("/usr/sbin/screencapture", "-ic")
+        switch screenshotMode {
+        case "window": shell("/usr/sbin/screencapture", "-icw")
+        case "full":   shell("/usr/sbin/screencapture", "-c")
+        default:       shell("/usr/sbin/screencapture", "-ic")
+        }
     }
 
     private func shell(_ launchPath: String, _ args: String...) {

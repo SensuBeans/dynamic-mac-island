@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 import IOKit.ps
+import SwiftTerm
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NotchPanel!
@@ -19,12 +20,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let stats = StatsModel()
     private let pomodoro = PomodoroModel()
     private let audioOutput = AudioOutputModel()
+    private let settings = SettingsStore()
+    private let terminalSessions = TerminalSessionsModel()
+    private let agentSessions = AgentSessionsModel()
+    private let notesSync = NotesSyncModel()
 
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var expandWork: DispatchWorkItem?
     private var hoverPoll: Timer?
+    private var spacePoll: Timer?
     private var batteryTimer: Timer?
     private var lastBattery: (charging: Bool, low: Bool)?
     private var spaceWork: DispatchWorkItem?
@@ -46,10 +52,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        metrics = NotchMetrics(screen: NotchMetrics.notchScreen())
+        guard let screen = NotchMetrics.notchScreen() else { return }
+        metrics = NotchMetrics(screen: screen)
         state.onQuit = { NSApp.terminate(nil) }
         state.onExpandRequest = { [weak self] in self?.expand() }
         state.onHoverChange = { [weak self] inside in self?.hoverIsland(inside) }
+        // Songs/Albums jumps need Accessibility. Once the one-time system
+        // prompt has fired, further clicks while untrusted show a toast and
+        // open the Privacy pane instead of stacking dialogs.
+        media.onNeedsAccessibility = { [weak self] in
+            self?.state.showToast(NotchToast(icon: "hand.raised",
+                                             title: "Accessibility needed",
+                                             subtitle: "System Settings › Privacy"))
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
 
         // One fixed window — the island animates inside it, so open/close and
         // the media ear can never cause a positional snap. Clicks in the
@@ -65,21 +83,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let x: CGFloat
             if self.state.isExpanded {
                 let onMirror = self.state.currentTab == .mirror
-                s = self.state.currentTab == .tray
-                    ? self.metrics.trayExpandedSize(itemCount: self.tray.items.count)
-                    : self.metrics.expandedSize(zoomed: onMirror,
-                                                large: onMirror && self.state.mirrorBig)
+                if self.state.currentTab == .tray {
+                    s = self.metrics.trayExpandedSize(itemCount: self.tray.items.count,
+                                                      cell: self.settings.trayTileSize)
+                } else if self.state.currentTab == .terminal {
+                    s = NotchMetrics.terminalIslandSize
+                } else if self.state.currentTab == .agents {
+                    s = NotchMetrics.agentsIslandSize
+                } else if self.state.currentTab == .calendar {
+                    s = self.metrics.calendarExpandedSize(monthMode: self.state.calendarMonthMode)
+                } else {
+                    s = self.metrics.expandedSize(zoomed: onMirror,
+                                                  large: onMirror && self.state.mirrorBig)
+                }
+                // Center on the ACTUAL island width so hover hit-testing tracks
+                // the rendered island (terminal is wider than the standard
+                // panel) — must match the .padding(.leading) in NotchView.
+                x = self.metrics.expandedLeadingPad(width: s.width)
                 // The panel floats below the notch — the interactive rect
                 // bridges notch, gap, and panel so crossing the gap doesn't
                 // read as leaving the island.
                 s.height += self.metrics.notchHeight + NotchMetrics.islandGap * 2
                     + NotchMetrics.navIslandHeight
-                x = self.metrics.islandLeadingPad(expanded: true,
-                                                  zoomed: onMirror,
-                                                  large: onMirror && self.state.mirrorBig)
             } else {
-                s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || self.pomodoro.isRunning,
-                                               toast: self.state.toast != nil)
+                s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
+                                               toast: self.state.toast != nil,
+                                               withAgent: self.agentSessions.hasActivePill)
                 x = self.metrics.islandLeadingPad(expanded: false)
             }
             let y = self.host.isFlipped ? 0 : self.host.bounds.height - s.height
@@ -87,6 +116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
+        // With hover-to-expand off, a click in the notch opens the panel.
+        host.onZoneClick = { [weak self] in
+            guard let self, !self.settings.hoverToExpand, !self.state.isExpanded else { return }
+            self.expand()
+        }
         panel.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
         // The expand trigger hugs the physical notch exactly; the ear and
         // wings never open the panel.
@@ -108,10 +142,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = host
         panel.orderFrontRegardless()
 
-        // Esc collapses while the panel has focus.
+        // Esc collapses while the panel has focus — except on the Terminal
+        // tab, where Esc must reach the shell (vim/less would be unusable
+        // otherwise). Collapse there still works via mouse-leave, pin, or
+        // clicking away.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53, self?.state.isExpanded == true {
-                self?.collapse()
+            guard let self else { return event }
+            if event.keyCode == 53, self.state.isExpanded,
+               self.state.currentTab != .terminal {
+                self.collapse()
+                return nil
+            }
+            // A finished terminal session has no PTY to receive input; Return
+            // (or Enter) dismisses it, per the exit hint.
+            if self.state.isExpanded, self.state.currentTab == .terminal,
+               event.keyCode == 36 || event.keyCode == 76,
+               let sel = self.terminalSessions.selected, !sel.isAlive {
+                self.terminalSessions.closeSession(id: sel.id)
                 return nil
             }
             return event
@@ -122,16 +169,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil, queue: .main
         ) { [weak self] _ in self?.rebuildMetrics() })
 
+        // Apple Notes sync surfaces conflicts / permission issues as toasts.
+        notesSync.onToast = { [weak self] title, subtitle in
+            self?.state.showToast(NotchToast(icon: "note.text", title: title,
+                                             subtitle: subtitle))
+        }
+
         setupToasts()
 
+        // Claude Code agent sessions: watch ~/.claude/projects, toast on
+        // Done / Interrupted transitions (suppressed while already viewing
+        // the Agents tab, mirroring the track-change toast guard).
+        agentSessions.start()
+        agentSessions.onTransition = { [weak self] session, _ in
+            guard let self else { return }
+            guard !(self.state.isExpanded && self.state.currentTab == .agents) else { return }
+            switch session.state {
+            case .complete:
+                self.state.showToast(NotchToast(icon: "checkmark.circle.fill",
+                                                title: "Done — \(session.project)",
+                                                color: .green))
+            case .interrupted:
+                self.state.showToast(NotchToast(icon: "xmark.circle",
+                                                title: "Interrupted — \(session.project)",
+                                                color: .gray))
+            default:
+                break
+            }
+        }
+
         pomodoro.onPhaseEnd = { [weak self] ended in
-            NSSound(named: "Glass")?.play()
-            self?.state.showToast(NotchToast(
+            guard let self else { return }
+            if self.settings.timerEndSound != "none" {
+                NSSound(named: self.settings.timerEndSound)?.play()
+            }
+            guard self.settings.timerEndToast else { return }
+            self.state.showToast(NotchToast(
                 icon: ended == .focus ? "cup.and.saucer.fill" : "brain.head.profile",
                 title: ended == .focus ? "Focus done" : "Break over",
                 subtitle: ended == .focus ? "Take a break" : "Back to work",
                 color: ended == .focus ? .green : .orange), duration: 4)
         }
+        // Seed the pomodoro from settings and keep it in sync.
+        pomodoro.focusMinutes = settings.focusMinutes
+        pomodoro.restMinutes = settings.breakMinutes
+        pomodoro.autoStart = settings.timerAutoStart
+        settings.$focusMinutes.dropFirst()
+            .sink { [weak self] in self?.pomodoro.focusMinutes = $0 }.store(in: &cancellables)
+        settings.$breakMinutes.dropFirst()
+            .sink { [weak self] in self?.pomodoro.restMinutes = $0 }.store(in: &cancellables)
+        settings.$timerAutoStart.dropFirst()
+            .sink { [weak self] in self?.pomodoro.autoStart = $0 }.store(in: &cancellables)
 
         // Hide the island the moment a 4-finger gesture lands — catches
         // Space swipes at their START (wallpaper polling covers the tail).
@@ -170,14 +258,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // long-lived accessory panels, so a cheap poll also opens the panel
         // whenever the cursor is on the island. This path cannot break.
         hoverPoll = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+            guard let self, !self.state.isExpanded else { return }
+            let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
+            let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
+            let islandScreen = self.panel.convertToScreen(
+                self.host.convert(self.host.islandRect(), to: nil))
+            let mouse = NSEvent.mouseLocation
+            if zoneScreen.contains(mouse) {
+                // Route through the same dwell debounce as the tracking-area
+                // path — a bare expand() here would defeat the phantom-open
+                // protection, popping the panel when the cursor merely crosses
+                // the fake notch zone on the menu bar (non-notch screens).
+                self.hoverIsland(true)
+            } else {
+                let earX = islandScreen.minX + NotchMetrics.wing + self.metrics.notchWidth
+                self.setEarHover(mouse.x > earX && islandScreen.contains(mouse))
+            }
+        }
+        hoverPoll?.tolerance = 0.02
+
+        // Space-switch detection on a much slower cadence: CGWindowList IPC
+        // serializes every on-screen window, so polling it 8×/sec (as the
+        // hover poll used to) is a needless drain. Each Space has its own Dock
+        // wallpaper window; a change in its ID means the user switched desktops.
+        // The window name needs Screen Recording permission — without it the ID
+        // reads "?", so skip those ticks entirely (and never seed "?" as the
+        // baseline, which would fire one spurious blink when permission lands).
+        spacePoll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            // Space-switch detection: activeSpaceDidChange never fires on this
-            // macOS, but each Space has its own Dock wallpaper window — a
-            // change in its ID means the user is switching desktops.
             let wallpaper = self.currentWallpaperID()
+            guard wallpaper != "?" else { return }
             if self.lastWallpaper.isEmpty {
                 self.lastWallpaper = wallpaper
-            } else if wallpaper != self.lastWallpaper, wallpaper != "?" {
+            } else if wallpaper != self.lastWallpaper {
                 self.lastWallpaper = wallpaper
                 self.state.spaceTransitioning = true
                 self.spaceWork?.cancel()
@@ -187,19 +300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.spaceWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
             }
-            guard !self.state.isExpanded else { return }
-            let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
-            let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
-            let islandScreen = self.panel.convertToScreen(
-                self.host.convert(self.host.islandRect(), to: nil))
-            let mouse = NSEvent.mouseLocation
-            if zoneScreen.contains(mouse) {
-                self.expand()
-            } else {
-                let earX = islandScreen.minX + NotchMetrics.wing + self.metrics.notchWidth
-                self.setEarHover(mouse.x > earX && islandScreen.contains(mouse))
-            }
         }
+        spacePoll?.tolerance = 0.1
     }
 
     private func setupToasts() {
@@ -209,18 +311,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates { $0.title == $1.title }
             .dropFirst()
             .sink { [weak self] np in
-                guard let self, !self.state.isExpanded else { return }
+                guard let self, !self.state.isExpanded, self.settings.trackChangeToast else { return }
                 self.state.showToast(NotchToast(icon: "music.note", title: np.title,
                                                 subtitle: np.artist, useArtwork: true))
             }
             .store(in: &cancellables)
 
+        // Keep the default toast duration in sync with the setting.
+        state.defaultToastDuration = settings.toastDuration
+        settings.$toastDuration
+            .sink { [weak self] in self?.state.defaultToastDuration = $0 }
+            .store(in: &cancellables)
+
+        // Media settings that live inside MediaWatcher.
+        media.setYouTubeEnabled(settings.youtubeEnabled)
+        settings.$youtubeEnabled
+            .dropFirst()
+            .sink { [weak self] on in self?.media.setYouTubeEnabled(on) }
+            .store(in: &cancellables)
+        media.pausedEarHideDelay = settings.pausedEarHide
+        settings.$pausedEarHide
+            .sink { [weak self] v in self?.media.pausedEarHideDelay = v }
+            .store(in: &cancellables)
+
+        // Notes loaded tolerantly may hold more pages than the saved count
+        // (a non-empty page is never dropped) — reconcile the setting to match,
+        // but only when it actually differs so a clean launch writes nothing.
+        if settings.notesPageCount != state.pages.count {
+            settings.notesPageCount = state.pages.count
+        }
+
+        // Calendar query settings.
+        calendarModel.lookAheadDays = settings.calendarLookAhead
+        calendarModel.includeAllDay = settings.calendarAllDay
+        calendarModel.excludedCalendarIDs = Set(settings.calendarExcludedIDs)
+        settings.$calendarLookAhead.dropFirst().sink { [weak self] v in
+            self?.calendarModel.lookAheadDays = v; self?.calendarModel.load()
+        }.store(in: &cancellables)
+        settings.$calendarAllDay.dropFirst().sink { [weak self] v in
+            self?.calendarModel.includeAllDay = v; self?.calendarModel.load()
+        }.store(in: &cancellables)
+        settings.$calendarExcludedIDs.dropFirst().sink { [weak self] v in
+            self?.calendarModel.excludedCalendarIDs = Set(v); self?.calendarModel.load()
+        }.store(in: &cancellables)
+
+        // Mirror camera + flip.
+        mirror.preferredCameraID = settings.mirrorCameraID
+        mirror.mirrored = settings.mirrorFlip
+        settings.$mirrorCameraID.dropFirst()
+            .sink { [weak self] in self?.mirror.selectCamera($0) }.store(in: &cancellables)
+        settings.$mirrorFlip.dropFirst()
+            .sink { [weak self] in self?.mirror.setMirrored($0) }.store(in: &cancellables)
+
+        // Stats refresh rate + hidden tiles.
+        stats.refreshInterval = settings.statsRefreshRate
+        stats.hiddenTiles = Set(settings.statsHiddenTiles)
+        settings.$statsRefreshRate.dropFirst()
+            .sink { [weak self] in self?.stats.refreshInterval = $0 }.store(in: &cancellables)
+        settings.$statsHiddenTiles.dropFirst()
+            .sink { [weak self] in self?.stats.hiddenTiles = Set($0) }.store(in: &cancellables)
+
+        // Controls: screenshot mode.
+        toggles.screenshotMode = settings.screenshotMode
+        settings.$screenshotMode.dropFirst()
+            .sink { [weak self] in self?.toggles.screenshotMode = $0 }.store(in: &cancellables)
+
         batteryTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             self?.checkBattery()
         }
+        batteryTimer?.tolerance = 2
+
+        // Pinned island: switching away from the Mirror tab must stop the
+        // camera. mirror.stop() otherwise only runs on collapse(), so a pinned
+        // panel would keep the session (and the green recording dot) alive
+        // invisibly. Also reset mirrorBig, as its doc comment promises.
+        state.$currentTab
+            .removeDuplicates()
+            .sink { [weak self] tab in
+                guard let self, tab != .mirror else { return }
+                self.mirror.stop()
+                if !self.settings.mirrorRememberBig { self.state.mirrorBig = false }
+            }
+            .store(in: &cancellables)
     }
 
     private func checkBattery() {
+        guard settings.batteryAlerts else { return }
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef],
               let ps = list.first,
@@ -267,10 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the fingers cover this much; lifting commits at half of it, where the
     /// tab bar previews the target.
     private static let tabSwipeSpan: CGFloat = 100
-    /// Volume percent gained per point of vertical travel.
-    private static let volumePerPoint: Double = 0.4
 
     private func haptic(_ pattern: NSHapticFeedbackManager.FeedbackPattern = .alignment) {
+        guard settings.haptics else { return }
         NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
     }
 
@@ -291,7 +466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             volumeReadToken += 1
             // Kick off the base volume read now so it has usually landed by
             // the time the fingers actually move.
-            if !state.isExpanded, media.nowPlaying != nil {
+            if !state.isExpanded, media.nowPlaying != nil, settings.swipeVolume {
                 let token = volumeReadToken
                 media.readPlayerVolumeAsync { [weak self] v in
                     guard let self, token == self.volumeReadToken else { return }
@@ -336,7 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             guard media.nowPlaying != nil else { return }
-            if abs(swipeX) > 40, abs(swipeX) > abs(swipeY) {
+            if settings.swipeToSkip, abs(swipeX) > 40, abs(swipeX) > abs(swipeY) {
                 let next = swipeX < 0
                 next ? media.nextTrack() : media.previousTrack()
                 haptic()
@@ -363,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Moves the current tab by `delta`, wrapping at the ends, with a
     /// haptic tick per change.
     private func stepTab(by delta: Int) {
-        let tabs = NotchTab.allCases
+        let tabs = state.visibleTabs
         guard delta != 0, let i = tabs.firstIndex(of: state.currentTab) else { return }
         let n = tabs.count
         state.currentTab = tabs[((i + delta) % n + n) % n]
@@ -374,9 +549,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// only whole-percent changes, rate-limited, so a fast swipe can't spawn
     /// an osascript pile-up; a haptic tick marks every 10% detent.
     private func updateLiveVolume(final: Bool) {
-        guard media.nowPlaying != nil, let base = volumeBase,
+        guard settings.swipeVolume, media.nowPlaying != nil, let base = volumeBase,
               abs(swipeY) > 12, abs(swipeY) > abs(swipeX) else { return }
-        let whole = Int(min(100, max(0, base - swipeY * Self.volumePerPoint)).rounded())
+        let whole = Int(min(100, max(0, base - swipeY * settings.volumeSensitivity).rounded()))
         let now = ProcessInfo.processInfo.systemUptime
         if whole != lastSentVolume, final || now - lastVolumeSendTime > 0.05 {
             if let prev = lastSentVolume, prev / 10 != whole / 10 {
@@ -401,6 +576,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         state.saveNow()
         toggles.shutdown()
+        terminalSessions.shutdown()
+        agentSessions.shutdown()
+        if settings.trayClearOnQuit { tray.clear() }
     }
 
     private func makeRoot() -> AnyView {
@@ -415,7 +593,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(pomodoro)
             .environmentObject(spectrum)
             .environmentObject(lyrics)
-            .environmentObject(audioOutput))
+            .environmentObject(audioOutput)
+            .environmentObject(terminalSessions)
+            .environmentObject(agentSessions)
+            .environmentObject(notesSync)
+            .environmentObject(settings))
     }
 
     /// Expand on hover, effectively instantly. SwiftUI can drop hover-exit
@@ -424,27 +606,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// hover, no phantom opens from a cursor that merely passed through.
     private func hoverIsland(_ inside: Bool) {
         expandWork?.cancel()
+        // Hover-to-expand off: the panel only opens on a click in the notch
+        // (see host.onZoneClick).
+        guard settings.hoverToExpand else { return }
         guard inside, !state.isExpanded else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.state.isExpanded else { return }
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let screenRect = self.panel.convertToScreen(inWindow)
-            let onIsland = screenRect.contains(NSEvent.mouseLocation)
-            NSLog("notchbook dwell-check onIsland=%d rect=%@ mouse=%@",
-                  onIsland ? 1 : 0,
-                  NSStringFromRect(screenRect),
-                  NSStringFromPoint(NSEvent.mouseLocation))
-            if onIsland { self.expand() }
+            if screenRect.contains(NSEvent.mouseLocation) { self.expand() }
         }
         expandWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+        // "Instant" keeps the original 0.05 s debounce (phantom-open guard);
+        // longer delays come straight from the setting.
+        let dwell = settings.expandDelay > 0 ? settings.expandDelay : 0.05
+        DispatchQueue.main.asyncAfter(deadline: .now() + dwell, execute: work)
     }
 
     private func expand() {
         guard !state.isExpanded else { return }
         state.isExpanded = true
         media.refresh()
-        panel.makeKeyAndOrderFront(nil)
+        notesSync.refresh()  // pull Apple Notes if that mode is on (no-op otherwise)
+        // orderFront, NOT makeKeyAndOrderFront: hover-expand must not steal key
+        // status from the frontmost app mid-typing. The panel already has
+        // `becomesKeyOnlyIfNeeded`, so it becomes key on its own the moment a
+        // control that needs the keyboard (the notes editor) is clicked.
+        panel.orderFront(nil)
         startMouseWatch()
     }
 
@@ -454,7 +642,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.isExpanded = false
         state.pinned = false
         state.navHovered = false
-        state.mirrorBig = false
+        if !settings.mirrorRememberBig { state.mirrorBig = false }
+        state.settingsRoute = nil
         state.saveNow()
         mirror.stop()
         media.setProgressPolling(false)
@@ -478,8 +667,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      + NotchMetrics.islandGap + 16)
             let inNav = navZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
+            // While the user is actively typing in a terminal (the panel is
+            // key and a terminal view holds focus), the cursor drifting off
+            // the island must not collapse it out from under a command.
+            // Clicking another app resigns key, so normal behavior resumes.
+            let typingInTerminal = self.panel.isKeyWindow
+                && self.panel.firstResponder is LocalProcessTerminalView
             if !visible.contains(mouse), !self.state.pinned,
-               !self.state.menuHoldsOpen {
+               !self.state.menuHoldsOpen, !typingInTerminal {
                 self.collapse()
             }
         }
@@ -498,7 +693,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func rebuildMetrics() {
-        metrics = NotchMetrics(screen: NotchMetrics.notchScreen())
+        // During display reconfiguration NSScreen.screens can be momentarily
+        // empty; keep the existing metrics until a screen reappears rather than
+        // trapping or building a bogus geometry.
+        guard let screen = NotchMetrics.notchScreen() else { return }
+        let new = NotchMetrics(screen: screen)
+        // Only rebuild when the geometry actually changed. Replacing
+        // host.rootView discards all view-local @State (notes focus, sliders,
+        // lyrics toggle), so doing it on every incidental screen-parameters
+        // notification (e.g. display sleep/wake) caused a visible reset while
+        // the panel was expanded.
+        if let old = metrics,
+           old.windowFrame == new.windowFrame,
+           old.notchWidth == new.notchWidth,
+           old.notchHeight == new.notchHeight {
+            return
+        }
+        metrics = new
         panel.setFrame(metrics.windowFrame, display: true)
         host.rootView = makeRoot()
     }

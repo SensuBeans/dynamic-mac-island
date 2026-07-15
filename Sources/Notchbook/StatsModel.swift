@@ -16,15 +16,34 @@ final class StatsModel: ObservableObject {
     @Published var batteryLevel: Double = -1       // 0…1
     @Published var batteryCharging = false
 
+    /// Settings-driven poll interval (seconds). Changing it while polling
+    /// restarts the timer at the new cadence.
+    var refreshInterval: Double = 2 {
+        didSet {
+            guard timer != nil, oldValue != refreshInterval else { return }
+            timer?.invalidate(); timer = nil
+            setPolling(true)
+        }
+    }
+    /// Tiles the user hid — their poll work is skipped entirely.
+    var hiddenTiles: Set<String> = []
+
     private var timer: Timer?
-    private var prevTicks: (user: UInt64, system: UInt64, idle: UInt64, nice: UInt64)?
+    private var prevTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)?
     private let smc = SMC()
+    /// `mach_host_self()` returns a send right that must be released; cache it
+    /// once instead of leaking a fresh one on every 2 s poll.
+    private let hostPort = mach_host_self()
+
+    deinit {
+        mach_port_deallocate(mach_task_self_, hostPort)
+    }
 
     func setPolling(_ active: Bool) {
         if active {
             guard timer == nil else { return }
             poll()
-            timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
                 self?.poll()
             }
         } else {
@@ -34,12 +53,12 @@ final class StatsModel: ObservableObject {
     }
 
     private func poll() {
-        pollCPU()
-        pollMemory()
-        pollDisk()
-        pollGPU()
-        pollBattery()
-        fanRPM = smc?.fanRPM() ?? -1
+        if !hiddenTiles.contains("cpu") { pollCPU() }
+        if !hiddenTiles.contains("memory") { pollMemory() }
+        if !hiddenTiles.contains("disk") { pollDisk() }
+        if !hiddenTiles.contains("gpu") { pollGPU() }
+        if !hiddenTiles.contains("battery") { pollBattery() }
+        if !hiddenTiles.contains("fan") { fanRPM = smc?.fanRPM() ?? -1 }
     }
 
     private func pollCPU() {
@@ -48,15 +67,18 @@ final class StatsModel: ObservableObject {
         var info = host_cpu_load_info_data_t()
         let kr = withUnsafeMutablePointer(to: &info) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) {
-                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &size)
+                host_statistics(hostPort, HOST_CPU_LOAD_INFO, $0, &size)
             }
         }
         guard kr == KERN_SUCCESS else { return }
-        let t = (user: UInt64(info.cpu_ticks.0), system: UInt64(info.cpu_ticks.1),
-                 idle: UInt64(info.cpu_ticks.2), nice: UInt64(info.cpu_ticks.3))
+        // cpu_ticks are natural_t (UInt32) and wrap; subtract with wrapping `&-`
+        // in UInt32 *before* widening, else the underflow traps after long uptimes.
+        let t = (user: info.cpu_ticks.0, system: info.cpu_ticks.1,
+                 idle: info.cpu_ticks.2, nice: info.cpu_ticks.3)
         if let p = prevTicks {
-            let busy = (t.user - p.user) + (t.system - p.system) + (t.nice - p.nice)
-            let total = busy + (t.idle - p.idle)
+            let busy = UInt64(t.user &- p.user) + UInt64(t.system &- p.system)
+                + UInt64(t.nice &- p.nice)
+            let total = busy + UInt64(t.idle &- p.idle)
             if total > 0 { cpu = Double(busy) / Double(total) }
         }
         prevTicks = t
@@ -68,7 +90,7 @@ final class StatsModel: ObservableObject {
         var vm = vm_statistics64_data_t()
         let kr = withUnsafeMutablePointer(to: &vm) {
             $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) {
-                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &size)
+                host_statistics64(hostPort, HOST_VM_INFO64, $0, &size)
             }
         }
         guard kr == KERN_SUCCESS else { return }

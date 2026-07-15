@@ -6,13 +6,24 @@ import AVFoundation
 
 struct NotesTab: View {
     @EnvironmentObject var state: NotchState
+    @EnvironmentObject var notesSync: NotesSyncModel
+    @EnvironmentObject var settings: SettingsStore
     var focus: FocusState<Bool>.Binding
+    @State private var notesIndex = 0
+    /// Confirm-before-clear: the trash button is "armed" for 2s after the
+    /// first click when the setting is on; a second click within the window
+    /// actually clears.
+    @State private var clearArmed = false
+    @State private var clearGen = 0
+
+    private var isNotesMode: Bool { notesSync.mode == .notes }
 
     var body: some View {
         VStack(spacing: 8) {
             TextEditor(text: editorText)
                 .focused(focus)
-                .font(.system(size: 13))
+                .font(.system(size: settings.notesFontSize,
+                              design: settings.notesMonospaced ? .monospaced : .default))
                 .foregroundStyle(.white)
                 .scrollContentBackground(.hidden)
                 .padding(6)
@@ -22,28 +33,46 @@ struct NotesTab: View {
                 )
 
             HStack {
-                pageTabs
-                Text("\(state.pages[state.currentPage].count) chars · autosaved")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .padding(.leading, 6)
+                if isNotesMode { notesChips } else { pageTabs }
+                statusLabel
                 Spacer()
-                Button { state.pages[state.currentPage] = "" } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
+                modeToggle
+                if !isNotesMode {
+                    Button { clearCurrentPage() } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                            .foregroundStyle(clearArmed ? Color.red : .white.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .help(clearArmed ? "Click again to clear" : "Clear this page")
                 }
-                .buttonStyle(.plain)
-                .help("Clear this page")
             }
+        }
+        .onAppear { if isNotesMode { notesSync.refresh() } }
+        .onChange(of: notesSync.pages.count) { count in
+            if notesIndex >= count { notesIndex = max(0, count - 1) }
         }
     }
 
     /// The hidden (collapsed) editor must never write through to the store —
     /// an AppKit-backed TextEditor can push its initial empty text back
-    /// through the binding during setup, which once wiped saved notes.
+    /// through the binding during setup, which once wiped saved notes. The
+    /// same guard protects Apple Notes mode (a push there would set the note's
+    /// body to empty).
     private var editorText: Binding<String> {
-        Binding(
+        if isNotesMode {
+            return Binding(
+                get: {
+                    notesSync.pages.indices.contains(notesIndex)
+                        ? notesSync.pages[notesIndex].body : ""
+                },
+                set: { newValue in
+                    guard state.isExpanded,
+                          notesSync.pages.indices.contains(notesIndex) else { return }
+                    notesSync.edit(id: notesSync.pages[notesIndex].id, text: newValue)
+                })
+        }
+        return Binding(
             get: { state.pages[state.currentPage] },
             set: { newValue in
                 guard state.isExpanded else { return }
@@ -51,9 +80,50 @@ struct NotesTab: View {
             })
     }
 
+    private var statusLabel: some View {
+        Text(isNotesMode
+             ? (notesSync.syncing ? "syncing…" : "Apple Notes")
+             : "\(state.pages[state.currentPage].count) chars · autosaved")
+            .font(.system(size: 10))
+            .foregroundStyle(.white.opacity(0.35))
+            .padding(.leading, 6)
+    }
+
+    /// Cloud toggle: Local pages ↔ Apple Notes. (The settings page binds the
+    /// same `notesSync.mode`; this in-tab control keeps the feature usable
+    /// regardless.)
+    private var modeToggle: some View {
+        Button {
+            notesSync.setMode(isNotesMode ? .local : .notes)
+            notesIndex = 0
+        } label: {
+            Image(systemName: isNotesMode ? "cloud.fill" : "cloud")
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(isNotesMode ? 0.9 : 0.5))
+        }
+        .buttonStyle(.plain)
+        .help(isNotesMode ? "Syncing with Apple Notes" : "Sync with Apple Notes")
+    }
+
+    /// Clear the current page, honoring the confirm-before-clear setting: the
+    /// first click arms for 2s (trash turns red), a second click clears.
+    private func clearCurrentPage() {
+        if settings.notesConfirmClear && !clearArmed {
+            clearArmed = true
+            clearGen += 1
+            let gen = clearGen
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                if clearGen == gen { clearArmed = false }
+            }
+        } else {
+            state.pages[state.currentPage] = ""
+            clearArmed = false
+        }
+    }
+
     private var pageTabs: some View {
         HStack(spacing: 3) {
-            ForEach(0..<NotchState.pageCount, id: \.self) { i in
+            ForEach(state.pages.indices, id: \.self) { i in
                 let isCurrent = i == state.currentPage
                 let isEmpty = state.pages[i].isEmpty
                 Button { state.currentPage = i } label: {
@@ -70,6 +140,43 @@ struct NotesTab: View {
                 .help(isEmpty ? "Page \(i + 1) (empty)" : "Page \(i + 1)")
             }
         }
+    }
+
+    /// Apple Notes mode: one chip per note (title, ~10 chars) + a create chip.
+    private var notesChips: some View {
+        HStack(spacing: 3) {
+            ForEach(Array(notesSync.pages.enumerated()), id: \.element.id) { idx, page in
+                let isCurrent = idx == notesIndex
+                Button { notesIndex = idx } label: {
+                    Text(chipTitle(page.title))
+                        .font(.system(size: 10, weight: isCurrent ? .bold : .regular))
+                        .foregroundStyle(isCurrent ? .black : .white.opacity(0.8))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .frame(height: 16)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(.white.opacity(isCurrent ? 0.85 : 0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Button { notesSync.createNote { notesIndex = 0 } } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: 18, height: 16)
+                    .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help("New note in the sync folder")
+        }
+    }
+
+    private func chipTitle(_ t: String) -> String {
+        let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = s.isEmpty ? "Untitled" : s
+        return name.count > 10 ? String(name.prefix(10)) + "…" : name
     }
 }
 
@@ -90,12 +197,12 @@ struct MediaTab: View {
         if let np = media.nowPlaying {
             mediaCard(np)
                 .onAppear {
-                    volume = media.readPlayerVolume()
+                    media.readPlayerVolumeAsync { volume = $0 }
                     // Music's AirPlay list needs network discovery — warm it
                     // here so the output menu is populated at click time.
                     audioOutput.prefetchAirPlay()
                 }
-                .onChange(of: np.source) { _ in volume = media.readPlayerVolume() }
+                .onChange(of: np.source) { _ in media.readPlayerVolumeAsync { volume = $0 } }
                 .onChange(of: np.title) { _ in
                     if showLyrics {
                         lyrics.fetch(title: np.title, artist: np.artist,
@@ -334,6 +441,24 @@ struct MediaTab: View {
                 .background(.black.opacity(0.55))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .transition(.opacity)
+            } else if artHovered, media.nowPlaying?.source == .youtube {
+                // YouTube: jump to the video's Chrome tab.
+                Button { media.openYouTubeTab() } label: {
+                    VStack(spacing: 5) {
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("Open Tab")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .transition(.opacity)
+                .help("Show this video's tab in Chrome")
             }
         }
         .onHover { artHovered = $0 }
@@ -644,8 +769,11 @@ struct TimerTab: View {
 
 struct TrayTab: View {
     @EnvironmentObject var tray: FilesTray
+    @EnvironmentObject var settings: SettingsStore
 
-    private let columns = [GridItem(.adaptive(minimum: 62), spacing: 8)]
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: settings.trayTileSize), spacing: 8)]
+    }
 
     var body: some View {
         if tray.items.isEmpty {
@@ -680,7 +808,13 @@ struct TrayTab: View {
                         .padding(.horizontal, 9)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(.white.opacity(0.12)))
-                        .overlay { MultiFileDragOverlay(urls: tray.items) }
+                        .overlay {
+                            MultiFileDragOverlay(urls: tray.items) { dropped in
+                                if settings.trayRemoveAfterDragOut {
+                                    dropped.forEach { tray.remove($0) }
+                                }
+                            }
+                        }
                         .help("Drag every file out as one stack")
                     Button { tray.airDrop() } label: {
                         Label("AirDrop", systemImage: "dot.radiowaves.left.and.right")
@@ -710,12 +844,15 @@ struct TrayTab: View {
 
 private struct TrayTile: View {
     @EnvironmentObject var tray: FilesTray
+    @EnvironmentObject var settings: SettingsStore
     let url: URL
 
     @State private var thumbnail: NSImage?
     @State private var hovered = false
 
-    private static let side: CGFloat = 54
+    /// Visual tile edge = the grid cell (tile-size setting) minus the 8pt of
+    /// surrounding spacing the grid reserves.
+    private var side: CGFloat { settings.trayTileSize - 8 }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -732,7 +869,7 @@ private struct TrayTile: View {
                             .padding(8)
                     }
                 }
-                .frame(width: Self.side, height: Self.side)
+                .frame(width: side, height: side)
                 .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
@@ -759,7 +896,7 @@ private struct TrayTile: View {
                 .foregroundStyle(.white.opacity(hovered ? 0.9 : 0.55))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: Self.side + 8)
+                .frame(width: side + 8)
         }
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
@@ -776,7 +913,7 @@ private struct TrayTile: View {
             Button("Remove") { tray.remove(url) }
         }
         .onAppear {
-            TrayThumbnails.shared.load(url, side: Self.side) { thumbnail = $0 }
+            TrayThumbnails.shared.load(url, side: side) { thumbnail = $0 }
         }
     }
 }
@@ -785,31 +922,92 @@ private struct TrayTile: View {
 
 struct CalendarTab: View {
     @EnvironmentObject var calendarModel: CalendarModel
+    @EnvironmentObject var state: NotchState
+    @EnvironmentObject var settings: SettingsStore
+    @State private var visibleMonth = Date()
+    @State private var selectedDay = Calendar.current.startOfDay(for: Date())
 
     var body: some View {
         Group {
             if !calendarModel.hasAccess {
-                VStack(spacing: 10) {
-                    Spacer()
-                    Image(systemName: "calendar")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.white.opacity(0.3))
-                    Text("Connect your Calendar")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Button { calendarModel.connect() } label: {
-                        Text("Allow Access")
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(.orange))
-                            .foregroundStyle(.black)
+                connectPrompt
+            } else {
+                VStack(spacing: 6) {
+                    header
+                    if state.calendarMonthMode {
+                        monthView
+                    } else {
+                        listView
                     }
-                    .buttonStyle(.plain)
-                    Spacer()
                 }
-                .frame(maxWidth: .infinity)
-            } else if calendarModel.events.isEmpty {
+            }
+        }
+        .onAppear {
+            calendarModel.load()
+            if state.calendarMonthMode { calendarModel.loadMonth(containing: visibleMonth) }
+        }
+    }
+
+    private var connectPrompt: some View {
+        VStack(spacing: 10) {
+            Spacer()
+            Image(systemName: "calendar")
+                .font(.system(size: 28))
+                .foregroundStyle(.white.opacity(0.3))
+            Text("Connect your Calendar")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+            Button { calendarModel.connect() } label: {
+                Text("Allow Access")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(.orange))
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    // MARK: List / month toggle
+
+    private var header: some View {
+        HStack {
+            Spacer()
+            HStack(spacing: 2) {
+                segButton(icon: "list.bullet", active: !state.calendarMonthMode) {
+                    state.calendarMonthMode = false
+                }
+                segButton(icon: "calendar", active: state.calendarMonthMode) {
+                    state.calendarMonthMode = true
+                    calendarModel.loadMonth(containing: visibleMonth)
+                }
+            }
+            .padding(2)
+            .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.08)))
+        }
+        .frame(height: 22)
+    }
+
+    private func segButton(icon: String, active: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(active ? .black : .white.opacity(0.55))
+                .frame(width: 26, height: 16)
+                .background(RoundedRectangle(cornerRadius: 5)
+                    .fill(active ? .white.opacity(0.85) : .clear))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: List mode (unchanged from before)
+
+    private var listView: some View {
+        Group {
+            if calendarModel.events.isEmpty {
                 VStack {
                     Spacer()
                     Text("No events in the next 7 days")
@@ -821,20 +1019,175 @@ struct CalendarTab: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 4) {
-                        ForEach(calendarModel.events, id: \.eventIdentifier) { event in
+                        ForEach(calendarModel.events, id: \.rowID) { event in
                             eventRow(event)
                         }
                     }
                 }
             }
         }
-        .onAppear { calendarModel.load() }
+    }
+
+    // MARK: Month mode
+
+    private var monthView: some View {
+        HStack(alignment: .top, spacing: 12) {
+            miniMonth.frame(width: 170)
+            dayEvents
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var miniMonth: some View {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        return VStack(spacing: 3) {
+            HStack {
+                Button { stepMonth(-1) } label: { Image(systemName: "chevron.left") }
+                Spacer()
+                Button { jumpToToday() } label: {
+                    Text(visibleMonth.formatted(.dateTime.month(.wide).year()))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                Spacer()
+                Button { stepMonth(1) } label: { Image(systemName: "chevron.right") }
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.6))
+            .buttonStyle(.plain)
+
+            HStack(spacing: 0) {
+                ForEach(weekdaySymbols.indices, id: \.self) { i in
+                    Text(weekdaySymbols[i])
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .frame(maxWidth: .infinity)
+                }
+            }
+
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 7),
+                      spacing: 2) {
+                ForEach(gridDays, id: \.self) { day in
+                    dayCell(day, today: today, cal: cal)
+                }
+            }
+            // Pin the grid to the top of the column; any extra height falls below.
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func dayCell(_ day: Date, today: Date, cal: Calendar) -> some View {
+        let inMonth = cal.isDate(day, equalTo: visibleMonth, toGranularity: .month)
+        let isToday = day == today
+        let isSelected = day == selectedDay
+        let hasEvents = !(calendarModel.monthEvents[day]?.isEmpty ?? true)
+        return Button { selectedDay = day } label: {
+            VStack(spacing: 1) {
+                Text("\(cal.component(.day, from: day))")
+                    .font(.system(size: 9, weight: isToday ? .bold : .regular))
+                    .foregroundStyle(isToday ? .black : .white.opacity(inMonth ? 0.85 : 0.25))
+                    .frame(width: 15, height: 15)
+                    .background(Circle().fill(isToday ? Color.orange : .clear))
+                    .overlay(Circle().stroke(.white,
+                                             lineWidth: (isSelected && !isToday) ? 1 : 0))
+                Circle()
+                    .fill(hasEvents ? Color.orange : .clear)
+                    .frame(width: 2.5, height: 2.5)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var dayEvents: some View {
+        let events = calendarModel.monthEvents[selectedDay] ?? []
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(selectedDay.formatted(.dateTime.weekday(.abbreviated)
+                    .month(.abbreviated).day()))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            if events.isEmpty {
+                Spacer()
+                Text("No events")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(events, id: \.rowID) { dayEventRow($0) }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func dayEventRow(_ event: EKEvent) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(eventColor(event))
+                .frame(width: 3, height: 26)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(event.title ?? "Untitled")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                Text(event.isAllDay ? "All day"
+                     : event.startDate.formatted(date: .omitted, time: .shortened))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.white.opacity(0.06)))
+    }
+
+    // MARK: Month helpers
+
+    private var gridDays: [Date] {
+        let cal = Calendar.current
+        guard let monthStart = cal.date(from: cal.dateComponents([.year, .month],
+                                                                 from: visibleMonth))
+        else { return [] }
+        let weekday = cal.component(.weekday, from: monthStart)
+        let lead = (weekday - cal.firstWeekday + 7) % 7
+        guard let gridStart = cal.date(byAdding: .day, value: -lead, to: monthStart)
+        else { return [] }
+        return (0..<42).compactMap { cal.date(byAdding: .day, value: $0, to: gridStart) }
+    }
+
+    /// Weekday initials rotated to the system's first weekday.
+    private var weekdaySymbols: [String] {
+        let cal = Calendar.current
+        let syms = cal.veryShortStandaloneWeekdaySymbols
+        let first = cal.firstWeekday - 1
+        return Array(syms[first...] + syms[..<first])
+    }
+
+    private func stepMonth(_ delta: Int) {
+        let cal = Calendar.current
+        if let m = cal.date(byAdding: .month, value: delta, to: visibleMonth) {
+            visibleMonth = m
+            calendarModel.loadMonth(containing: m)
+        }
+    }
+
+    private func jumpToToday() {
+        visibleMonth = Date()
+        selectedDay = Calendar.current.startOfDay(for: Date())
+        calendarModel.loadMonth(containing: visibleMonth)
     }
 
     private func eventRow(_ event: EKEvent) -> some View {
         HStack(spacing: 10) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(Color(cgColor: event.calendar.cgColor))
+                .fill(eventColor(event))
                 .frame(width: 3, height: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(event.title ?? "Untitled")
@@ -850,6 +1203,14 @@ struct CalendarTab: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+    }
+
+    /// `EKEvent.calendar` is implicitly-unwrapped and becomes nil if the
+    /// calendar was deleted between fetch and render; fall back to gray.
+    private func eventColor(_ event: EKEvent) -> Color {
+        guard settings.calendarColorCode else { return Color(white: 0.85) }
+        if let cg = event.calendar?.cgColor { return Color(cgColor: cg) }
+        return Color(white: 0.5)
     }
 
     private func timeLabel(_ event: EKEvent) -> String {
@@ -916,6 +1277,11 @@ struct MirrorTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.45))
                         .multilineTextAlignment(.center)
+                } else if mirror.unavailable {
+                    Text("No camera available")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
                 } else {
                     Text("Check yourself before a call")
                         .font(.system(size: 12))
@@ -941,39 +1307,54 @@ struct MirrorTab: View {
 
 struct StatsTab: View {
     @EnvironmentObject var stats: StatsModel
+    @EnvironmentObject var settings: SettingsStore
+
+    private func vis(_ key: String) -> Bool { settings.isStatsTileVisible(key) }
 
     var body: some View {
         // Plain HStack, not a grid: every tile stretches equally in both
-        // axes so the six cards are always identical and fill the panel.
+        // axes so the visible cards are always identical and fill the panel.
         HStack(spacing: 6) {
-            StatTile(title: "CPU",
-                     center: pct(stats.cpu),
-                     detail: nil,
-                     fraction: stats.cpu)
-            StatTile(title: "Memory",
-                     center: pct(stats.memUsed / stats.memTotal),
-                     detail: "\(gb(stats.memUsed)) / \(gb(stats.memTotal)) GB",
-                     fraction: stats.memUsed / stats.memTotal)
-            StatTile(title: "GPU",
-                     center: stats.gpu < 0 ? "—" : pct(stats.gpu),
-                     detail: nil,
-                     fraction: max(stats.gpu, 0))
-            StatTile(title: "Disk",
-                     center: stats.diskTotal > 0
-                        ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
-                     detail: "\(gb(stats.diskFree)) GB free",
-                     fraction: stats.diskTotal > 0
-                        ? 1 - stats.diskFree / stats.diskTotal : 0)
-            StatTile(title: "Fan",
-                     center: stats.fanRPM < 0 ? "—"
-                        : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
-                     detail: stats.fanRPM >= 1 ? "rpm" : nil,
-                     fraction: stats.fanRPM < 0 ? 0 : min(stats.fanRPM / 6000, 1))
-            StatTile(title: "Battery",
-                     center: stats.batteryLevel < 0 ? "—" : pct(stats.batteryLevel),
-                     detail: stats.batteryCharging ? "charging ⚡" : nil,
-                     fraction: max(stats.batteryLevel, 0),
-                     invertSeverity: true)
+            if vis("cpu") {
+                StatTile(title: "CPU",
+                         center: pct(stats.cpu),
+                         detail: nil,
+                         fraction: stats.cpu)
+            }
+            if vis("memory") {
+                StatTile(title: "Memory",
+                         center: pct(stats.memUsed / stats.memTotal),
+                         detail: "\(gb(stats.memUsed)) / \(gb(stats.memTotal)) GB",
+                         fraction: stats.memUsed / stats.memTotal)
+            }
+            if vis("gpu") {
+                StatTile(title: "GPU",
+                         center: stats.gpu < 0 ? "—" : pct(stats.gpu),
+                         detail: nil,
+                         fraction: max(stats.gpu, 0))
+            }
+            if vis("disk") {
+                StatTile(title: "Disk",
+                         center: stats.diskTotal > 0
+                            ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
+                         detail: "\(gb(stats.diskFree)) GB free",
+                         fraction: stats.diskTotal > 0
+                            ? 1 - stats.diskFree / stats.diskTotal : 0)
+            }
+            if vis("fan") {
+                StatTile(title: "Fan",
+                         center: stats.fanRPM < 0 ? "—"
+                            : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
+                         detail: stats.fanRPM >= 1 ? "rpm" : nil,
+                         fraction: stats.fanRPM < 0 ? 0 : min(stats.fanRPM / 6000, 1))
+            }
+            if vis("battery") {
+                StatTile(title: "Battery",
+                         center: stats.batteryLevel < 0 ? "—" : pct(stats.batteryLevel),
+                         detail: stats.batteryCharging ? "charging ⚡" : nil,
+                         fraction: max(stats.batteryLevel, 0),
+                         invertSeverity: true)
+            }
         }
         .padding(.top, 4)
     }
@@ -1043,54 +1424,83 @@ private struct StatTile: View {
 
 struct TogglesTab: View {
     @EnvironmentObject var toggles: TogglesModel
+    @EnvironmentObject var settings: SettingsStore
+
+    private func vis(_ key: String) -> Bool { settings.isControlVisible(key) }
 
     var body: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 6) {
-                ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
-                    toggles.toggleDarkMode()
-                }
-                ToggleCard(icon: "cup.and.saucer.fill", label: "Keep Awake",
-                           active: toggles.keepAwake) {
-                    toggles.keepAwake.toggle()
-                }
-                ToggleCard(icon: "eye.slash.fill", label: "Hide Desktop",
-                           active: toggles.desktopIconsHidden) {
-                    toggles.toggleDesktopIcons()
-                }
-            }
-            HStack(spacing: 6) {
-                if toggles.displaySliderAvailable {
-                    BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
-                                   read: { toggles.readDisplayBrightness() },
-                                   set: { toggles.setDisplayBrightness($0) })
-                } else {
-                    StepperCard(icon: "sun.max.fill", label: "Display",
-                                minus: { toggles.displayBrightnessDown() },
-                                plus: { toggles.displayBrightnessUp() })
-                }
-                if toggles.keyboardSliderAvailable {
-                    BrightnessCard(icon: "keyboard", endIcon: "light.max",
-                                   read: { toggles.readKeyboardBrightness() },
-                                   set: { toggles.setKeyboardBrightness($0) })
-                } else {
-                    StepperCard(icon: "keyboard", label: "Keyboard",
-                                minus: { toggles.keyboardBacklightDown() },
-                                plus: { toggles.keyboardBacklightUp() })
+            if vis("darkMode") || vis("keepAwake") || vis("hideDesktop") {
+                HStack(spacing: 6) {
+                    if vis("darkMode") {
+                        ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
+                            toggles.toggleDarkMode()
+                        }
+                    }
+                    if vis("keepAwake") {
+                        ToggleCard(icon: "cup.and.saucer.fill", label: "Keep Awake",
+                                   active: toggles.keepAwake) {
+                            toggles.keepAwake.toggle()
+                        }
+                    }
+                    if vis("hideDesktop") {
+                        ToggleCard(icon: "eye.slash.fill", label: "Hide Desktop",
+                                   active: toggles.desktopIconsHidden) {
+                            toggles.toggleDesktopIcons()
+                        }
+                    }
                 }
             }
-            HStack(spacing: 6) {
-                ToggleCard(icon: "speaker.slash.fill", label: "Mute", active: false) {
-                    toggles.toggleMute()
+            if vis("display") || vis("keyboard") {
+                HStack(spacing: 6) {
+                    if vis("display") { displayCard }
+                    if vis("keyboard") { keyboardCard }
                 }
-                ToggleCard(icon: "lock.fill", label: "Lock Screen", active: false) {
-                    toggles.lockScreen()
-                }
-                ToggleCard(icon: "camera.viewfinder", label: "Screenshot", active: false) {
-                    toggles.screenshot()
+            }
+            if vis("mute") || vis("lock") || vis("screenshot") {
+                HStack(spacing: 6) {
+                    if vis("mute") {
+                        ToggleCard(icon: "speaker.slash.fill", label: "Mute", active: false) {
+                            toggles.toggleMute()
+                        }
+                    }
+                    if vis("lock") {
+                        ToggleCard(icon: "lock.fill", label: "Lock Screen", active: false) {
+                            toggles.lockScreen()
+                        }
+                    }
+                    if vis("screenshot") {
+                        ToggleCard(icon: "camera.viewfinder", label: "Screenshot", active: false) {
+                            toggles.screenshot()
+                        }
+                    }
                 }
             }
             Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder private var displayCard: some View {
+        if toggles.displaySliderAvailable {
+            BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
+                           read: { toggles.readDisplayBrightness() },
+                           set: { toggles.setDisplayBrightness($0) })
+        } else {
+            StepperCard(icon: "sun.max.fill", label: "Display",
+                        minus: { toggles.displayBrightnessDown() },
+                        plus: { toggles.displayBrightnessUp() })
+        }
+    }
+
+    @ViewBuilder private var keyboardCard: some View {
+        if toggles.keyboardSliderAvailable {
+            BrightnessCard(icon: "keyboard", endIcon: "light.max",
+                           read: { toggles.readKeyboardBrightness() },
+                           set: { toggles.setKeyboardBrightness($0) })
+        } else {
+            StepperCard(icon: "keyboard", label: "Keyboard",
+                        minus: { toggles.keyboardBacklightDown() },
+                        plus: { toggles.keyboardBacklightUp() })
         }
     }
 }
@@ -1199,6 +1609,64 @@ private struct ToggleCard: View {
     }
 }
 
+// MARK: - Settings
+
+/// Panel-wide settings, opened from the gear in the nav dock. One row per
+/// page with a switch that hides it from the tab bar and the swipe cycle.
+struct SettingsTab: View {
+    @EnvironmentObject var state: NotchState
+
+    private let columns = [GridItem(.flexible(), spacing: 8),
+                           GridItem(.flexible(), spacing: 8)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Pages")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.45))
+                .textCase(.uppercase)
+                .kerning(0.6)
+            LazyVGrid(columns: columns, spacing: 6) {
+                ForEach(NotchTab.allCases, id: \.self) { tab in
+                    settingRow(tab)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func settingRow(_ tab: NotchTab) -> some View {
+        let visible = !state.hiddenTabs.contains(tab)
+        // The last visible page can't be hidden — the dock is never empty.
+        let locked = visible && state.visibleTabs.count == 1
+        return HStack(spacing: 6) {
+            Image(systemName: tab.icon)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(visible ? 0.8 : 0.35))
+                .frame(width: 16)
+            Text(tab.title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(visible ? 0.9 : 0.4))
+            Spacer(minLength: 0)
+            Toggle("", isOn: Binding(
+                get: { visible },
+                set: { state.setTabHidden(tab, !$0) }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .tint(.orange)
+                .disabled(locked)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+        .help(locked ? "The last visible page can't be hidden"
+                     : visible ? "Hide \(tab.title) from the dock"
+                               : "Show \(tab.title) in the dock")
+        .animation(.easeOut(duration: 0.15), value: visible)
+    }
+}
+
 // MARK: - Equalizer
 
 /// Bouncing bars used on the island's ear and as the media tab's waveform.
@@ -1244,5 +1712,16 @@ struct EqualizerBars: View {
         let phase = Double(i) * 0.9
         let v = (sin(t * speed + phase) + 1) / 2
         return maxHeight * (0.25 + 0.75 * v)
+    }
+}
+
+extension EKEvent {
+    /// Stable per-occurrence identity for `ForEach`. Recurring occurrences
+    /// share one `eventIdentifier`, so combine it with the occurrence start
+    /// date to avoid duplicate SwiftUI IDs.
+    var rowID: String {
+        let id = eventIdentifier ?? "nil"
+        let start = startDate?.timeIntervalSinceReferenceDate ?? 0
+        return "\(id)@\(start)"
     }
 }
