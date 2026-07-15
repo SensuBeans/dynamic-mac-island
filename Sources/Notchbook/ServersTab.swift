@@ -189,20 +189,20 @@ private struct ServerRow: View {
             Button {
                 server.running ? servers.stop(server.name) : servers.start(server.name)
             } label: {
+                // Same glass chip as the other row actions — state reads from the
+                // glyph + tint (green ▶ start / faint ■ stop), not a heavy fill.
                 Image(systemName: server.running ? "stop.fill" : "play.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(server.running ? .white : .black)
-                    .frame(width: 26, height: 22)
-                    .background(RoundedRectangle(cornerRadius: 7)
-                        .fill(server.running ? AnyShapeStyle(.white.opacity(0.14))
-                                             : AnyShapeStyle(Color.green)))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(server.running ? Color.white.opacity(0.7) : Color.green)
+                    .frame(width: 24, height: 22)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
             }
             .buttonStyle(.plain)
             .help(server.running ? "Stop" : "Start")
 
             if server.running {
                 Button { servers.open(server) } label: {
-                    Image(systemName: "arrow.up.forward")
+                    Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
                         .frame(width: 24, height: 22)
