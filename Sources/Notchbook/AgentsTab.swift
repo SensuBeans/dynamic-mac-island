@@ -389,8 +389,22 @@ private struct AgentRow: View {
             resumeCancelWork = nil
             resumeCancelling = false
         } else {
-            resumeCancelling = true
             let id = session.id
+            // Too close to fire time for the undo grace to be safe: the wall-clock
+            // fire timer would beat a 5 s-delayed cancel and resume anyway. Cancel
+            // NOW (a brief "cancelled" flash instead of an undo window).
+            if let fireAt = session.autoResumeAt, fireAt.timeIntervalSince(now) < 6 {
+                agents.cancelAutoResume(id)
+                resumeCancelling = true
+                let flash = DispatchWorkItem {
+                    resumeCancelling = false
+                    resumeCancelWork = nil
+                }
+                resumeCancelWork = flash
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: flash)
+                return
+            }
+            resumeCancelling = true
             let work = DispatchWorkItem {
                 agents.cancelAutoResume(id)
                 resumeCancelling = false

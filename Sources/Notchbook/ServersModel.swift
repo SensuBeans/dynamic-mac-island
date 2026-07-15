@@ -17,7 +17,43 @@ final class ServersModel: ObservableObject {
         var id: String { name }
         // Ignore the API's extra fields (cmd, custom).
         enum CodingKeys: String, CodingKey { case name, path, kind, port, favorite, running }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            name = try c.decode(String.self, forKey: .name)
+            path = try c.decode(String.self, forKey: .path)
+            kind = try c.decode(String.self, forKey: .kind)
+            // `port` may arrive as an Int or a String (the add flow posts "") —
+            // tolerate both so one odd entry doesn't throw and drop the whole row.
+            if let p = try? c.decode(Int.self, forKey: .port) {
+                port = p
+            } else if let s = try? c.decode(String.self, forKey: .port), let p = Int(s) {
+                port = p
+            } else {
+                port = 0
+            }
+            favorite = try c.decode(Bool.self, forKey: .favorite)
+            running = try c.decode(Bool.self, forKey: .running)
+        }
     }
+
+    /// Lossy list wrapper: decode each element independently so ONE malformed
+    /// entry is skipped instead of failing the entire list — a whole-list decode
+    /// failure used to take the connection-failure branch and wrongly claim the
+    /// Starter "isn't running" while it was up.
+    private struct LossyServers: Decodable {
+        let servers: [Server]
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            var out: [Server] = []
+            while !c.isAtEnd {
+                if let s = try? c.decode(Server.self) { out.append(s) }
+                else { _ = try? c.decode(AnyIgnored.self) }   // consume + skip the bad row
+            }
+            servers = out
+        }
+    }
+    private struct AnyIgnored: Decodable {}
 
     @Published private(set) var servers: [Server] = []
     /// Is the Starter answering? Flipped false on connection failure.
@@ -41,6 +77,11 @@ final class ServersModel: ObservableObject {
 
     private var pollTimer: Timer?
     private var launchPoll: Timer?
+    /// Monotonic per-request token. The 2.5 s cadence + 4 s timeout can overlap
+    /// requests; a stale failure landing after a fresh success would flash
+    /// "isn't running" for a tick. A completion applies only if it's still the
+    /// newest. Touched only on main (refresh() is always called on main).
+    private var generation = 0
 
     // MARK: - Polling (visible-only)
 
@@ -59,18 +100,25 @@ final class ServersModel: ObservableObject {
 
     func refresh() {
         guard let url = URL(string: baseString + "/api/list") else { return }
+        generation += 1
+        let gen = generation
         session.dataTask(with: url) { [weak self] data, _, err in
             guard let self else { return }
-            if let data, err == nil,
-               let list = try? JSONDecoder().decode([Server].self, from: data) {
+            if let data, err == nil {
+                // A response arrived → the connection is fine. Decode leniently:
+                // skip any bad rows, keep the good ones. A decode problem must
+                // NOT read as "isn't running" — `reachable` means CONNECTION only.
+                let list = (try? JSONDecoder().decode(LossyServers.self, from: data))?.servers ?? []
                 let ordered = Self.order(list)
                 DispatchQueue.main.async {
+                    guard gen == self.generation else { return }   // drop stale/out-of-order completion
                     self.reachable = true
                     self.loaded = true
                     if self.servers != ordered { self.servers = ordered }
                 }
             } else {
                 DispatchQueue.main.async {
+                    guard gen == self.generation else { return }   // drop stale/out-of-order completion
                     self.reachable = false
                     self.loaded = true
                 }

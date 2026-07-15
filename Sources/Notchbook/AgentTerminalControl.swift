@@ -59,19 +59,28 @@ enum AgentTerminalControl {
 
     // MARK: - AppleScript
 
+    // A per-window `try` guards against Terminal's ghost window objects (a
+    // phantom backing a fullscreen tab, whose every property access throws
+    // `-1728`). Without it, touching the ghost aborts the whole script before the
+    // target tab is matched — and because AppleScript returns windows in z-order
+    // (which changes per Space), the ghost sorts ahead of the target from any
+    // OTHER Space, so approve/focus/resume silently failed off the terminal's
+    // Space. Skipping the poisoned window finds the target regardless of z-order.
     private static let focusScript = """
     on run argv
       set targetTTY to item 1 of argv
       tell application "Terminal"
         repeat with w in windows
-          repeat with t in tabs of w
-            if tty of t is targetTTY then
-              set selected of t to true
-              set index of w to 1
-              activate
-              return "ok"
-            end if
-          end repeat
+          try
+            repeat with t in tabs of w
+              if tty of t is targetTTY then
+                set selected of t to true
+                set index of w to 1
+                activate
+                return "ok"
+              end if
+            end repeat
+          end try
         end repeat
       end tell
       return "notfound"
@@ -83,12 +92,14 @@ enum AgentTerminalControl {
       set targetTTY to item 1 of argv
       tell application "Terminal"
         repeat with w in windows
-          repeat with t in tabs of w
-            if tty of t is targetTTY then
-              do script "" in t
-              return "ok"
-            end if
-          end repeat
+          try
+            repeat with t in tabs of w
+              if tty of t is targetTTY then
+                do script "" in t
+                return "ok"
+              end if
+            end repeat
+          end try
         end repeat
       end tell
       return "notfound"
@@ -104,12 +115,14 @@ enum AgentTerminalControl {
       set targetTTY to item 1 of argv
       tell application "Terminal"
         repeat with w in windows
-          repeat with t in tabs of w
-            if tty of t is targetTTY then
-              do script ((character id 21) & "continue") in t
-              return "ok"
-            end if
-          end repeat
+          try
+            repeat with t in tabs of w
+              if tty of t is targetTTY then
+                do script ((character id 21) & "continue") in t
+                return "ok"
+              end if
+            end repeat
+          end try
         end repeat
       end tell
       return "notfound"
