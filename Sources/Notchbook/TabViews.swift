@@ -209,7 +209,19 @@ struct MediaTab: View {
                 .onChange(of: np.source) { _ in media.readPlayerVolumeAsync { volume = $0 } }
                 .onChange(of: np.title) { _ in
                     if showLyrics {
-                        lyrics.fetch(title: np.title, artist: np.artist,
+                        let q = lyricsQuery(np)
+                        // duration: 0 — the 1 Hz poll still holds the PREVIOUS
+                        // track's duration, so ranking against it is wrong. The
+                        // duration onChange re-fetches once the real value lands.
+                        lyrics.fetch(title: q.title, artist: q.artist, duration: 0)
+                    }
+                }
+                .onChange(of: media.duration) { _ in
+                    // Real duration arrived — let the model re-rank candidates by
+                    // it (its key/durationKnown guard dedupes; no-op if unchanged).
+                    if showLyrics {
+                        let q = lyricsQuery(np)
+                        lyrics.fetch(title: q.title, artist: q.artist,
                                      duration: media.duration)
                     }
                 }
@@ -295,7 +307,8 @@ struct MediaTab: View {
                         Button {
                             showLyrics.toggle()
                             if showLyrics {
-                                lyrics.fetch(title: np.title, artist: np.artist,
+                                let q = lyricsQuery(np)
+                                lyrics.fetch(title: q.title, artist: q.artist,
                                              duration: media.duration)
                             }
                         } label: {
@@ -544,6 +557,22 @@ struct MediaTab: View {
         let s = Int(seconds.rounded())
         return String(format: "%d:%02d", s / 60, s % 60)
     }
+
+    /// Title/artist to search LRCLIB with. For YouTube the "artist" is junk
+    /// ("YouTube · Chrome"), so parse "Artist - Title" out of the video title
+    /// when present, else search the title with an empty artist.
+    private func lyricsQuery(_ np: MediaWatcher.NowPlaying) -> (title: String, artist: String) {
+        guard np.source == .youtube else { return (np.title, np.artist) }
+        let raw = np.title
+        for sep in [" - ", " – ", " — "] {
+            if let r = raw.range(of: sep) {
+                let artist = raw[..<r.lowerBound].trimmingCharacters(in: .whitespaces)
+                let title = raw[r.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !artist.isEmpty, !title.isEmpty { return (title, artist) }
+            }
+        }
+        return (raw, "")
+    }
 }
 
 /// Apple Music-style synced lyrics: bold rounded lines, the current one
@@ -554,31 +583,50 @@ private struct LyricsTicker: View {
     @EnvironmentObject var lyrics: LyricsModel
     let accent: Color
 
-    @State private var now = Date()
+    /// Monotonic display position: the max interpolated position reached while
+    /// playing. Small backward poll corrections are ignored so a just-promoted
+    /// line never demotes and bounces; a real seek (≥ threshold) is accepted.
+    @State private var displayPos: Double = 0
     private let timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
+    private let seekThreshold: Double = 1.5
 
     var body: some View {
         Group {
             switch lyrics.status {
-            case .loading:
-                Text("Finding lyrics…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .idle, .unavailable:
-                Text("No lyrics for this song")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loading:  message("Finding lyrics…")
+            case .idle, .unavailable: message("No lyrics for this song")
             case .loaded:
-                if lyrics.lines.isEmpty {
-                    plainSheet
-                } else {
-                    ticker
-                }
+                if lyrics.lines.isEmpty { plainSheet } else { ticker }
             }
         }
-        .onReceive(timer) { now = $0 }
+        .onReceive(timer) { _ in tick() }
+        // New track: drop the latch so the new song starts from its real time.
+        .onChange(of: media.nowPlaying?.title) { _ in displayPos = 0 }
+    }
+
+    private func message(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 11))
+            .foregroundStyle(.white.opacity(0.35))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Advance the monotonic clock. Interpolates between the 1 Hz polls; ignores
+    /// backward corrections < threshold (Spotify quantizes to integer seconds
+    /// and the osascript round-trip is stale), accepts a real backward seek.
+    private func tick() {
+        let base = media.position
+        let playing = media.nowPlaying?.isPlaying == true
+        let raw = playing ? base + Date().timeIntervalSince(media.positionStamp) : base
+        if raw >= displayPos || displayPos - raw >= seekThreshold {
+            displayPos = raw
+        }
+    }
+
+    /// Tap-to-seek: seek AND reset the latch so a backward tap lands immediately.
+    private func seek(to t: Double) {
+        media.seek(to: t)
+        displayPos = t
     }
 
     /// Unsynced lyrics: a quietly scrollable sheet, Apple-style.
@@ -593,64 +641,90 @@ private struct LyricsTicker: View {
         }
     }
 
-    /// Player position, interpolated between the 1 Hz polls. Reads the
-    /// clock directly: the cached timer date starves under the media tab's
-    /// re-render churn, which froze the computed position (the growing
-    /// stale-now offset cancelled the advancing poll exactly).
-    private var position: Double {
-        let base = media.position
-        guard media.nowPlaying?.isPlaying == true else { return base }
-        return base + Date().timeIntervalSince(media.positionStamp)
-    }
-
     private var currentIndex: Int {
-        let p = position
         var idx = -1
-        for (i, line) in lyrics.lines.enumerated() where line.time <= p { idx = i }
+        for (i, line) in lyrics.lines.enumerated() where line.time <= displayPos { idx = i }
         return idx
     }
 
     private var ticker: some View {
         let i = currentIndex
-        return VStack(alignment: .leading, spacing: 7) {
-            lyricLine(i, current: true)
-            lyricLine(i + 1)
+        let count = lyrics.lines.count
+        // Gap (s) from now to the next line — drives the instrumental dots.
+        let gap = (i + 1 < count) ? lyrics.lines[i + 1].time - displayPos : nil
+        // The window: current + up to 3 upcoming (all upcoming during the intro).
+        let start = max(0, i)
+        let end = min(count - 1, max(0, i) + 3)
+        let window: [Int] = i < 0
+            ? Array(0..<min(3, count))
+            : (start <= end ? Array(start...end) : [])
+        return VStack(alignment: .leading, spacing: 6) {
+            if i < 0 { InstrumentalDots() }               // intro
+            ForEach(window, id: \.self) { idx in
+                lyricLine(idx, distance: idx - i)
+            }
+            if i >= 0, (gap ?? 0) > 5 { InstrumentalDots() }   // mid-song break
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.top, 4)
         .animation(.spring(response: 0.55, dampingFraction: 0.9), value: i)
+        // Fade the lane's bottom edge so the last upcoming line dissolves instead
+        // of hard-clipping at the card edge (Apple fades, never cuts).
+        .mask(
+            LinearGradient(stops: [
+                .init(color: .white, location: 0),
+                .init(color: .white, location: 0.72),
+                .init(color: .clear, location: 1.0)],
+                startPoint: .top, endPoint: .bottom)
+        )
     }
 
+    /// One lyric line. `distance` 0 = current (bright), 1 = next, 2+ = further —
+    /// SAME font size for all (Apple never shrinks upcoming lines); depth is only
+    /// opacity + a touch of blur. Identity is the line, so on advance the same
+    /// view springs upward rather than hard-swapping.
     @ViewBuilder
-    private func lyricLine(_ idx: Int, current: Bool = false) -> some View {
+    private func lyricLine(_ idx: Int, distance: Int) -> some View {
         if idx >= 0, idx < lyrics.lines.count {
             let line = lyrics.lines[idx]
-            // Never truncate a lyric: the active line wraps as far as it
-            // needs, the upcoming one gets two lines. Identity is the LINE
-            // (not line+role), so promotion from "next" to "current" is one
-            // view smoothly animating scale/opacity/position — a fade-up —
-            // rather than a hard swap of two copies.
+            let opacity: Double = distance <= 0 ? 1 : distance == 1 ? 0.35
+                                : distance == 2 ? 0.22 : 0.15
+            let blur: CGFloat = distance <= 0 ? 0 : distance == 1 ? 0.5 : 1
             Text(line.text)
                 .font(.system(size: 14, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(current ? 1 : 0.25))
-                .blur(radius: current ? 0 : 0.7)
-                .scaleEffect(current ? 1 : 0.86, anchor: .topLeading)
-                .lineLimit(current ? 3 : 2)
-                .minimumScaleFactor(current ? 0.8 : 1)
+                .foregroundStyle(.white.opacity(opacity))
+                .blur(radius: blur)
+                .lineLimit(distance <= 0 ? 3 : 2)
+                .minimumScaleFactor(distance <= 0 ? 0.8 : 1)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .onTapGesture { media.seek(to: line.time) }
+                .onTapGesture { seek(to: line.time) }
                 .transition(.asymmetric(
                     insertion: .opacity.combined(with: .move(edge: .bottom)),
                     removal: .opacity.combined(with: .move(edge: .top))))
                 .id(line.id)
-        } else if idx == -1, current {
-            // Intro before the first line: show what's coming, dimmed.
-            Text("…")
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.4))
+        }
+    }
+}
+
+/// Apple's instrumental-break indicator: three dots gently breathing.
+private struct InstrumentalDots: View {
+    @State private var on = false
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<3, id: \.self) { _ in
+                Circle().fill(.white).frame(width: 7, height: 7)
+            }
+        }
+        .opacity(on ? 0.9 : 0.35)
+        .scaleEffect(on ? 1 : 0.85, anchor: .leading)
+        .padding(.vertical, 5)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                on = true
+            }
         }
     }
 }
