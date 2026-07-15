@@ -192,6 +192,10 @@ struct MediaTab: View {
     @State private var volume: Double = 50
     @State private var showLyrics = false
     @State private var artHovered = false
+    /// While scrubbing the progress bar: the dragged fraction (0…1); nil when
+    /// not scrubbing. Shown live; the actual seek fires on release.
+    @State private var scrubFraction: Double?
+    @State private var progressHover = false
 
     var body: some View {
         if let np = media.nowPlaying {
@@ -486,21 +490,50 @@ struct MediaTab: View {
     }
 
     private var progressBar: some View {
-        HStack(spacing: 8) {
-            Text(timeString(media.position))
+        // While scrubbing, the bar + time labels follow the drag; the real seek
+        // fires on release so we don't spam the player with position sets.
+        let shown = scrubFraction ?? Double(fraction)
+        let shownElapsed = scrubFraction != nil ? shown * media.duration : media.position
+        let knobVisible = progressHover || scrubFraction != nil
+        return HStack(spacing: 8) {
+            Text(timeString(shownElapsed))
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.2))
+                    Capsule().fill(.white.opacity(0.2)).frame(height: 4)
                     Capsule().fill(.white.opacity(0.85))
-                        .frame(width: max(4, geo.size.width * fraction))
+                        .frame(width: max(4, geo.size.width * CGFloat(shown)), height: 4)
+                    // Knob appears on hover / while scrubbing so the bar reads as
+                    // draggable without cluttering the resting look.
+                    Circle().fill(.white)
+                        .frame(width: 10, height: 10)
+                        .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
+                        .offset(x: max(0, geo.size.width * CGFloat(shown) - 5))
+                        .opacity(knobVisible ? 1 : 0)
                 }
+                .frame(height: geo.size.height)
+                // Bigger hit area than the 4pt line so it's easy to grab.
+                .contentShape(Rectangle().inset(by: -8))
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            scrubFraction = min(1, max(0, v.location.x / geo.size.width))
+                        }
+                        .onEnded { _ in
+                            if let f = scrubFraction, media.duration > 0 {
+                                media.seek(to: f * media.duration)
+                            }
+                            scrubFraction = nil
+                        }
+                )
+                .onHover { progressHover = $0 }
             }
-            .frame(height: 4)
-            Text("-" + timeString(max(0, media.duration - media.position)))
+            .frame(height: 10)
+            Text("-" + timeString(max(0, media.duration - shownElapsed)))
         }
         .font(.system(size: 10))
         .monospacedDigit()
         .foregroundStyle(.white.opacity(0.45))
+        .animation(.easeOut(duration: 0.12), value: knobVisible)
     }
 
     private var fraction: CGFloat {
