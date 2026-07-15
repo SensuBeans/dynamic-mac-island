@@ -239,6 +239,12 @@ final class AgentSessionsModel: ObservableObject {
     private var sessionStates: [String: (state: AgentState, since: Date)] = [:]
     /// Complete sessions the user has acknowledged. Touched only on `ioQueue`.
     private var acknowledgedCompleteIDs: Set<String> = []
+    /// SessionIds seen with a live process at least once this run — so a session
+    /// that goes live→gone (its `<pid>.json` cleaned up on a clean exit, leaving
+    /// no dead-pid marker) is still recognized as a CLOSED terminal and dropped
+    /// at once, not resurrected by its lingering transcript. Pruned to the current
+    /// candidate set each rebuild. Touched only on `ioQueue`.
+    private var seenLiveIDs: Set<String> = []
     /// Resolved terminal identity per live pid — tty and process ancestry never
     /// change for a live pid, so resolve once (a few syscalls) and reuse on every
     /// 1.5 s tick. Guarded by the sessionId it was resolved for, so a recycled pid
@@ -466,7 +472,7 @@ final class AgentSessionsModel: ObservableObject {
     /// session/usage files; runs from FSEvents and the 1.5 s timer.
     private func rebuild() {
         let now = Date()
-        let metas = readSessionMetas()   // live terminals, by sessionId
+        let (metas, terminatedIDs) = readSessionMetas()   // live + closed terminals
 
         // Drop identity-cache entries for pids no longer live (keyed by pid, so a
         // recycled pid is also caught by the sessionId guard in resolveIdentity).
@@ -505,9 +511,23 @@ final class AgentSessionsModel: ObservableObject {
             let lastActivity = p?.newestEntryTs
             let age = lastActivity.map { now.timeIntervalSince($0) } ?? .infinity
 
-            // Liveness: a live process stays forever; a transcript-only session
-            // ages out. Anything else is closed → drop.
-            let live = meta != nil || (lastActivity != nil && age < idleMax)
+            // Liveness. A live process stays forever. A session that WAS an
+            // interactive terminal and is now terminated — its `<pid>.json` shows
+            // a dead pid (terminatedIDs), or it went live→gone within this run
+            // (seenLiveIDs) — drops IMMEDIATELY, so closing a tab clears the row
+            // at once instead of lingering as a stale "idle" remnant off the last
+            // transcript. Only a transcript that NEVER had a session file (a true
+            // non-interactive run) keeps the 30-min age-out fallback.
+            let wasInteractive = terminatedIDs.contains(id) || seenLiveIDs.contains(id)
+            let live: Bool
+            if meta != nil {
+                live = true
+                seenLiveIDs.insert(id)
+            } else if wasInteractive {
+                live = false   // closed terminal → gone now
+            } else {
+                live = lastActivity != nil && age < idleMax
+            }
             guard live else { continue }
             liveIDs.insert(id)
 
@@ -541,6 +561,9 @@ final class AgentSessionsModel: ObservableObject {
         }
         // Forget state for sessions that closed.
         sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
+        // Bound seenLiveIDs to sessions still in play (a closed terminal whose
+        // transcript has also aged out of `ids` no longer needs remembering).
+        seenLiveIDs.formIntersection(ids)
 
         // Toasts: only real changes, never on first observation (old == nil).
         for item in built {
@@ -696,8 +719,8 @@ final class AgentSessionsModel: ObservableObject {
     /// injection hops to `controlQueue`/main like focus/approve.
     private func fireOne(_ a: ArmedResume) {
         // Guard 1: session file still present, same pid, alive.
-        let metas = readSessionMetas()
-        guard let meta = metas[a.sessionId], meta.pid == a.pid, kill(Int32(a.pid), 0) == 0
+        let meta0 = readSessionMetas().live[a.sessionId]
+        guard let meta = meta0, meta.pid == a.pid, kill(Int32(a.pid), 0) == 0
         else { return }
         // Guard 3: not busy (a just-started manual resume would be busy).
         guard meta.status != "busy" else { return }
@@ -754,26 +777,34 @@ final class AgentSessionsModel: ObservableObject {
         return best
     }
 
-    /// Read every `~/.claude/sessions/<pid>.json`, keyed by sessionId, keeping
-    /// only entries whose process is still alive (Claude Code leaves the file
-    /// behind after exit; `kill(pid, 0)` is the authoritative liveness check).
-    private func readSessionMetas() -> [String: SessionMeta] {
+    /// Read every `~/.claude/sessions/<pid>.json`. Returns the LIVE terminals
+    /// (pid still alive, `kill(pid,0)==0`) keyed by sessionId, plus the set of
+    /// sessionIds whose file exists but whose pid is DEAD — a terminal that was
+    /// interactive and has since been closed/terminated. Claude Code leaves the
+    /// file behind after exit, so the file + dead pid is the authoritative
+    /// "this was a real terminal and it's gone now" signal (vs. a transcript that
+    /// never had a session file, i.e. a non-interactive run).
+    private func readSessionMetas() -> (live: [String: SessionMeta], terminated: Set<String>) {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: sessionsURL.path)
-        else { return [:] }
-        var out: [String: SessionMeta] = [:]
+        else { return ([:], []) }
+        var live: [String: SessionMeta] = [:]
+        var terminated: Set<String> = []
         for name in names where name.hasSuffix(".json") {
             let url = sessionsURL.appendingPathComponent(name)
             guard let data = try? Data(contentsOf: url),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let sid = obj["sessionId"] as? String,
-                  let pid = (obj["pid"] as? NSNumber)?.int32Value,
-                  kill(pid, 0) == 0 else { continue }   // pid alive?
-            out[sid] = SessionMeta(pid: Int(pid),
-                                   name: obj["name"] as? String,
-                                   status: obj["status"] as? String ?? "idle",
-                                   cwd: obj["cwd"] as? String ?? "")
+                  let pid = (obj["pid"] as? NSNumber)?.int32Value else { continue }
+            if kill(pid, 0) == 0 {
+                live[sid] = SessionMeta(pid: Int(pid),
+                                        name: obj["name"] as? String,
+                                        status: obj["status"] as? String ?? "idle",
+                                        cwd: obj["cwd"] as? String ?? "")
+            } else {
+                terminated.insert(sid)   // interactive terminal, now closed
+            }
         }
-        return out
+        return (live, terminated)
     }
 
     /// Cached terminal-identity lookup (see `identityCache`). Resolves via
