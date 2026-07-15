@@ -23,9 +23,10 @@ struct NotchView: View {
     /// Live order while a drag is in flight; committed to state on release so we
     /// don't thrash UserDefaults on every micro-move.
     @State private var dragOrder: [NotchTab]?
-    /// Finger x in the tab bar's coordinate space, and each chip's center x.
+    /// Finger x in the tab bar's coordinate space, and each chip's measured
+    /// width (stable — independent of position, so it never lags the layout).
     @State private var dragFingerX: CGFloat = 0
-    @State private var chipCenters: [NotchTab: CGFloat] = [:]
+    @State private var chipWidths: [NotchTab: CGFloat] = [:]
     /// Accumulated rotation of the ambient color layers. Advances with each
     /// audio sample — faster when the music is loud, frozen when paused.
     @State private var colorPhase: Double = 0
@@ -550,11 +551,9 @@ struct NotchView: View {
         .padding(2)
         .background(Capsule().fill(.white.opacity(0.06)))
         .coordinateSpace(name: "tabbar")
-        .onPreferenceChange(TabChipCenterKey.self) { chipCenters = $0 }
+        .onPreferenceChange(TabChipWidthKey.self) { chipWidths = $0 }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
         .animation(.easeOut(duration: 0.12), value: swipeTarget)
-        // Reflow the other chips smoothly as the dragged one displaces them.
-        .animation(.spring(response: 0.3, dampingFraction: 0.82), value: displayTabs)
     }
 
     private func tabChip(_ tab: NotchTab) -> some View {
@@ -577,16 +576,22 @@ struct NotchView: View {
             Capsule().fill(.white.opacity(
                 isDragging ? 0.3 : (selected ? 0.16 : (targeted ? 0.09 : 0))))
         )
-        // Report this chip's center so the drag can pick an insertion slot.
+        // Measure width (stable, position-independent) for the reorder math.
         .background(GeometryReader { geo in
-            Color.clear.preference(key: TabChipCenterKey.self,
-                                   value: [tab: geo.frame(in: .named("tabbar")).midX])
+            Color.clear.preference(key: TabChipWidthKey.self, value: [tab: geo.size.width])
         })
         .scaleEffect(isDragging ? 1.12 : 1)
         .offset(x: chipOffset(tab))
         .zIndex(isDragging ? 1 : 0)
-        .shadow(color: .black.opacity(isDragging ? 0.4 : 0),
+        .shadow(color: .black.opacity(isDragging ? 0.35 : 0),
                 radius: isDragging ? 6 : 0, y: 2)
+        // The lifted chip repositions INSTANTLY (glued to the finger); every
+        // other chip springs to its new slot. Separating the two is what kills
+        // the wobble — the dragged chip never animates its own layout.
+        .animation(isDragging ? nil
+                   : .spring(response: 0.3, dampingFraction: 0.82),
+                   value: displayTabs)
+        .animation(.spring(response: 0.24, dampingFraction: 0.7), value: isDragging)
         .contentShape(Capsule())
         .onTapGesture {
             state.currentTab = tab
@@ -596,14 +601,27 @@ struct NotchView: View {
         .help(tab.title)
     }
 
-    /// The dragged chip tracks the finger; every other chip sits in its slot.
+    /// The lifted chip sits exactly under the finger; everyone else at offset 0.
     private func chipOffset(_ tab: NotchTab) -> CGFloat {
-        guard draggingTab == tab, let center = chipCenters[tab] else { return 0 }
-        return dragFingerX - center
+        guard draggingTab == tab else { return 0 }
+        return dragFingerX - slotCenterX(of: tab, in: displayTabs)
     }
 
-    /// Click-and-hold a chip (0.3 s) to pick it up, then drag left/right to a new
-    /// slot; the others shuffle live and the order commits on release.
+    /// Resting center x of a chip in the tab-bar coordinate space, from measured
+    /// widths (2 pt leading pad + 2 pt inter-chip spacing) — stable during the
+    /// reflow animation, unlike live frame reads.
+    private func slotCenterX(of tab: NotchTab, in order: [NotchTab]) -> CGFloat {
+        var x: CGFloat = 2
+        for t in order {
+            let w = chipWidths[t] ?? 30
+            if t == tab { return x + w / 2 }
+            x += w + 2
+        }
+        return x
+    }
+
+    /// Click-and-hold a chip (0.3 s) to pick it up, then drag left/right; the
+    /// others slide aside and the order commits on release.
     private func reorderGesture(_ tab: NotchTab) -> some Gesture {
         LongPressGesture(minimumDuration: 0.3)
             .sequenced(before: DragGesture(minimumDistance: 0,
@@ -613,6 +631,7 @@ struct NotchView: View {
                 if draggingTab == nil {
                     draggingTab = tab
                     dragOrder = state.visibleTabs
+                    dragFingerX = slotCenterX(of: tab, in: state.visibleTabs)
                     NSHapticFeedbackManager.defaultPerformer
                         .perform(.alignment, performanceTime: .now)
                 }
@@ -628,13 +647,16 @@ struct NotchView: View {
             }
     }
 
-    /// Move the dragged chip to the slot the finger is over, by counting how many
-    /// OTHER chips sit left of the finger.
+    /// Insertion index = how many OTHER chips have their center left of the
+    /// finger, laid out as if the dragged chip were lifted out of the row.
     private func reorder(dragging: NotchTab, toFingerX x: CGFloat) {
         guard var order = dragOrder, let from = order.firstIndex(of: dragging) else { return }
         var target = 0
+        var cx: CGFloat = 2
         for t in order where t != dragging {
-            if let c = chipCenters[t], c < x { target += 1 }
+            let w = chipWidths[t] ?? 30
+            if cx + w / 2 < x { target += 1 }
+            cx += w + 2
         }
         guard target != from else { return }
         order.remove(at: from)
@@ -642,9 +664,9 @@ struct NotchView: View {
         dragOrder = order
     }
 
-    /// Collects each nav-dock chip's center x (tab-bar space) for the reorder
-    /// drag to pick an insertion slot.
-    private struct TabChipCenterKey: PreferenceKey {
+    /// Collects each nav-dock chip's measured width so the reorder drag can lay
+    /// out resting slot positions without reading mid-animation frames.
+    private struct TabChipWidthKey: PreferenceKey {
         static var defaultValue: [NotchTab: CGFloat] = [:]
         static func reduce(value: inout [NotchTab: CGFloat],
                            nextValue: () -> [NotchTab: CGFloat]) {
