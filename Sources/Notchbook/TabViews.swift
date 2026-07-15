@@ -652,11 +652,12 @@ private struct LyricsTicker: View {
         let count = lyrics.lines.count
         // Gap (s) from now to the next line — drives the instrumental dots.
         let gap = (i + 1 < count) ? lyrics.lines[i + 1].time - displayPos : nil
-        // The window: current + up to 3 upcoming (all upcoming during the intro).
+        // The window: current + up to 2 upcoming (the lane only fits ~3 rows;
+        // more would force the card's fixed height and clip the title above).
         let start = max(0, i)
-        let end = min(count - 1, max(0, i) + 3)
+        let end = min(count - 1, max(0, i) + 2)
         let window: [Int] = i < 0
-            ? Array(0..<min(3, count))
+            ? Array(0..<min(2, count))
             : (start <= end ? Array(start...end) : [])
         return VStack(alignment: .leading, spacing: 6) {
             if i < 0 { InstrumentalDots() }               // intro
@@ -696,8 +697,12 @@ private struct LyricsTicker: View {
                 .foregroundStyle(.white.opacity(opacity))
                 .blur(radius: blur)
                 .lineLimit(distance <= 0 ? 3 : 2)
-                .minimumScaleFactor(distance <= 0 ? 0.8 : 1)
-                .fixedSize(horizontal: false, vertical: true)
+                .minimumScaleFactor(0.75)
+                // NO fixedSize: the lines stay compressible so the lyrics lane
+                // can shrink to its allotted space instead of forcing the card's
+                // fixed height (which would clip the title/source label above).
+                // The current line gets priority so it keeps its rows.
+                .layoutPriority(distance <= 0 ? 1 : 0)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .onTapGesture { seek(to: line.time) }
