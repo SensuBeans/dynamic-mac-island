@@ -124,14 +124,25 @@ struct NotchView: View {
                 .frame(height: metrics.notchHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Own its constant collapsed anchor (left edge flush at the notch).
+            // Nothing here animates horizontally on expand — the bar just fades
+            // IN PLACE, killing the old diagonal drag.
+            .padding(.leading, metrics.islandLeadingPad(expanded: false))
+            .frame(maxWidth: .infinity, alignment: .leading)
             .opacity(state.isExpanded ? 0 : 1)
+            // Quick fade, its own curve (closer than the container spring) so the
+            // bar never rides the expanded panel's bubble motion.
+            .animation(.easeOut(duration: 0.2), value: state.isExpanded)
 
             // Expanded: the nav bar and the content panel are each their
             // OWN floating island, stacked below the notch.
             VStack(spacing: gap) {
                 contentIsland(size: expandedSize)
                     .frame(width: expandedSize.width, height: expandedSize.height)
-                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                    // Corner radius relaxes slightly in flight (34 hidden → 26
+                    // open) for the soft "bubble" read; animatable via the spring.
+                    .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
+                                                style: .continuous))
                     .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
                 navIsland
                     .frame(height: NotchMetrics.navIslandHeight)
@@ -140,25 +151,34 @@ struct NotchView: View {
                     .allowsHitTesting(navShown)
                     .animation(.easeOut(duration: 0.18), value: navShown)
             }
-            // Pin the (wider) expanded content to the island's current width so
-            // it can't inflate the ZStack when collapsed — otherwise the outer
-            // centered frame would shift the collapsed bar left under the notch.
-            .frame(width: size.width)
+            // CONSTANT width (this tab's panel), centered by the container's .top
+            // alignment. It never changes width on expand — only scale/opacity/
+            // offset animate — so the panel drops dead-vertical, no diagonal.
+            .frame(width: expandedSize.width)
             .padding(.top, metrics.notchHeight + gap)
+            // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
+            .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
             .opacity(state.isExpanded ? 1 : 0)
-            .offset(y: state.isExpanded ? 0 : -totalExpandedHeight)
+            // Constant hidden travel (NOT the tab-dependent full height) so every
+            // tab drops the same distance at the same perceived speed.
+            .offset(y: state.isExpanded ? 0 : -(metrics.notchHeight + NotchMetrics.islandGap + 60))
             .allowsHitTesting(state.isExpanded)
         }
-        .frame(width: size.width,
-               height: state.isExpanded ? totalExpandedHeight : size.height,
+        // Full-window width, non-animating horizontally — each layer owns its own
+        // constant anchor, so expand/collapse has zero sideways drift.
+        .frame(maxWidth: .infinity,
+               minHeight: state.isExpanded ? totalExpandedHeight : size.height,
+               maxHeight: state.isExpanded ? totalExpandedHeight : size.height,
                alignment: .top)
         .opacity(state.spaceTransitioning && !state.pinned ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
-        .padding(.leading, state.isExpanded
-                 ? metrics.expandedLeadingPad(width: expandedSize.width)
-                 : metrics.islandLeadingPad(expanded: false))
         .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
-        .animation(.spring(response: 0.28, dampingFraction: 0.85), value: state.isExpanded)
+        // Direction-dependent expand curve: bubble-pop OUT (one visible overshoot),
+        // crisp IN (no wobble on a tool closed dozens of times a day).
+        .animation(state.isExpanded
+                   ? .spring(response: 0.40, dampingFraction: 0.66)
+                   : .spring(response: 0.28, dampingFraction: 0.90),
+                   value: state.isExpanded)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
