@@ -21,6 +21,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>Notchbook</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
@@ -38,11 +39,21 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Stable identity so TCC permission grants (camera/calendar/automation)
-# survive rebuilds; falls back to ad-hoc if the cert is missing.
+# Stable identity so TCC permission grants (Accessibility/Automation/camera/
+# calendar) survive rebuilds. macOS keys those grants to the bundle's
+# designated requirement; an ad-hoc build's requirement is a bare cdhash that
+# changes on every rebuild, so every rebuild would look like a new app and lose
+# its grants. Signing with the self-signed "Notchbook Signing" cert AND pinning
+# the identifier makes the requirement cert-anchored and identity-stable.
+IDENTIFIER="com.sensubeans.notchbook"
 if security find-identity -v -p codesigning | grep -q "Notchbook Signing"; then
-    codesign --force --sign "Notchbook Signing" "$APP"
+    codesign --force --sign "Notchbook Signing" --identifier "$IDENTIFIER" "$APP"
+    echo "Signed with 'Notchbook Signing'. Designated requirement:"
+    codesign -dr - "$APP" 2>&1 | grep '^designated' || true
 else
-    codesign --force --sign - "$APP"
+    echo "WARNING: 'Notchbook Signing' cert not found — falling back to ad-hoc."
+    echo "         TCC grants will NOT survive rebuilds. Create the cert in"
+    echo "         Keychain Access › Certificate Assistant (Code Signing type)."
+    codesign --force --sign - --identifier "$IDENTIFIER" "$APP"
 fi
 echo "Built $PWD/$APP — open it, or move it to /Applications and add to Login Items."

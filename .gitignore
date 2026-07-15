@@ -5,3 +5,6 @@ Dynamic Island.app/
 *.pem
 .DS_Store
 .claude/
+
+# Internal planning docs — never publish
+opus-*.md
