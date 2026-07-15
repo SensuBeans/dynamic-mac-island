@@ -76,7 +76,9 @@ struct NotchView: View {
         // Fully invisible when idle — the hardware notch already covers those
         // pixels, and a visible black bar looks bad during Space swipes. The
         // island only materializes when it has something to show.
-        let collapsedVisible = hasMedia || hasToast || hasAgent
+        // The black notch bar materializes only for media/toast now — the agent
+        // pill floats as its own capsule (below), so it no longer widens the bar.
+        let collapsedVisible = hasMedia || hasToast
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
@@ -90,14 +92,19 @@ struct NotchView: View {
                 Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
             }
             .frame(width: metrics.collapsedSize(withMedia: hasMedia,
-                                                toast: hasToast,
-                                                withAgent: hasAgent).width,
+                                                toast: hasToast).width,
                    height: metrics.notchHeight)
             .overlay(alignment: .top) { ears }
-            .overlay(alignment: .top) { agentEar }
             .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                   bottomRadius: 10))
             .opacity(state.isExpanded ? 0 : 1)
+
+            // Agent-status pill — its OWN floating glass capsule at the far
+            // right, not painted into the notch bar. Present whenever there's
+            // pill content and we're collapsed.
+            agentPill
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .opacity(state.isExpanded ? 0 : 1)
 
             // Expanded: the nav bar and the content panel are each their
             // OWN floating island, stacked below the notch.
@@ -260,7 +267,7 @@ struct NotchView: View {
                         .foregroundStyle(pomodoro.phase == .focus ? Color.orange : .green)
                 }
                 // Keep the countdown ear INBOARD of the agent pill (outer slot).
-                .padding(.trailing, 10 + (agentSessions.hasActivePill ? NotchMetrics.agentEar : 0))
+                .padding(.trailing, 10)
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
@@ -310,7 +317,7 @@ struct NotchView: View {
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
                 }
                 // Keep the media ear INBOARD of the agent pill (outer slot).
-                .padding(.trailing, 8 + (agentSessions.hasActivePill ? NotchMetrics.agentEar : 0))
+                .padding(.trailing, 8)
                 .frame(maxWidth: .infinity)
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
@@ -318,34 +325,28 @@ struct NotchView: View {
         }
     }
 
-    /// Collapsed agent-status pill: pinned to the far-right (OUTER) slot, so it
-    /// coexists with the media/countdown ear (shifted inboard above). Priority
-    /// comes from `agentSessions.collapsedPill`: any waiting (orange ⚠ N) beats
-    /// any working (pulsing dot ● N) beats a recent complete (green ✓ N). A tap
-    /// expands straight into the Agents tab. Renders nothing when there's no
-    /// pill content — `collapsedVisible` then drops the whole bar.
-    private var agentEar: some View {
+    /// Collapsed agent-status pill: its OWN floating glass capsule at the far
+    /// right of the island, separate from the notch bar. Priority comes from
+    /// `agentSessions.collapsedPill`: any waiting (orange ⚠ N) beats any working
+    /// (pulsing dot ● N) beats a recent complete (green ✓ N). A tap expands
+    /// straight into the Agents tab. Suppressed while a toast is up (the toast
+    /// reuses the same right slot).
+    private var agentPill: some View {
         Group {
-            // Suppressed while a toast is up: the toast reuses the same right
-            // slot (and the collapsed width drops the agent ear when toast != nil),
-            // so drawing the pill too would paint it over the toast text.
             if let pill = agentSessions.collapsedPill, !state.isExpanded, state.toast == nil {
-                HStack {
-                    Spacer()
-                    Button {
-                        state.currentTab = .agents
-                        state.onExpandRequest?()
-                    } label: {
-                        AgentPillLabel(pill: pill)
-                    }
-                    .buttonStyle(.plain)
+                Button {
+                    state.currentTab = .agents
+                    state.onExpandRequest?()
+                } label: {
+                    AgentPillLabel(pill: pill)
                 }
-                .padding(.trailing, 8)
-                .frame(maxWidth: .infinity)
-                .frame(height: metrics.notchHeight)
-                .transition(.opacity)
+                .buttonStyle(.plain)
+                .padding(.trailing, 6)
+                .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .top)))
+                .animation(.spring(response: 0.3, dampingFraction: 0.78), value: pill)
             }
         }
+        .frame(height: metrics.notchHeight, alignment: .center)
     }
 
     /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
@@ -394,9 +395,14 @@ struct NotchView: View {
                     .monospacedDigit()
                     .foregroundStyle(.white)
             }
-            .padding(.horizontal, 7)
-            .frame(height: 18)
-            .background(Capsule().fill(.white.opacity(0.14)))
+            .padding(.horizontal, 9)
+            .frame(height: 20)
+            // Its own frosted-glass capsule that floats — matching the nav/content
+            // islands rather than sitting inside the black notch bar.
+            .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.4) } }
+            .clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
         }
     }
 
