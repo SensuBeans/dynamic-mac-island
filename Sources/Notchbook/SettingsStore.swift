@@ -86,6 +86,11 @@ final class SettingsStore: ObservableObject {
     /// Hidden tile keys (cpu, memory, gpu, disk, fan, battery).
     @Published var statsHiddenTiles: [String] { didSet { set(statsHiddenTiles, "stats.hiddenTiles") } }
 
+    // MARK: Agents
+    /// Auto-resume a session cut off mid-turn by the usage limit: at the limit's
+    /// reset the notch types `continue` into that session's terminal by itself.
+    @Published var agentsAutoResume: Bool { didSet { set(agentsAutoResume, "agents.autoResume") } }
+
     // MARK: Controls
     /// Hidden control keys (darkMode, keepAwake, hideDesktop, display, keyboard, mute, lock, screenshot).
     @Published var togglesHiddenControls: [String] { didSet { set(togglesHiddenControls, "toggles.hiddenControls") } }
@@ -136,6 +141,7 @@ final class SettingsStore: ObservableObject {
             "mirror.flip": true,
             "mirror.rememberBig": false,
             "stats.refreshRate": 2.0,
+            "agents.autoResume": true,
             "toggles.screenshotMode": "selection",
         ])
 
@@ -184,6 +190,8 @@ final class SettingsStore: ObservableObject {
 
         statsRefreshRate = defaults.double(forKey: "stats.refreshRate")
         statsHiddenTiles = defaults.stringArray(forKey: "stats.hiddenTiles") ?? []
+
+        agentsAutoResume = defaults.bool(forKey: "agents.autoResume")
 
         togglesHiddenControls = defaults.stringArray(forKey: "toggles.hiddenControls") ?? []
         screenshotMode = defaults.string(forKey: "toggles.screenshotMode") ?? "selection"

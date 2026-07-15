@@ -147,6 +147,10 @@ private struct AgentRow: View {
     let now: Date
 
     @State private var hovered = false
+    /// Auto-resume chip: showing the "undo" grace after a cancel click, plus the
+    /// pending work item that consumes the cancel when the grace lapses.
+    @State private var resumeCancelling = false
+    @State private var resumeCancelWork: DispatchWorkItem?
 
     var body: some View {
         HStack(spacing: 10) {
@@ -280,6 +284,7 @@ private struct AgentRow: View {
     @ViewBuilder
     private var actions: some View {
         HStack(spacing: 5) {
+            autoResumeChip
             if session.state == .waiting, canApprove {
                 Button { approve() } label: {
                     Image(systemName: "checkmark")
@@ -304,12 +309,111 @@ private struct AgentRow: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: hovered)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: session.autoResumeAt)
+        .animation(.spring(response: 0.3, dampingFraction: 0.75), value: resumeCancelling)
     }
 
     private var openHelp: String {
         if case .other(let app) = session.host { return "Open \(app)" }
         return "Jump to this session's terminal"
     }
+
+    // MARK: Auto-resume chip
+
+    /// Auto-resume can only ever fire on a host we can type into.
+    private var hostAutoTypeable: Bool {
+        switch session.host {
+        case .terminalApp, .notch: return true
+        case .other, .none:        return false
+        }
+    }
+
+    /// Trailing auto-resume affordance. On auto-typeable hosts: a dim ⚡ when not
+    /// armed (display-only, revealed on hover like the other inactive controls);
+    /// an amber countdown capsule when armed (always visible — a countdown must be
+    /// seen). Clicking the armed capsule flips to a ~5 s "undo" grace before the
+    /// cancel actually reaches the model. Hidden entirely on `.other`/`.none`.
+    @ViewBuilder
+    private var autoResumeChip: some View {
+        if hostAutoTypeable {
+            if let fireAt = session.autoResumeAt {
+                Button { toggleResumeCancel() } label: {
+                    if resumeCancelling { cancellingCapsule } else { armedCapsule(fireAt) }
+                }
+                .buttonStyle(.plain)
+                .help(resumeCancelling
+                      ? "Auto-resume cancelled — click to undo"
+                      : "Auto-resumes at \(Self.clock.string(from: fireAt)) — click to cancel")
+                .transition(.scale.combined(with: .opacity))
+            } else if hovered {
+                Image(systemName: "bolt.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .frame(width: 20, height: 22)
+                    .help("Auto-resume — arms if this session is cut off by the usage limit")
+            }
+        }
+    }
+
+    private func armedCapsule(_ fireAt: Date) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "bolt.fill").font(.system(size: 8, weight: .bold))
+            Text(resumeCountdown(fireAt))
+                .font(.system(size: 9, weight: .medium))
+                .monospacedDigit()
+        }
+        .foregroundStyle(Self.amber)
+        .padding(.horizontal, 7)
+        .frame(height: 22)
+        .background(Capsule().fill(Self.amber.opacity(0.13)))
+        .overlay(Capsule().stroke(Self.amber.opacity(0.55), lineWidth: 1))
+    }
+
+    private var cancellingCapsule: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.uturn.backward").font(.system(size: 8, weight: .bold))
+            Text("undo").font(.system(size: 9, weight: .medium))
+        }
+        .foregroundStyle(.white.opacity(0.6))
+        .padding(.horizontal, 7)
+        .frame(height: 22)
+        .background(Capsule().fill(.white.opacity(0.1)))
+    }
+
+    /// First click on the armed capsule ⇒ show "undo" and start a 5 s grace; the
+    /// model stays armed the whole time. Grace lapses ⇒ tell the model to cancel.
+    /// Click again within grace ⇒ just cancel the pending work, back to armed.
+    private func toggleResumeCancel() {
+        if resumeCancelling {
+            resumeCancelWork?.cancel()
+            resumeCancelWork = nil
+            resumeCancelling = false
+        } else {
+            resumeCancelling = true
+            let id = session.id
+            let work = DispatchWorkItem {
+                agents.cancelAutoResume(id)
+                resumeCancelling = false
+                resumeCancelWork = nil
+            }
+            resumeCancelWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+        }
+    }
+
+    /// "resuming in 42m" under an hour, else "resuming at 5:00 PM". Ticks off the
+    /// tab's shared `now`.
+    private func resumeCountdown(_ fireAt: Date) -> String {
+        let secs = Int(fireAt.timeIntervalSince(now))
+        if secs <= 0 { return "resuming…" }
+        if secs < 3600 { return "resuming in \(max(1, (secs + 59) / 60))m" }
+        return "resuming at \(Self.clock.string(from: fireAt))"
+    }
+
+    private static let amber = Color(red: 0.98, green: 0.74, blue: 0.20)
+    private static let clock: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
+    }()
 
     // MARK: Host-aware actions
 

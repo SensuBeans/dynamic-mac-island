@@ -67,6 +67,15 @@ final class TerminalSessionsModel: ObservableObject {
         session.view.send(txt: "\r")
     }
 
+    /// Auto-resume a Claude session running inside this built-in tab after a
+    /// usage-limit reset: clear any half-typed line (Ctrl-U, `\u{15}`) then type
+    /// `continue` + Return straight to the PTY. The clear rides in the same write
+    /// so a leftover partial prompt is never submitted as `<partial>continue`.
+    func resume(id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return }
+        session.view.send(txt: "\u{15}continue\r")
+    }
+
     /// Terminate a session's shell and drop it, reselecting a neighbour.
     func closeSession(id: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }

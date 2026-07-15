@@ -41,6 +41,15 @@ enum AgentTerminalControl {
         run(script: Self.approveScript, pid: pid, ttyPath: ttyPath)
     }
 
+    /// Type `continue` + Return into the tab owning `pid` — auto-resume after a
+    /// usage-limit reset. Clears any half-typed input first (Ctrl-U rides INSIDE
+    /// the single `do script` so the partial line is never submitted on its own),
+    /// then `do script` appends the Return that submits `continue`.
+    @discardableResult
+    static func resume(pid: Int, ttyPath: String? = nil) -> Outcome {
+        run(script: Self.resumeScript, pid: pid, ttyPath: ttyPath)
+    }
+
     private static func run(script: String, pid: Int, ttyPath: String?) -> Outcome {
         guard let tty = ttyPath ?? tty(forPID: pid) else { return .noTTY }
         let out = runOSA(script: script, arg: tty)?
@@ -77,6 +86,27 @@ enum AgentTerminalControl {
           repeat with t in tabs of w
             if tty of t is targetTTY then
               do script "" in t
+              return "ok"
+            end if
+          end repeat
+        end repeat
+      end tell
+      return "notfound"
+    end run
+    """
+
+    // Clear-first, single-shot: `character id 21` is Ctrl-U (clear line, a no-op
+    // on an empty prompt), concatenated with "continue" INSIDE one `do script`
+    // so the partial line is never submitted before "continue" is appended. The
+    // `do script` itself supplies the trailing Return.
+    private static let resumeScript = """
+    on run argv
+      set targetTTY to item 1 of argv
+      tell application "Terminal"
+        repeat with w in windows
+          repeat with t in tabs of w
+            if tty of t is targetTTY then
+              do script ((character id 21) & "continue") in t
               return "ok"
             end if
           end repeat

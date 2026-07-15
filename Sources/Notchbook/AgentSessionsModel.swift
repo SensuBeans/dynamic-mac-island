@@ -86,6 +86,7 @@ struct AgentSession: Identifiable {
     var host: TerminalHost    // where the session's terminal lives (drives actions)
     var pid: Int?             // Claude Code process pid (from ~/.claude/sessions)
     var name: String?         // friendly session name ("core-00")
+    var autoResumeAt: Date?   // armed auto-resume fire time (nil = not armed / notify-only)
 
     /// A session parked waiting for the user (a permission prompt or the end of
     /// a turn) — the states the notch offers an Approve / Open action for.
@@ -178,6 +179,20 @@ final class AgentSessionsModel: ObservableObject {
     /// of `onTransition`). Default: no built-in shells.
     var builtinShellPids: () -> [(UUID, Int32)] = { [] }
 
+    /// Injected by AppDelegate: is auto-resume enabled (the Agents settings
+    /// toggle)? Read on `ioQueue`; AppDelegate returns a lock-guarded snapshot.
+    /// Default ON so the detector runs if never wired.
+    var autoResumeEnabled: () -> Bool = { true }
+
+    /// Injected: fire an auto-resume into the island's own built-in terminal
+    /// session (host `.notch`). Runs on MAIN (touches `TerminalSessionsModel`).
+    var onNotchResume: ((UUID) -> Void)?
+
+    /// Injected: an auto-resume fired. `notify == false` ⇒ resume was injected
+    /// (green toast, no sound); `notify == true` ⇒ notify-only host or a
+    /// Terminal.app tab that vanished (orange toast + Glass). Called on MAIN.
+    var onResumeFired: ((_ project: String, _ name: String?, _ notify: Bool) -> Void)?
+
     // MARK: State constants (spec §2, tunable)
 
     private let workingWindow: TimeInterval = 10      // fresh message => working
@@ -199,8 +214,17 @@ final class AgentSessionsModel: ObservableObject {
         .appendingPathComponent(".claude/projects", isDirectory: true)
 
     /// Spool file the statusline writes account usage to (see statusline-command.sh).
-    private let usageURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Notchbook/usage.json")
+    /// A `NOTCHBOOK_USAGE_OVERRIDE` env path redirects it — the only way to
+    /// exercise auto-resume without waiting on a real 5-hour cap; unset in normal
+    /// runs, so release behavior is unchanged.
+    private let usageURL: URL = {
+        if let override = ProcessInfo.processInfo.environment["NOTCHBOOK_USAGE_OVERRIDE"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Notchbook/usage.json")
+    }()
     private var lastUsage: AgentUsage?
 
     /// Directory of per-process live-status files (`<pid>.json`).
@@ -223,6 +247,48 @@ final class AgentSessionsModel: ObservableObject {
     private var identityCache: [Int32: (sid: String, identity: TerminalIdentity)] = [:]
     /// This app's pid, for spotting sessions hosted in the island's own terminal.
     private let selfPid = getpid()
+
+    // MARK: Auto-resume (arming + firing; ioQueue only)
+
+    private enum ResumeMode { case inject, notifyOnly }
+
+    /// A session armed to auto-resume at `resetAt`. Captured at arm time so the
+    /// fire-time guards can prove nothing moved since (a manual resume advances
+    /// `armedEntryTs`; the tab/host must still resolve the same).
+    private struct ArmedResume {
+        let sessionId: String
+        let pid: Int
+        let resetAt: Date
+        let armedEntryTs: Date?
+        let tty: String?
+        let host: TerminalHost
+        let mode: ResumeMode
+    }
+
+    /// Inputs collected per session during the rebuild loop, then evaluated for
+    /// arming after `readUsage()` has refreshed the cap state.
+    private struct ResumeCandidate {
+        let id: String
+        let pid: Int?
+        let host: TerminalHost
+        let tty: String?
+        let newestEntryTs: Date?
+        let midTurn: Bool     // assistant last, stop_reason != end_turn (raw parser)
+        let status: String?   // process status from the session meta
+    }
+
+    /// Currently-armed sessions, keyed by sessionId. Touched only on `ioQueue`.
+    private var armedResumes: [String: ArmedResume] = [:]
+    /// Consumed `(sessionId, resetAt)` epochs — a fired/cancelled arm never
+    /// re-arms for the same reset window (the usage file still reads 100% after
+    /// the window reopens and must not re-trigger). Touched only on `ioQueue`.
+    private var consumedEpochs: Set<String> = []
+    /// The one wall-clock timer that fires due resumes, + its current deadline.
+    private var resumeTimer: DispatchSourceTimer?
+    private var resumeTimerDeadline: Date?
+    /// Grace after a window's `resetsAt` before firing — lets the account limit
+    /// actually clear server-side before we type `continue`.
+    private let resumeGrace: TimeInterval = 5
 
     private var stream: FSEventStreamRef?
     private var timer: DispatchSourceTimer?
@@ -248,6 +314,8 @@ final class AgentSessionsModel: ObservableObject {
         stopFSEvents()
         timer?.cancel()
         timer = nil
+        resumeTimer?.cancel()
+        resumeTimer = nil
     }
 
     /// Raise the Terminal.app tab running this session (host `.terminalApp`;
@@ -429,6 +497,7 @@ final class AgentSessionsModel: ObservableObject {
 
         var built: [(session: AgentSession, old: AgentState?)] = []
         var liveIDs = Set<String>()
+        var resumeCandidates: [ResumeCandidate] = []
 
         for id in ids {
             let meta = metas[id]
@@ -461,6 +530,14 @@ final class AgentSessionsModel: ObservableObject {
                                       state: resolved, since: since,
                                       lastActivity: lastActivity ?? since),
                           prev?.state))
+
+            // Auto-resume detection uses RAW parser flags (mid-turn = assistant
+            // last, not end_turn), never the resolved UI state which the process
+            // fold drifts to idle/waiting once a session is capped.
+            let midTurn = (p?.lastMsgIsAssistant ?? false) && (p?.lastMsgStopReason != "end_turn")
+            resumeCandidates.append(ResumeCandidate(
+                id: id, pid: meta?.pid, host: identity.host, tty: identity.tty,
+                newestEntryTs: lastActivity, midTurn: midTurn, status: meta?.status))
         }
         // Forget state for sessions that closed.
         sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
@@ -473,7 +550,18 @@ final class AgentSessionsModel: ObservableObject {
             }
         }
 
-        let ordered = built.map(\.session).sorted {
+        // Refresh cap state BEFORE arming (readUsage updates `lastUsage`), then
+        // arm/disarm from this tick's candidates.
+        readUsage()
+        evaluateArming(resumeCandidates, now: now)
+
+        // Stamp the armed fire-time onto each session so the row can render its
+        // countdown chip (inject mode only — notify-only shows no chip).
+        let ordered = built.map { pair -> AgentSession in
+            var s = pair.session
+            if let a = armedResumes[s.id], a.mode == .inject { s.autoResumeAt = a.resetAt }
+            return s
+        }.sorted {
             if $0.state.sortRank != $1.state.sortRank {
                 return $0.state.sortRank < $1.state.sortRank
             }
@@ -481,7 +569,6 @@ final class AgentSessionsModel: ObservableObject {
         }
 
         updateAckCount(ordered)
-        readUsage()
         publish(ordered)
     }
 
@@ -505,6 +592,166 @@ final class AgentSessionsModel: ObservableObject {
         guard !u.isEmpty, u != lastUsage else { return }
         lastUsage = u
         DispatchQueue.main.async { [weak self] in self?.usage = u }
+    }
+
+    // MARK: - Auto-resume: arming (ioQueue only)
+
+    private func epochKey(_ id: String, _ resetAt: Date) -> String {
+        "\(id)|\(Int(resetAt.timeIntervalSince1970))"
+    }
+
+    /// Arm/disarm sessions for auto-resume from this tick's candidates + cap state.
+    /// Called inside `rebuild()` after `readUsage()`; spawns nothing.
+    private func evaluateArming(_ candidates: [ResumeCandidate], now: Date) {
+        // Settings OFF ⇒ detector inert: drop live arms (do NOT consume epochs, so
+        // toggling back ON re-arms), keep the timer honest, done.
+        guard autoResumeEnabled() else {
+            if !armedResumes.isEmpty { armedResumes.removeAll(); rescheduleResumeTimer() }
+            return
+        }
+
+        // Drop arms for sessions that vanished this tick.
+        let liveIDs = Set(candidates.map(\.id))
+        for id in armedResumes.keys where !liveIDs.contains(id) {
+            armedResumes.removeValue(forKey: id)
+        }
+
+        // Capped == the 5-hour window at/above 99% AND its reset is still ahead.
+        // A stale spool whose reset already passed must never arm (a past reset is
+        // indistinguishable from old data — the file only refreshes while sessions
+        // run). No cap ⇒ nothing new arms; existing arms keep their own resetAt.
+        if let usage = lastUsage, let resetAt = usage.sessionResetsAt,
+           (usage.sessionPct ?? 0) >= 99, resetAt > now {
+            for c in candidates {
+                // Already armed for THIS epoch — leave it. Armed for an older epoch
+                // (reset window changed) — fall through to re-arm on the new one.
+                if let existing = armedResumes[c.id], existing.resetAt == resetAt { continue }
+                if consumedEpochs.contains(epochKey(c.id, resetAt)) { continue }
+                guard let pid = c.pid, c.midTurn else { continue }
+                let mode: ResumeMode
+                switch c.host {
+                case .terminalApp, .notch: mode = .inject
+                case .other, .none:        mode = .notifyOnly
+                }
+                armedResumes[c.id] = ArmedResume(
+                    sessionId: c.id, pid: pid, resetAt: resetAt,
+                    armedEntryTs: c.newestEntryTs, tty: c.tty, host: c.host, mode: mode)
+            }
+        }
+        rescheduleResumeTimer()
+    }
+
+    /// Cancel from the UI, called only after the chip's undo grace lapses (undo
+    /// within the grace never reaches the model — the arm stayed live the whole
+    /// time). Consumes the epoch so it stays cancelled for this reset window; a
+    /// fresh cap (new resetsAt) re-arms via a new epoch. No-op if not armed.
+    func cancelAutoResume(_ sessionId: String) {
+        ioQueue.async { [weak self] in
+            guard let self, let a = self.armedResumes[sessionId] else { return }
+            self.armedResumes.removeValue(forKey: sessionId)
+            self.consumedEpochs.insert(self.epochKey(sessionId, a.resetAt))
+            self.rescheduleResumeTimer()
+            self.rebuild()   // reflect the dropped chip promptly
+        }
+    }
+
+    // MARK: - Auto-resume: firing (ioQueue only)
+
+    /// (Re)schedule the single wall-clock timer to the earliest armed fire time.
+    /// Wall clock is mandatory: if the Mac sleeps through the reset, the timer
+    /// fires on wake and the resume happens then.
+    private func rescheduleResumeTimer() {
+        guard let earliest = armedResumes.values
+            .map({ $0.resetAt.addingTimeInterval(resumeGrace) }).min() else {
+            resumeTimer?.cancel(); resumeTimer = nil; resumeTimerDeadline = nil
+            return
+        }
+        if resumeTimer != nil, resumeTimerDeadline == earliest { return }   // unchanged
+        resumeTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: ioQueue)
+        let delay = max(0, earliest.timeIntervalSinceNow)
+        t.schedule(wallDeadline: .now() + delay, leeway: .seconds(1))
+        t.setEventHandler { [weak self] in self?.fireDueResumes() }
+        t.resume()
+        resumeTimer = t
+        resumeTimerDeadline = earliest
+    }
+
+    /// Fire every arm whose deadline has arrived. Each is consumed (fired or
+    /// silently cancelled) exactly once, then the timer is rescheduled for the rest.
+    private func fireDueResumes() {
+        let now = Date()
+        let due = armedResumes.values
+            .filter { $0.resetAt.addingTimeInterval(resumeGrace) <= now.addingTimeInterval(0.5) }
+        for a in due {
+            armedResumes.removeValue(forKey: a.sessionId)
+            consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))   // never re-fire this epoch
+            fireOne(a)
+        }
+        rescheduleResumeTimer()
+    }
+
+    /// Re-check ALL guards at fire time; any failure ⇒ silent cancel (no toast, no
+    /// injection). Guards pass ⇒ inject (or notify) + toast. Runs on `ioQueue`;
+    /// injection hops to `controlQueue`/main like focus/approve.
+    private func fireOne(_ a: ArmedResume) {
+        // Guard 1: session file still present, same pid, alive.
+        let metas = readSessionMetas()
+        guard let meta = metas[a.sessionId], meta.pid == a.pid, kill(Int32(a.pid), 0) == 0
+        else { return }
+        // Guard 3: not busy (a just-started manual resume would be busy).
+        guard meta.status != "busy" else { return }
+        // Guard 2: transcript untouched since arming AND still mid-turn (a manual
+        // resume writes a user entry — advances newestEntryTs and clears mid-turn).
+        guard let p = parser(forID: a.sessionId),
+              p.newestEntryTs == a.armedEntryTs,
+              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else { return }
+        // Guard 4: terminal identity re-resolves to the same tty + host.
+        let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
+        guard identity.tty == a.tty, identity.host == a.host else { return }
+
+        let project = meta.cwd.isEmpty
+            ? (meta.name ?? String(a.sessionId.prefix(8)))
+            : URL(fileURLWithPath: meta.cwd).lastPathComponent
+        let name = meta.name
+
+        switch a.mode {
+        case .notifyOnly:
+            DispatchQueue.main.async { [weak self] in
+                self?.onResumeFired?(project, name, true)
+            }
+        case .inject:
+            switch a.host {
+            case .notch(let sid):
+                DispatchQueue.main.async { [weak self] in
+                    self?.onNotchResume?(sid)
+                    self?.onResumeFired?(project, name, false)
+                }
+            case .terminalApp:
+                let pid = a.pid
+                let ttyPath = a.tty.map { "/dev/\($0)" }
+                controlQueue.async { [weak self] in
+                    let outcome = AgentTerminalControl.resume(pid: pid, ttyPath: ttyPath)
+                    DispatchQueue.main.async {
+                        // Tab vanished between guard and send ⇒ notify instead.
+                        self?.onResumeFired?(project, name, outcome == .notFound)
+                    }
+                }
+            case .other, .none:
+                break   // never inject-mode; defensive
+            }
+        }
+    }
+
+    /// The freshest live parser for a sessionId (mirrors the rebuild index).
+    private func parser(forID id: String) -> FileParser? {
+        var best: FileParser?
+        for p in parsers.values where p.id == id && p.messageCount > 0 {
+            if best == nil || (p.newestEntryTs ?? .distantPast) > (best?.newestEntryTs ?? .distantPast) {
+                best = p
+            }
+        }
+        return best
     }
 
     /// Read every `~/.claude/sessions/<pid>.json`, keyed by sessionId, keeping
@@ -736,7 +983,8 @@ final class AgentSessionsModel: ObservableObject {
             tty: identity.tty,
             host: identity.host,
             pid: meta?.pid,
-            name: meta?.name)
+            name: meta?.name,
+            autoResumeAt: nil)
     }
 
     // MARK: - Ack count + publish throttle (ioQueue only)

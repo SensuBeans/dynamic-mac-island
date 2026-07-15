@@ -331,7 +331,7 @@ struct SettingsDetailPage: View {
             case .timer:    TimerSettings()
             case .tray:     TraySettings()
             case .terminal: TerminalSettings()
-            case .agents:   NoOptionsSettings(note: "Managed by the Agents tab")
+            case .agents:   AgentsSettings()
             case .calendar: CalendarSettings()
             case .mirror:   MirrorSettings()
             case .stats:    StatsSettings()
@@ -444,6 +444,20 @@ private struct NoOptionsSettings: View {
 
 private struct TerminalSettings: View {
     var body: some View { NoOptionsSettings(note: "Managed by the Terminal tab") }
+}
+
+// MARK: Agents settings
+
+private struct AgentsSettings: View {
+    @EnvironmentObject var settings: SettingsStore
+    var body: some View {
+        SettingRow(label: "Auto-resume when limits reset",
+                   help: "If a session is cut off mid-task by the usage limit, "
+                       + "the notch types “continue” into its terminal the moment "
+                       + "the window reopens.") {
+            SettingSwitch(isOn: $settings.agentsAutoResume)
+        }
+    }
 }
 
 // MARK: Calendar settings

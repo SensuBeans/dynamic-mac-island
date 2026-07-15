@@ -59,6 +59,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let builtinShellLock = NSLock()
     private var builtinShellSnapshot: [(UUID, Int32)] = []
 
+    /// Thread-safe mirror of the auto-resume toggle — `AgentSessionsModel` reads
+    /// it on `ioQueue`, the setting is written on main.
+    private let autoResumeLock = NSLock()
+    private var autoResumeSnapshot = true
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
@@ -206,6 +211,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.builtinShellLock.unlock()
             }
             .store(in: &cancellables)
+
+        // Auto-resume: settings gate (thread-safe snapshot), the notch-terminal
+        // injection route, and the fire toasts — all wired before start() so the
+        // initial scan already sees them.
+        autoResumeSnapshot = settings.agentsAutoResume
+        agentSessions.autoResumeEnabled = { [weak self] in
+            guard let self else { return true }
+            self.autoResumeLock.lock(); defer { self.autoResumeLock.unlock() }
+            return self.autoResumeSnapshot
+        }
+        settings.$agentsAutoResume
+            .sink { [weak self] on in
+                guard let self else { return }
+                self.autoResumeLock.lock(); self.autoResumeSnapshot = on; self.autoResumeLock.unlock()
+            }
+            .store(in: &cancellables)
+        agentSessions.onNotchResume = { [weak self] sid in
+            self?.terminalSessions.resume(id: sid)
+        }
+        agentSessions.onResumeFired = { [weak self] project, name, notify in
+            guard let self else { return }
+            if notify {
+                self.state.showToast(NotchToast(
+                    icon: "bolt.slash",
+                    title: "Limits reset — \(project)",
+                    subtitle: name.map { "\($0) is waiting for you" } ?? "waiting for you",
+                    color: .orange))
+                NSSound(named: "Glass")?.play()
+            } else {
+                self.state.showToast(NotchToast(
+                    icon: "bolt.fill",
+                    title: "Resumed — \(project)",
+                    subtitle: name,
+                    color: .green))
+            }
+        }
 
         // Claude Code agent sessions: watch ~/.claude/projects, toast on
         // Done / Interrupted transitions (suppressed while already viewing
