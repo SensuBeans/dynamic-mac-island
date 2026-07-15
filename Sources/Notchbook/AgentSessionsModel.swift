@@ -136,7 +136,7 @@ final class AgentSessionsModel: ObservableObject {
 
     /// Collapsed ear-pill descriptor for the notch, by priority: any `.waiting`
     /// (needs a human) beats any `.working` beats a recently-`.complete` run
-    /// (finished within 5 min). `nil` => no pill, so the collapsed bar stays
+    /// (finished within `completePillWindow`). `nil` => no pill, so the bar stays
     /// hidden. Single source of truth so the pill's drawing (NotchView.agentEar),
     /// the collapsed island width (three sites) and AppDelegate.islandRect all
     /// agree on WHEN — and thus how wide — the pill is. Additive convenience,
@@ -157,7 +157,7 @@ final class AgentSessionsModel: ObservableObject {
         if waiting > 0 { return .waiting(waiting) }
         if working > 0 { return .working(working) }
         // Recent, still-unacknowledged completes (see `updateAckCount`: recency
-        // <5 min AND not yet seen). Viewing the Agents tab clears this, so the
+        // < completePillWindow AND not yet seen). Viewing the Agents tab clears this, so the
         // green "✓ N" pill actually goes away — the ack machinery now drives it.
         if unacknowledgedCompleteCount > 0 { return .complete(unacknowledgedCompleteCount) }
         return nil
@@ -198,6 +198,13 @@ final class AgentSessionsModel: ObservableObject {
     private let workingWindow: TimeInterval = 10      // fresh message => working
     private let idleMin:       TimeInterval = 5 * 60  // dim row (user-prompt-last, quiet)
     private let idleMax:       TimeInterval = 30 * 60 // drop from the live list
+    /// How long the collapsed green "✓ N" complete pill lingers after a turn
+    /// finishes. Deliberately SHORT and independent of `idleMin`: `.complete`
+    /// re-fires on every finished turn, so a 5-min window kept the pill
+    /// perpetually re-lit while you work — it read as permanently "stuck". A
+    /// brief window makes it blip on completion, then fade. (Row/idle dimming in
+    /// the expanded tab is unchanged — that's still `idleMin`.)
+    private let completePillWindow: TimeInterval = 30
 
     // MARK: Threading
 
@@ -989,11 +996,12 @@ final class AgentSessionsModel: ObservableObject {
     private func updateAckCount(_ sessions: [AgentSession]) {
         let completeIDs = Set(sessions.filter { $0.state == .complete }.map(\.id))
         acknowledgedCompleteIDs.formIntersection(completeIDs)   // forget acks for no-longer-complete
-        // Only recently-finished completes (<5 min) drive the pill, and only
-        // those the user hasn't cleared by opening the tab.
+        // Only just-finished completes (within completePillWindow) drive the
+        // pill, and only those the user hasn't cleared by opening the tab. The
+        // short window is what makes the green ✓ fade instead of lingering.
         let now = Date()
         let recent = Set(sessions
-            .filter { $0.state == .complete && now.timeIntervalSince($0.stateSince) < 5 * 60 }
+            .filter { $0.state == .complete && now.timeIntervalSince($0.stateSince) < completePillWindow }
             .map(\.id))
         let count = recent.subtracting(acknowledgedCompleteIDs).count
         guard count != lastAckCount else { return }   // publish only on a real change
