@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Servers
 
@@ -7,16 +8,19 @@ import SwiftUI
 /// start/stop/open/favorite actions.
 struct ServersTab: View {
     @EnvironmentObject var servers: ServersModel
+    @EnvironmentObject var state: NotchState
 
     var body: some View {
         VStack(spacing: 8) {
             if servers.loaded, !servers.reachable {
                 unreachable
-            } else if servers.loaded, servers.servers.isEmpty {
-                emptyState("No servers registered")
             } else {
                 header
-                list
+                if servers.loaded, servers.servers.isEmpty {
+                    emptyState("No servers yet — tap ＋ to add a folder")
+                } else {
+                    list
+                }
             }
         }
         .onAppear { servers.refresh() }
@@ -28,18 +32,49 @@ struct ServersTab: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(0.5))
             Spacer()
-            Button { servers.startFavorites() } label: {
-                Label("Start favorites", systemImage: "star.fill")
-                    .font(.system(size: 10, weight: .medium))
+            if servers.favoriteCount > 0 {
+                Button { servers.startFavorites() } label: {
+                    Label("Start favorites", systemImage: "star.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(.white.opacity(0.1)))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.85))
+                .help("Start every favorited server")
+            }
+            // Add a server by picking a project folder from Finder.
+            Button { pickAndAdd() } label: {
+                Label("Add", systemImage: "plus")
+                    .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Capsule().fill(.white.opacity(0.1)))
+                    .background(Capsule().fill(.white.opacity(0.14)))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.85))
-            .disabled(servers.favoriteCount == 0)
-            .opacity(servers.favoriteCount == 0 ? 0.4 : 1)
-            .help("Start every favorited server")
+            .foregroundStyle(.white)
+            .help("Add a server — pick a project folder")
+        }
+    }
+
+    /// Open a native folder picker and register the chosen folder. Guards the
+    /// island from collapsing while the modal is up (like the sound-output menu),
+    /// and activates the app so the panel comes to the front of this accessory.
+    private func pickAndAdd() {
+        state.menuHoldsOpen = true
+        NSApp.activate(ignoringOtherApps: true)
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Server"
+        panel.message = "Choose a project folder to run as a local server"
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Core")
+        let response = panel.runModal()
+        state.menuHoldsOpen = false
+        if response == .OK, let url = panel.url {
+            servers.addServer(path: url.path)
         }
     }
 

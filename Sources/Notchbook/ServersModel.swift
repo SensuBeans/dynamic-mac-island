@@ -104,6 +104,23 @@ final class ServersModel: ObservableObject {
         for s in servers where s.favorite && !s.running { start(s.name) }
     }
 
+    /// Register a new server from a picked folder. Name defaults to the folder,
+    /// kind/port auto-detected by the Starter (kind:"" → it sniffs next/static).
+    func addServer(path: String) {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        let body: [String: String] = ["name": name, "path": path,
+                                      "kind": "", "cmd": "", "port": ""]
+        guard let url = URL(string: baseString + "/api/add"),
+              let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        session.dataTask(with: req) { [weak self] _, _, _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self?.refresh() }
+        }.resume()
+    }
+
     /// Open the server in the default browser on the same host the Starter uses.
     func open(_ s: Server) {
         let host = URL(string: baseString)?.host ?? "localhost"
