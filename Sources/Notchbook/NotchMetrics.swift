@@ -42,6 +42,10 @@ struct NotchMetrics {
     /// rightward only; the left side stays at notch width. Sits OUTBOARD of the
     /// media ear when both are present.
     static let agentEar: CGFloat = 56
+    /// Slot reserved on the RIGHT for the floating toast capsule (icon + one line
+    /// of text). Its own little island beside the notch — the black bar does NOT
+    /// widen for it.
+    static let toastEar: CGFloat = 202
 
     init(screen: NSScreen) {
         self.screen = screen
@@ -66,8 +70,10 @@ struct NotchMetrics {
 
     func collapsedSize(withMedia: Bool, toast: Bool = false,
                        withAgent: Bool = false) -> CGSize {
-        let ears = (withMedia ? mediaEarWidth : 0) + (withAgent ? Self.agentEar : 0)
-        let extra: CGFloat = toast ? 215 : ears
+        // Toast and the agent pill are mutually exclusive (the pill is hidden
+        // while a toast is up); both float outboard of the media ear.
+        let outboard: CGFloat = toast ? Self.toastEar : (withAgent ? Self.agentEar : 0)
+        let extra: CGFloat = (withMedia ? mediaEarWidth : 0) + outboard
         // EXACTLY the physical notch width, plus right-side content only — no
         // wings. The bar's left edge sits flush at the notch's left edge; all
         // extras (ear, toast, pill slot) grow rightward from the notch.

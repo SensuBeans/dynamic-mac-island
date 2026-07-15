@@ -81,7 +81,10 @@ struct NotchView: View {
         // island only materializes when it has something to show.
         // The black notch bar materializes only for media/toast now — the agent
         // pill floats as its own capsule (below), so it no longer widens the bar.
-        let collapsedVisible = hasMedia || hasToast
+        // The black notch bar shows for media only. A toast is its OWN small
+        // floating glass capsule beside the notch (like the agent pill), so it
+        // no longer fills / widens the bar.
+        let collapsedVisible = hasMedia
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
@@ -100,8 +103,7 @@ struct NotchView: View {
                     if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
                     Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
                 }
-                .frame(width: metrics.collapsedSize(withMedia: hasMedia,
-                                                    toast: hasToast).width,
+                .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
                        height: metrics.notchHeight)
                 .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                       bottomRadius: 10))
@@ -113,6 +115,9 @@ struct NotchView: View {
                     // right-drift the way a padding+alignment combo did.
                     Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
                     ears
+                    // Toast + agent pill both float outboard of the media ear;
+                    // only one is present at a time (pill hides during a toast).
+                    toastCapsule.padding(.leading, hasMedia ? 8 : 2)
                     agentPill.padding(.leading, 6)
                     Spacer(minLength: 0)
                 }
@@ -232,39 +237,10 @@ struct NotchView: View {
     }
 
     /// Dynamic Island ears: album art on the left, live activity on the right.
+    /// (Toasts moved OUT of the bar into their own floating capsule — `toastCapsule`.)
     private var ears: some View {
         Group {
-            if let toast = state.toast, !state.isExpanded {
-                HStack(spacing: 8) {
-                    if toast.useArtwork, let art = media.artwork {
-                        Image(nsImage: art)
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: metrics.notchHeight - 10,
-                                   height: metrics.notchHeight - 10)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
-                    } else {
-                        Image(systemName: toast.icon)
-                            .font(.system(size: 12))
-                            .foregroundStyle(toast.color)
-                    }
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(toast.title)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        if let sub = toast.subtitle {
-                            Text(sub)
-                                .font(.system(size: 8.5))
-                                .foregroundStyle(.white.opacity(0.55))
-                                .lineLimit(1)
-                        }
-                    }
-                    .frame(width: 150, alignment: .leading)
-                }
-                .frame(height: metrics.notchHeight)
-                .transition(.opacity)
-            } else if pomodoro.isRunning, settings.timerCountdownEar,
+            if pomodoro.isRunning, settings.timerCountdownEar,
                       media.nowPlaying == nil || media.earHidden,
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
@@ -333,6 +309,52 @@ struct NotchView: View {
                 .transition(.opacity)
             }
         }
+    }
+
+    /// Transient notification as its OWN small floating glass capsule beside the
+    /// notch — icon + one line, just enough to carry the message. Simple fade/
+    /// scale in and out (no morph), driven by `state.toast`. It takes the same
+    /// outboard slot as the agent pill (which hides while a toast is up).
+    private var toastCapsule: some View {
+        Group {
+            if let toast = state.toast, !state.isExpanded {
+                HStack(spacing: 7) {
+                    if toast.useArtwork, let art = media.artwork {
+                        Image(nsImage: art)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 16, height: 16)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    } else {
+                        Image(systemName: toast.icon)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(toast.color)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(toast.title)
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let sub = toast.subtitle {
+                            Text(sub)
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: 140, alignment: .leading)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: metrics.notchHeight - 8)
+                .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.4) } }
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
+                .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .leading)))
+            }
+        }
+        .frame(height: metrics.notchHeight, alignment: .center)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: state.toast)
     }
 
     /// Collapsed agent-status pill: its OWN floating glass capsule at the far
