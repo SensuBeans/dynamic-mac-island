@@ -29,6 +29,8 @@ struct NotchMetrics {
     /// The Agents tab is a session dashboard — tall enough for ~5 rows before
     /// the list scrolls. Final island size, used verbatim like the terminal's.
     static let agentsIslandSize = CGSize(width: 470, height: 300)
+    /// The Servers tab (Local Starter list) — same footprint as the Agents tab.
+    static let serversIslandSize = CGSize(width: 470, height: 300)
     /// Transparent margin around the expanded shape so its shadow isn't clipped.
     static let shadowPad: CGFloat = 40
     /// Extra ear width either side of the notch while media is active, so the

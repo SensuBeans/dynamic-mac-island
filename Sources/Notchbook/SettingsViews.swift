@@ -332,11 +332,36 @@ struct SettingsDetailPage: View {
             case .tray:     TraySettings()
             case .terminal: TerminalSettings()
             case .agents:   AgentsSettings()
+            case .servers:  ServersSettings()
             case .calendar: CalendarSettings()
             case .mirror:   MirrorSettings()
             case .stats:    StatsSettings()
             case .toggles:  ControlsSettings()
             }
+        }
+    }
+}
+
+// MARK: Servers settings
+
+private struct ServersSettings: View {
+    // Shared with ServersModel (UserDefaults.standard); overriding the URL lets
+    // you point the tab at a dead port to exercise the "isn't running" state.
+    @AppStorage("servers.baseURL") private var baseURL = "http://localhost:7780"
+    var body: some View {
+        SettingRow(label: "Local Starter URL") {
+            TextField("http://localhost:7780", text: $baseURL)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 190)
+        }
+        SettingRow(label: "Reset to default") {
+            Button("localhost:7780") { baseURL = "http://localhost:7780" }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
         }
     }
 }

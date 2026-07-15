@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = SettingsStore()
     private let terminalSessions = TerminalSessionsModel()
     private let agentSessions = AgentSessionsModel()
+    private let serversModel = ServersModel()
     private let notesSync = NotesSyncModel()
 
     private var keyMonitor: Any?
@@ -103,6 +104,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     s = NotchMetrics.terminalIslandSize
                 } else if self.state.currentTab == .agents {
                     s = NotchMetrics.agentsIslandSize
+                } else if self.state.currentTab == .servers {
+                    s = NotchMetrics.serversIslandSize
                 } else if self.state.currentTab == .calendar {
                     s = self.metrics.calendarExpandedSize(monthMode: self.state.calendarMonthMode)
                 } else {
@@ -665,6 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(audioOutput)
             .environmentObject(terminalSessions)
             .environmentObject(agentSessions)
+            .environmentObject(serversModel)
             .environmentObject(notesSync)
             .environmentObject(settings))
     }

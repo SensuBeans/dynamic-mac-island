@@ -20,7 +20,7 @@ enum SettingsRoute: Equatable {
 }
 
 enum NotchTab: String, CaseIterable {
-    case media, notes, timer, tray, terminal, agents, calendar, mirror, stats, toggles
+    case media, notes, timer, tray, terminal, agents, servers, calendar, mirror, stats, toggles
 
     var icon: String {
         switch self {
@@ -30,6 +30,7 @@ enum NotchTab: String, CaseIterable {
         case .tray: return "tray.full"
         case .terminal: return "terminal"
         case .agents: return "sparkles"
+        case .servers: return "server.rack"
         case .calendar: return "calendar"
         case .mirror: return "web.camera"
         case .stats: return "gauge.with.needle"
@@ -45,6 +46,7 @@ enum NotchTab: String, CaseIterable {
         case .tray: return "Tray"
         case .terminal: return "Terminal"
         case .agents: return "Agents"
+        case .servers: return "Servers"
         case .calendar: return "Calendar"
         case .mirror: return "Mirror"
         case .stats: return "Stats"

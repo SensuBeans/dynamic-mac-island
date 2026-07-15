@@ -13,6 +13,7 @@ struct NotchView: View {
     @EnvironmentObject var spectrum: AudioSpectrum
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var agentSessions: AgentSessionsModel
+    @EnvironmentObject var servers: ServersModel
     let metrics: NotchMetrics
 
     @FocusState private var editorFocused: Bool
@@ -63,6 +64,8 @@ struct NotchView: View {
                 return NotchMetrics.terminalIslandSize
             } else if state.currentTab == .agents {
                 return NotchMetrics.agentsIslandSize
+            } else if state.currentTab == .servers {
+                return NotchMetrics.serversIslandSize
             } else if state.currentTab == .calendar {
                 return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
             }
@@ -179,6 +182,7 @@ struct NotchView: View {
             editorFocused = expanded && state.currentTab == .notes
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
+            servers.setPolling(expanded && state.currentTab == .servers)
             spectrum.setActive(settings.liveWaveform && expanded && media.nowPlaying?.isPlaying == true)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
@@ -198,6 +202,7 @@ struct NotchView: View {
             editorFocused = state.isExpanded && tab == .notes
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
+            servers.setPolling(state.isExpanded && tab == .servers)
             spectrum.setActive(settings.liveWaveform && state.isExpanded && media.nowPlaying?.isPlaying == true)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
@@ -519,6 +524,7 @@ struct NotchView: View {
                     case .tray: TrayTab()
                     case .terminal: TerminalTab()
                     case .agents: AgentsTab()
+                    case .servers: ServersTab()
                     case .calendar: CalendarTab()
                     case .mirror: MirrorTab()
                     case .stats: StatsTab()
