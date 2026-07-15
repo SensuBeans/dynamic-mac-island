@@ -98,6 +98,11 @@ struct NotchView: View {
             .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                   bottomRadius: 10))
             .opacity(state.isExpanded ? 0 : 1)
+            // Pin the notch bar to the leading edge so it stays flush with the
+            // hardware notch. The island frame is wider than the bar when the
+            // agent pill reserves its slot on the right — without this the bar
+            // would center in that extra width and drift right.
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             // Agent-status pill — its OWN floating glass capsule at the far
             // right, not painted into the notch bar. Present whenever there's
