@@ -15,21 +15,31 @@ struct AgentsTab: View {
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        Group {
-            if agents.sessions.isEmpty {
-                emptyState
-            } else {
-                // Always a ScrollView so any overflow scrolls; when the rows
-                // fit, it simply doesn't scroll. `.frame(maxHeight:.infinity)`
-                // pins it to the panel height so the scroll region is bounded.
-                ScrollView(showsIndicators: true) {
-                    VStack(spacing: 6) { rows }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        VStack(spacing: 8) {
+            // Account usage limits sit above everything — the 5-hour session
+            // window and the weekly window (hidden until the statusline has
+            // written them at least once).
+            if let usage = agents.usage, !usage.isEmpty {
+                UsageHeader(usage: usage, now: now)
             }
+            sessionList
         }
         .onReceive(timer) { now = $0 }
         .onAppear { agents.acknowledgeCompletes() }
+    }
+
+    @ViewBuilder
+    private var sessionList: some View {
+        if agents.sessions.isEmpty {
+            emptyState
+        } else {
+            // Always a ScrollView so any overflow scrolls; when the rows fit, it
+            // simply doesn't scroll. maxHeight:.infinity bounds the scroll region.
+            ScrollView(showsIndicators: true) {
+                VStack(spacing: 6) { rows }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
     }
 
     private var rows: some View {
@@ -53,9 +63,83 @@ struct AgentsTab: View {
     }
 }
 
+// MARK: - Usage header (account rate limits)
+
+/// The 5-hour "session" window and the weekly window, side by side. Each is a
+/// thin meter that ramps amber→red as the account approaches its limit, with a
+/// reset countdown. Mirrors the statusline's own session/weekly readout.
+private struct UsageHeader: View {
+    let usage: AgentUsage
+    let now: Date
+
+    var body: some View {
+        HStack(spacing: 10) {
+            meter(title: "SESSION", pct: usage.sessionPct, resetsAt: usage.sessionResetsAt)
+            meter(title: "WEEKLY", pct: usage.weeklyPct, resetsAt: usage.weeklyResetsAt)
+        }
+    }
+
+    @ViewBuilder
+    private func meter(title: String, pct: Int?, resetsAt: Date?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .kerning(0.5)
+                Spacer(minLength: 2)
+                if let reset = resetsCountdown(resetsAt) {
+                    Text(reset)
+                        .font(.system(size: 8))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .monospacedDigit()
+                }
+                Text(pct.map { "\($0)%" } ?? "—")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(tint(pct))
+                    .monospacedDigit()
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.14)).frame(height: 4)
+                    Capsule().fill(tint(pct))
+                        .frame(width: max(2, geo.size.width * CGFloat(pct ?? 0) / 100),
+                               height: 4)
+                }
+                .frame(height: geo.size.height, alignment: .center)
+            }
+            .frame(height: 4)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
+    }
+
+    /// Higher usage = closer to the ceiling = hotter. Matches the context-meter
+    /// thresholds elsewhere (amber ≥70, red ≥90).
+    private func tint(_ pct: Int?) -> Color {
+        guard let pct else { return .white.opacity(0.5) }
+        if pct >= 90 { return .red }
+        if pct >= 70 { return .orange }
+        return .white.opacity(0.85)
+    }
+
+    private func resetsCountdown(_ date: Date?) -> String? {
+        guard let date else { return nil }
+        let secs = Int(date.timeIntervalSince(now))
+        guard secs > 0 else { return nil }
+        let d = secs / 86_400, h = (secs % 86_400) / 3600, m = (secs % 3600) / 60
+        if d > 0 { return "resets \(d)d \(h)h" }
+        if h > 0 { return "resets \(h)h \(m)m" }
+        return "resets \(m)m"
+    }
+}
+
 // MARK: - Row
 
 private struct AgentRow: View {
+    @EnvironmentObject var agents: AgentSessionsModel
     let session: AgentSession
     let now: Date
 
@@ -120,6 +204,8 @@ private struct AgentRow: View {
 
                 contextMeter
             }
+
+            actions
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -133,6 +219,39 @@ private struct AgentRow: View {
 
     // Working-state pulse target (animates between 0.35 and 1).
     @State private var pulse: Double = 1
+
+    /// Trailing actions. A waiting session (permission prompt / your turn) gets a
+    /// prominent green Approve — one click sends Return to its Terminal tab and
+    /// accepts the default option. Any session with a known process gets Open
+    /// (jump to its terminal), shown on hover for non-waiting rows.
+    @ViewBuilder
+    private var actions: some View {
+        HStack(spacing: 5) {
+            if session.state == .waiting, session.pid != nil {
+                Button { agents.approve(session) } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 26, height: 22)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(.green))
+                }
+                .buttonStyle(.plain)
+                .help("Approve — send Return to accept the prompt")
+            }
+            if session.pid != nil, hovered || session.needsAttention {
+                Button { agents.focus(session) } label: {
+                    Image(systemName: "arrow.up.forward")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 24, height: 22)
+                        .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .help("Jump to this session's terminal")
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+    }
 
     private var modelBadge: some View {
         Text(session.modelDisplay)

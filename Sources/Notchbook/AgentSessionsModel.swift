@@ -81,8 +81,37 @@ struct AgentSession: Identifiable {
     var contextWindow: Int?   // nil => render raw tokens, no percent
     var outputTokens: Int     // running sum across assistant entries
     var messageCount: Int
-    var cwd: String           // full path (for future jump-back)
-    var tty: String?          // nil in Phase A
+    var cwd: String           // full path (for jump-back)
+    var tty: String?          // resolved lazily from pid at focus/approve time
+    var pid: Int?             // Claude Code process pid (from ~/.claude/sessions)
+    var name: String?         // friendly session name ("core-00")
+
+    /// A session parked waiting for the user (a permission prompt or the end of
+    /// a turn) — the states the notch offers an Approve / Open action for.
+    var needsAttention: Bool { state == .waiting || state == .interrupted }
+}
+
+/// Live status Claude Code publishes per running process in
+/// `~/.claude/sessions/<pid>.json`. Authoritative for busy/waiting/idle in a way
+/// transcript tailing can't be (it sees permission prompts, which never reach
+/// the JSONL until answered).
+private struct SessionMeta {
+    var pid: Int
+    var name: String?
+    var status: String   // "busy" | "waiting" | "idle"
+}
+
+/// Account-wide Claude usage limits (the 5-hour rolling "session" window and the
+/// weekly window), captured from the statusline's stdin payload — the only place
+/// Claude Code surfaces `rate_limits`. Percent is 0…100 used; `resetsAt` is when
+/// that window rolls over.
+struct AgentUsage: Equatable {
+    var sessionPct: Int?
+    var sessionResetsAt: Date?
+    var weeklyPct: Int?
+    var weeklyResetsAt: Date?
+
+    var isEmpty: Bool { sessionPct == nil && weeklyPct == nil }
 }
 
 final class AgentSessionsModel: ObservableObject {
@@ -90,6 +119,11 @@ final class AgentSessionsModel: ObservableObject {
     /// Ordered: needs-attention (waiting/interrupted), then working, then recent
     /// complete, then idle; most-recent activity first within a group.
     @Published private(set) var sessions: [AgentSession] = []
+
+    /// Account usage limits shown at the top of the Agents tab. `nil` until the
+    /// statusline has written the spool file at least once (non-subscribers or a
+    /// fresh install never populate it — the header then stays hidden).
+    @Published private(set) var usage: AgentUsage?
 
     /// Additive convenience for the collapsed ear pill: how many `.complete`
     /// sessions the user has NOT yet seen (cleared by `acknowledgeCompletes`).
@@ -146,9 +180,22 @@ final class AgentSessionsModel: ObservableObject {
     /// `acknowledgedCompleteIDs`, publish throttle). Confinement, not locks.
     private let ioQueue = DispatchQueue(label: "com.sensubeans.notchbook.agents",
                                         qos: .utility)
+    /// User-initiated terminal control (focus/approve) — kept off `ioQueue` and
+    /// off main so an AppleScript round-trip never stalls parsing or the UI.
+    private let controlQueue = DispatchQueue(label: "com.sensubeans.notchbook.agents.control",
+                                             qos: .userInitiated)
 
     private let projectsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/projects", isDirectory: true)
+
+    /// Spool file the statusline writes account usage to (see statusline-command.sh).
+    private let usageURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Notchbook/usage.json")
+    private var lastUsage: AgentUsage?
+
+    /// Directory of per-process live-status files (`<pid>.json`).
+    private let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/sessions", isDirectory: true)
 
     /// path -> incremental parser state. Touched only on `ioQueue`.
     private var parsers: [String: FileParser] = [:]
@@ -181,6 +228,19 @@ final class AgentSessionsModel: ObservableObject {
         timer = nil
     }
 
+    /// Raise the Terminal tab running this session. Off-main — AppleScript
+    /// round-trips can take a beat.
+    func focus(_ session: AgentSession) {
+        guard let pid = session.pid else { return }
+        controlQueue.async { AgentTerminalControl.focus(pid: pid) }
+    }
+
+    /// Accept the session's pending permission prompt (Return to its tab).
+    func approve(_ session: AgentSession) {
+        guard let pid = session.pid else { return }
+        controlQueue.async { AgentTerminalControl.approve(pid: pid) }
+    }
+
     /// Called when the Agents tab is viewed — clears the "recent complete"
     /// highlight so the ear pill stops flagging finished runs the user has seen.
     func acknowledgeCompletes() {
@@ -199,10 +259,15 @@ final class AgentSessionsModel: ObservableObject {
 
     /// C callback carries no capture — it hops back to the instance through the
     /// `info` pointer, then does the scan on the queue FSEvents delivers on.
-    private static let fsCallback: FSEventStreamCallback = { _, info, _, _, _, _ in
+    private static let fsCallback: FSEventStreamCallback = { _, info, _, eventPaths, _, _ in
         guard let info else { return }
         let model = Unmanaged<AgentSessionsModel>.fromOpaque(info).takeUnretainedValue()
-        model.scan()   // already on ioQueue (set via FSEventStreamSetDispatchQueue)
+        // Ingest ONLY the paths that changed (file-level events) rather than
+        // re-walking the whole projects tree on every write burst — that walk
+        // was the app's steady-state CPU cost while sessions stream.
+        let paths = (Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+                     as? [String]) ?? []
+        model.ingestChanged(paths)   // already on ioQueue (FSEventStreamSetDispatchQueue)
     }
 
     private func startFSEvents() {
@@ -211,8 +276,11 @@ final class AgentSessionsModel: ObservableObject {
         var ctx = FSEventStreamContext(version: 0,
                                        info: Unmanaged.passUnretained(self).toOpaque(),
                                        retain: nil, release: nil, copyDescription: nil)
+        // UseCFTypes: the callback's eventPaths arrives as a CFArray of CFString
+        // so we can read exactly which files changed.
         let flags = UInt32(kFSEventStreamCreateFlagFileEvents |
-                           kFSEventStreamCreateFlagNoDefer)
+                           kFSEventStreamCreateFlagNoDefer |
+                           kFSEventStreamCreateFlagUseCFTypes)
         guard let s = FSEventStreamCreate(kCFAllocatorDefault,
                                           Self.fsCallback,
                                           &ctx,
@@ -251,39 +319,40 @@ final class AgentSessionsModel: ObservableObject {
 
     // MARK: - Scan (ioQueue only)
 
-    /// Directory discovery + append reads. FSEvents-driven (and the one-shot
-    /// initial scan). Walks the tree, adopts new live files, ingests appended
-    /// bytes, forgets vanished files — then hands off to `rebuild()`.
+    /// One-shot full walk at launch: discover every live transcript, then hand
+    /// off to `rebuild()`. Ongoing discovery + appends come from FSEvents
+    /// (`ingestChanged`), which reports file creates too, so this never repeats.
     private func scan() {
         let now = Date()
-        var seen = Set<String>()
-
-        for path in jsonlFiles() {
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { continue }
-            let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
-            let mtime = (attrs[.modificationDate] as? Date) ?? now
-
-            var parser = parsers[path]
-            if parser == nil {
-                // New file: only adopt it if it's live (initial-scan rule —
-                // ignore transcripts idle beyond the drop threshold).
-                guard now.timeIntervalSince(mtime) < idleMax else { continue }
-                let p = FileParser(path: path, now: now)
-                parsers[path] = p
-                parser = p
-            }
-            guard let p = parser else { continue }
-            seen.insert(path)
-
-            // Truncation / rotation: size shrank => start over from scratch.
-            if size < p.byteOffset { p.reset(now: now) }
-            if size > p.byteOffset { ingest(into: p) }
-        }
-
-        // Forget parsers whose files vanished.
-        for key in parsers.keys where !seen.contains(key) { parsers.removeValue(forKey: key) }
-
+        for path in jsonlFiles() { processFile(path, now: now) }
         rebuild()
+    }
+
+    /// FSEvents delivered these paths — adopt/ingest just them (no tree walk).
+    private func ingestChanged(_ paths: [String]) {
+        let now = Date()
+        for path in paths where path.hasSuffix(".jsonl") { processFile(path, now: now) }
+        rebuild()
+    }
+
+    /// Adopt a new live file or read a known file's appended bytes.
+    private func processFile(_ path: String, now: Date) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return }
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        let mtime = (attrs[.modificationDate] as? Date) ?? now
+
+        var parser = parsers[path]
+        if parser == nil {
+            // New file: adopt only if live (ignore transcripts already past the
+            // drop threshold — an old file touched by a stray write stays out).
+            guard now.timeIntervalSince(mtime) < idleMax else { return }
+            let p = FileParser(path: path, now: now)
+            parsers[path] = p
+            parser = p
+        }
+        guard let p = parser else { return }
+        if size < p.byteOffset { p.reset(now: now) }   // truncation/rotation
+        if size > p.byteOffset { ingest(into: p) }
     }
 
     /// Recompute each tracked session's state from its message clock, drop the
@@ -291,10 +360,16 @@ final class AgentSessionsModel: ObservableObject {
     /// the FSEvents scan and the 1.5 s poll timer, cheaply.
     private func rebuild() {
         let now = Date()
+        let metas = readSessionMetas()   // authoritative live status by sessionId
         var built: [(session: AgentSession, old: AgentState?)] = []
         var expired: [String] = []
 
         for (path, p) in parsers {
+            // File deleted out from under us (no FSEvents walk to catch it now).
+            if !FileManager.default.fileExists(atPath: path) { expired.append(path); continue }
+
+            let meta = metas[p.id]
+
             // Activity = newest USER/ASSISTANT (incl. sidechain) timestamp, never
             // a bare file write (system/attachment/queue-op/mtime) — those fire
             // long after a turn ends and would resurrect a finished session and
@@ -303,10 +378,16 @@ final class AgentSessionsModel: ObservableObject {
             guard let lastActivity = p.newestEntryTs, p.messageCount > 0 else { continue }
             let age = now.timeIntervalSince(lastActivity)
 
-            guard let state = computeState(p, age: age) else {
-                expired.append(path)   // no message activity >= 30 min => drop
-                continue
+            // The transcript clock derives state; a LIVE session file (its process
+            // still running) overrides it — busy/waiting are authoritative, and a
+            // live process is never dropped even if its transcript went quiet
+            // (a session parked >30 min at a permission prompt must stay).
+            var state = computeState(p, age: age)
+            if state == nil {
+                if meta != nil { state = .idle }   // alive but quiet => keep, dim
+                else { expired.append(path); continue }
             }
+            let resolved = applyStatus(base: state!, meta: meta)
 
             let old = p.currentState
             if old == nil {
@@ -314,12 +395,13 @@ final class AgentSessionsModel: ObservableObject {
                 // real last-activity instant, so a relaunch doesn't replay a long-
                 // finished run as a "just now" complete (green pill / recency).
                 p.stateSince = min(now, lastActivity)
-                p.currentState = state
-            } else if state != old {
+                p.currentState = resolved
+            } else if resolved != old {
                 p.stateSince = now
-                p.currentState = state
+                p.currentState = resolved
             }
-            built.append((makeSession(p, state: state, lastActivity: lastActivity), old))
+            built.append((makeSession(p, state: resolved, lastActivity: lastActivity,
+                                      meta: meta), old))
         }
         for key in expired { parsers.removeValue(forKey: key) }
 
@@ -340,7 +422,63 @@ final class AgentSessionsModel: ObservableObject {
         }
 
         updateAckCount(ordered)
+        readUsage()
         publish(ordered)
+    }
+
+    /// Poll the statusline-written usage spool (tiny file, cheap on the 1.5 s
+    /// tick). Publishes only on change so an unchanged file never churns SwiftUI.
+    private func readUsage() {
+        guard let data = try? Data(contentsOf: usageURL),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let rl = obj["rate_limits"] as? [String: Any] else { return }
+        func window(_ key: String) -> (Int?, Date?) {
+            guard let w = rl[key] as? [String: Any] else { return (nil, nil) }
+            let pct = (w["used_percentage"] as? NSNumber)?.intValue
+            let reset = (w["resets_at"] as? NSNumber)
+                .map { Date(timeIntervalSince1970: $0.doubleValue) }
+            return (pct, reset)
+        }
+        let (s, sr) = window("five_hour")
+        let (wk, wr) = window("seven_day")
+        let u = AgentUsage(sessionPct: s, sessionResetsAt: sr,
+                           weeklyPct: wk, weeklyResetsAt: wr)
+        guard !u.isEmpty, u != lastUsage else { return }
+        lastUsage = u
+        DispatchQueue.main.async { [weak self] in self?.usage = u }
+    }
+
+    /// Read every `~/.claude/sessions/<pid>.json`, keyed by sessionId, keeping
+    /// only entries whose process is still alive (Claude Code leaves the file
+    /// behind after exit; `kill(pid, 0)` is the authoritative liveness check).
+    private func readSessionMetas() -> [String: SessionMeta] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: sessionsURL.path)
+        else { return [:] }
+        var out: [String: SessionMeta] = [:]
+        for name in names where name.hasSuffix(".json") {
+            let url = sessionsURL.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let sid = obj["sessionId"] as? String,
+                  let pid = (obj["pid"] as? NSNumber)?.int32Value,
+                  kill(pid, 0) == 0 else { continue }   // pid alive?
+            out[sid] = SessionMeta(pid: Int(pid),
+                                   name: obj["name"] as? String,
+                                   status: obj["status"] as? String ?? "idle")
+        }
+        return out
+    }
+
+    /// Fold the authoritative live status over the transcript-derived state.
+    /// Interrupt (from the transcript) wins; then busy/waiting from the process;
+    /// "idle" defers to the transcript (which distinguishes complete vs idle).
+    private func applyStatus(base: AgentState, meta: SessionMeta?) -> AgentState {
+        guard let meta, base != .interrupted else { return base }
+        switch meta.status {
+        case "busy":    return .working
+        case "waiting": return .waiting
+        default:        return base
+        }
     }
 
     private func jsonlFiles() -> [String] {
@@ -490,7 +628,7 @@ final class AgentSessionsModel: ObservableObject {
     }
 
     private func makeSession(_ p: FileParser, state: AgentState,
-                             lastActivity: Date) -> AgentSession {
+                             lastActivity: Date, meta: SessionMeta?) -> AgentSession {
         let (display, window) = Self.resolveModel(p.latestModel,
                                                   observedContextTokens: p.maxContextTokens)
         let branch: String? = {
@@ -514,7 +652,9 @@ final class AgentSessionsModel: ObservableObject {
             outputTokens: p.outputTokens,
             messageCount: p.messageCount,
             cwd: p.cwd,
-            tty: nil)
+            tty: nil,
+            pid: meta?.pid,
+            name: meta?.name)
     }
 
     // MARK: - Ack count + publish throttle (ioQueue only)

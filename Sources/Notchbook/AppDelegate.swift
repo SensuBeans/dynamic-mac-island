@@ -185,6 +185,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             guard !(self.state.isExpanded && self.state.currentTab == .agents) else { return }
             switch session.state {
+            case .waiting:
+                // Needs a human — a permission prompt or the end of a turn.
+                self.state.showToast(NotchToast(icon: "exclamationmark.triangle.fill",
+                                                title: "Needs you — \(session.project)",
+                                                subtitle: session.name,
+                                                color: .orange))
+                NSSound(named: "Glass")?.play()
             case .complete:
                 self.state.showToast(NotchToast(icon: "checkmark.circle.fill",
                                                 title: "Done — \(session.project)",

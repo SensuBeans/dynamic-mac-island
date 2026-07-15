@@ -81,6 +81,14 @@ final class NotchState: ObservableObject {
                                       forKey: "hiddenTabs")
         }
     }
+    /// User-defined order of ALL tabs, drives the nav dock and the swipe cycle.
+    /// Persisted; new tabs added in a later build are appended in canonical
+    /// order on load. Reorder it by dragging a chip in the nav dock.
+    @Published var tabOrder: [NotchTab] {
+        didSet {
+            UserDefaults.standard.set(tabOrder.map(\.rawValue), forKey: "tabOrder")
+        }
+    }
     /// Mirror at double size ("twice as big") — toggled from the mirror
     /// overlay, reset whenever the mirror is left.
     @Published var mirrorBig = false
@@ -145,8 +153,28 @@ final class NotchState: ObservableObject {
     /// Tabs shown in the nav dock and reachable by swipe, in canonical order.
     /// Never empty — if every tab were hidden, media stays as a floor.
     var visibleTabs: [NotchTab] {
-        let visible = NotchTab.allCases.filter { !hiddenTabs.contains($0) }
+        let visible = tabOrder.filter { !hiddenTabs.contains($0) }
         return visible.isEmpty ? [.media] : visible
+    }
+
+    /// Commit a new order for the visible tabs (from a nav-dock drag). Hidden
+    /// tabs keep their relative order and trail behind, out of sight.
+    func setVisibleOrder(_ newVisible: [NotchTab]) {
+        let hidden = tabOrder.filter { hiddenTabs.contains($0) }
+        let merged = newVisible + hidden
+        // Guard against a malformed input dropping/duplicating tabs.
+        guard Set(merged) == Set(NotchTab.allCases), merged.count == NotchTab.allCases.count
+        else { return }
+        tabOrder = merged
+    }
+
+    /// Canonical order with any tabs missing from `saved` appended (handles new
+    /// tabs shipped after the user last saved an order), de-duplicated.
+    private static func normalizedOrder(_ saved: [NotchTab]) -> [NotchTab] {
+        var seen = Set<NotchTab>()
+        var order = saved.filter { seen.insert($0).inserted }
+        for t in NotchTab.allCases where !seen.contains(t) { order.append(t) }
+        return order
     }
 
     /// Hide/show a tab. The last visible tab can't be hidden; hiding the
@@ -164,6 +192,9 @@ final class NotchState: ObservableObject {
     init() {
         hiddenTabs = Set(
             (UserDefaults.standard.stringArray(forKey: "hiddenTabs") ?? [])
+                .compactMap(NotchTab.init(rawValue:)))
+        tabOrder = Self.normalizedOrder(
+            (UserDefaults.standard.stringArray(forKey: "tabOrder") ?? [])
                 .compactMap(NotchTab.init(rawValue:)))
         // Desired page count from the setting (read straight from UserDefaults
         // — NotchState is built before SettingsStore). Load tolerantly: pad or
