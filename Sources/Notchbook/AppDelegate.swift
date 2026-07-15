@@ -184,25 +184,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         agentSessions.onTransition = { [weak self] session, _ in
             guard let self else { return }
             guard !(self.state.isExpanded && self.state.currentTab == .agents) else { return }
-            switch session.state {
-            case .waiting:
-                // Needs a human — a permission prompt or the end of a turn.
-                self.state.showToast(NotchToast(icon: "exclamationmark.triangle.fill",
-                                                title: "Needs you — \(session.project)",
-                                                subtitle: session.name,
-                                                color: .orange))
-                NSSound(named: "Glass")?.play()
-            case .complete:
-                self.state.showToast(NotchToast(icon: "checkmark.circle.fill",
-                                                title: "Done — \(session.project)",
-                                                color: .green))
-            case .interrupted:
-                self.state.showToast(NotchToast(icon: "xmark.circle",
-                                                title: "Interrupted — \(session.project)",
-                                                color: .gray))
-            default:
-                break
-            }
+            // ONLY interrupt for the actionable case — a session waiting on you.
+            // "Complete" fires on every finished turn (constant while you work)
+            // and would keep replacing the media ear; the collapsed pill already
+            // shows the ✓ count non-intrusively, so no toast for it.
+            guard session.state == .waiting else { return }
+            self.state.showToast(NotchToast(icon: "exclamationmark.triangle.fill",
+                                            title: "Needs you — \(session.project)",
+                                            subtitle: session.name,
+                                            color: .orange))
+            NSSound(named: "Glass")?.play()
         }
 
         pomodoro.onPhaseEnd = { [weak self] ended in
