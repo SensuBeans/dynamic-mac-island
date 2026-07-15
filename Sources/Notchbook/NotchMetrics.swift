@@ -38,7 +38,7 @@ struct NotchMetrics {
     /// (state glyph + count capsule). Like the media ear, it grows the island
     /// rightward only; the left side stays at notch width. Sits OUTBOARD of the
     /// media ear when both are present.
-    static let agentEar: CGFloat = 46
+    static let agentEar: CGFloat = 56
 
     init(screen: NSScreen) {
         self.screen = screen

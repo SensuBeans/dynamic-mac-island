@@ -104,11 +104,13 @@ struct NotchView: View {
             // would center in that extra width and drift right.
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // Agent-status pill — its OWN floating glass capsule at the far
-            // right, not painted into the notch bar. Present whenever there's
-            // pill content and we're collapsed.
+            // Agent-status pill — its OWN floating glass capsule that sits just
+            // to the right of the notch bar (a small gap), NOT out at the far
+            // edge. Offset by the bar width so it hugs the notch / media cluster.
             agentPill
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .offset(x: metrics.collapsedSize(withMedia: hasMedia,
+                                                  toast: hasToast).width + 4)
                 .opacity(state.isExpanded ? 0 : 1)
 
             // Expanded: the nav bar and the content panel are each their
@@ -346,8 +348,7 @@ struct NotchView: View {
                     AgentPillLabel(pill: pill)
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 6)
-                .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .top)))
+                .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .leading)))
                 .animation(.spring(response: 0.3, dampingFraction: 0.78), value: pill)
             }
         }
