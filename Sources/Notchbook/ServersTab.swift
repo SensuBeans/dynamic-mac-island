@@ -58,12 +58,15 @@ struct ServersTab: View {
         }
     }
 
-    /// Open a native folder picker and register the chosen folder. Guards the
-    /// island from collapsing while the modal is up (like the sound-output menu),
-    /// and activates the app so the panel comes to the front of this accessory.
+    /// Open a native folder picker and register the chosen folder. The island
+    /// panel floats at `.statusBar` level, so a normal open panel renders BEHIND
+    /// it — present it non-modally, lift it above the island, and park it right
+    /// under the notch (top-center). Hold the island open while it's up.
     private func pickAndAdd() {
+        let state = self.state
+        let servers = self.servers
         state.menuHoldsOpen = true
-        NSApp.activate(ignoringOtherApps: true)
+
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -71,11 +74,23 @@ struct ServersTab: View {
         panel.prompt = "Add Server"
         panel.message = "Choose a project folder to run as a local server"
         panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Core")
-        let response = panel.runModal()
-        state.menuHoldsOpen = false
-        if response == .OK, let url = panel.url {
-            servers.addServer(path: url.path)
+
+        // Non-modal so we can restyle its window after it's ordered in.
+        panel.begin { response in
+            state.menuHoldsOpen = false
+            if response == .OK, let url = panel.url { servers.addServer(path: url.path) }
         }
+
+        // Above the island (statusBar) and anchored just under the notch.
+        panel.level = .popUpMenu
+        if let screen = NotchMetrics.notchScreen() ?? NSScreen.main {
+            let f = screen.frame
+            let w: CGFloat = 680, h: CGFloat = 460
+            panel.setContentSize(NSSize(width: w, height: h))
+            panel.setFrameTopLeftPoint(NSPoint(x: f.midX - w / 2, y: f.maxY - 40))
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     private var list: some View {
