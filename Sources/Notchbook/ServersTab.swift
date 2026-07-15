@@ -194,8 +194,8 @@ private struct ServerRow: View {
                 Image(systemName: server.running ? "stop.fill" : "play.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(server.running ? Color.white.opacity(0.7) : Color.green)
-                    .frame(width: 24, height: 22)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
+                    .frame(width: 30, height: 22)
+                    .background(Capsule().fill(.white.opacity(0.12)))
             }
             .buttonStyle(.plain)
             .help(server.running ? "Stop" : "Start")
@@ -205,8 +205,8 @@ private struct ServerRow: View {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
-                        .frame(width: 24, height: 22)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
+                        .frame(width: 30, height: 22)
+                        .background(Capsule().fill(.white.opacity(0.12)))
                 }
                 .buttonStyle(.plain)
                 .help("Open localhost:\(server.port)")

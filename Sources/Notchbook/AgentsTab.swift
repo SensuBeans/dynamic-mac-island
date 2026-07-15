@@ -290,8 +290,8 @@ private struct AgentRow: View {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.black)
-                        .frame(width: 26, height: 22)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(.green))
+                        .frame(width: 30, height: 22)
+                        .background(Capsule().fill(.green))
                 }
                 .buttonStyle(.plain)
                 .help("Approve — send Return to accept the prompt")
@@ -301,8 +301,8 @@ private struct AgentRow: View {
                     Image(systemName: "arrow.up.forward")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
-                        .frame(width: 24, height: 22)
-                        .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
+                        .frame(width: 30, height: 22)
+                        .background(Capsule().fill(.white.opacity(0.12)))
                 }
                 .buttonStyle(.plain)
                 .help(openHelp)
