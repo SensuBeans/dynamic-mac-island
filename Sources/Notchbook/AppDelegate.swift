@@ -51,6 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var observerTokens: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
 
+    /// Thread-safe snapshot of the island's built-in Terminal-tab shells,
+    /// `(sessionID, shellPid)`. `TerminalSessionsModel.sessions` is main-only, but
+    /// `AgentSessionsModel` reads this on its own `ioQueue` to recognize a Claude
+    /// session hosted inside the island — so the snapshot is updated on main and
+    /// read under a lock.
+    private let builtinShellLock = NSLock()
+    private var builtinShellSnapshot: [(UUID, Int32)] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
@@ -135,7 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.earBoundaryX = { [weak self] in
             guard let self else { return .infinity }
-            return self.host.islandRect().minX + NotchMetrics.wing + self.metrics.notchWidth
+            return self.host.islandRect().minX + self.metrics.notchWidth
         }
         host.frame = NSRect(origin: .zero, size: metrics.windowFrame.size)
         host.autoresizingMask = [.width, .height]
@@ -176,6 +184,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         setupToasts()
+
+        // Feed the agent model the island's built-in shells (main-mutated,
+        // ioQueue-read) so a Claude session running inside the notch's own
+        // Terminal tab resolves to `.notch` and matches its exact session. Wire
+        // the snapshot BEFORE start() so the initial scan can already see it.
+        agentSessions.builtinShellPids = { [weak self] in
+            guard let self else { return [] }
+            self.builtinShellLock.lock(); defer { self.builtinShellLock.unlock() }
+            return self.builtinShellSnapshot
+        }
+        terminalSessions.$sessions
+            .sink { [weak self] sessions in
+                guard let self else { return }
+                let pids = sessions.compactMap { s -> (UUID, Int32)? in
+                    let pid = s.view.process.shellPid
+                    return pid > 0 ? (s.id, pid) : nil
+                }
+                self.builtinShellLock.lock()
+                self.builtinShellSnapshot = pids
+                self.builtinShellLock.unlock()
+            }
+            .store(in: &cancellables)
 
         // Claude Code agent sessions: watch ~/.claude/projects, toast on
         // Done / Interrupted transitions (suppressed while already viewing
@@ -269,7 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the fake notch zone on the menu bar (non-notch screens).
                 self.hoverIsland(true)
             } else {
-                let earX = islandScreen.minX + NotchMetrics.wing + self.metrics.notchWidth
+                let earX = islandScreen.minX + self.metrics.notchWidth
                 self.setEarHover(mouse.x > earX && islandScreen.contains(mouse))
             }
         }

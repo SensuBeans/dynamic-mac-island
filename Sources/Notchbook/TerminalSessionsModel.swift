@@ -58,6 +58,15 @@ final class TerminalSessionsModel: ObservableObject {
         selectedID = sessions.last?.id
     }
 
+    /// Send a carriage return to a built-in session's shell — accepts the
+    /// highlighted (default) option of a Claude Code permission prompt running
+    /// inside the island's own Terminal tab, the in-app analogue of
+    /// `AgentTerminalControl.approve`.
+    func sendReturn(to id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return }
+        session.view.send(txt: "\r")
+    }
+
     /// Terminate a session's shell and drop it, reselecting a neighbour.
     func closeSession(id: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }

@@ -82,7 +82,8 @@ struct AgentSession: Identifiable {
     var outputTokens: Int     // running sum across assistant entries
     var messageCount: Int
     var cwd: String           // full path (for jump-back)
-    var tty: String?          // resolved lazily from pid at focus/approve time
+    var tty: String?          // controlling tty, short form ("ttys003"); nil if headless
+    var host: TerminalHost    // where the session's terminal lives (drives actions)
     var pid: Int?             // Claude Code process pid (from ~/.claude/sessions)
     var name: String?         // friendly session name ("core-00")
 
@@ -169,6 +170,14 @@ final class AgentSessionsModel: ObservableObject {
     /// Arguments: (session carrying the NEW state, the OLD state).
     var onTransition: ((AgentSession, AgentState) -> Void)?
 
+    /// Injected by AppDelegate: the island's own built-in Terminal-tab shells as
+    /// `(sessionID, shellPid)`. Lets terminal-identity resolution recognize a
+    /// Claude session hosted inside the notch and match its exact tab. Called on
+    /// `ioQueue`, so AppDelegate must return a thread-safe snapshot (the model
+    /// has no reference to `TerminalSessionsModel`, matching the callback idiom
+    /// of `onTransition`). Default: no built-in shells.
+    var builtinShellPids: () -> [(UUID, Int32)] = { [] }
+
     // MARK: State constants (spec §2, tunable)
 
     private let workingWindow: TimeInterval = 10      // fresh message => working
@@ -206,6 +215,14 @@ final class AgentSessionsModel: ObservableObject {
     private var sessionStates: [String: (state: AgentState, since: Date)] = [:]
     /// Complete sessions the user has acknowledged. Touched only on `ioQueue`.
     private var acknowledgedCompleteIDs: Set<String> = []
+    /// Resolved terminal identity per live pid — tty and process ancestry never
+    /// change for a live pid, so resolve once (a few syscalls) and reuse on every
+    /// 1.5 s tick. Guarded by the sessionId it was resolved for, so a recycled pid
+    /// (old process died, new session reused the number) re-resolves fresh.
+    /// Pruned to currently-live pids each rebuild. Touched only on `ioQueue`.
+    private var identityCache: [Int32: (sid: String, identity: TerminalIdentity)] = [:]
+    /// This app's pid, for spotting sessions hosted in the island's own terminal.
+    private let selfPid = getpid()
 
     private var stream: FSEventStreamRef?
     private var timer: DispatchSourceTimer?
@@ -233,17 +250,29 @@ final class AgentSessionsModel: ObservableObject {
         timer = nil
     }
 
-    /// Raise the Terminal tab running this session. Off-main — AppleScript
-    /// round-trips can take a beat.
-    func focus(_ session: AgentSession) {
-        guard let pid = session.pid else { return }
-        controlQueue.async { AgentTerminalControl.focus(pid: pid) }
+    /// Raise the Terminal.app tab running this session (host `.terminalApp`;
+    /// `.notch`/`.other` are routed in the view). Off-main — AppleScript
+    /// round-trips can take a beat. Reuses the already-resolved tty, falling back
+    /// to a `ps` lookup only when it's nil. `missed(true)` on the main queue when
+    /// the tab couldn't be found, so the caller can surface a toast.
+    func focus(_ session: AgentSession, missed: @escaping (Bool) -> Void = { _ in }) {
+        guard let pid = session.pid else { missed(false); return }
+        let ttyPath = session.tty.map { "/dev/\($0)" }
+        controlQueue.async {
+            let outcome = AgentTerminalControl.focus(pid: pid, ttyPath: ttyPath)
+            DispatchQueue.main.async { missed(outcome == .notFound) }
+        }
     }
 
-    /// Accept the session's pending permission prompt (Return to its tab).
-    func approve(_ session: AgentSession) {
-        guard let pid = session.pid else { return }
-        controlQueue.async { AgentTerminalControl.approve(pid: pid) }
+    /// Accept the session's pending permission prompt by sending Return to its
+    /// Terminal.app tab (host `.terminalApp`). `missed(true)` when the tab is gone.
+    func approve(_ session: AgentSession, missed: @escaping (Bool) -> Void = { _ in }) {
+        guard let pid = session.pid else { missed(false); return }
+        let ttyPath = session.tty.map { "/dev/\($0)" }
+        controlQueue.async {
+            let outcome = AgentTerminalControl.approve(pid: pid, ttyPath: ttyPath)
+            DispatchQueue.main.async { missed(outcome == .notFound) }
+        }
     }
 
     /// Called when the Agents tab is viewed — clears the "recent complete"
@@ -371,6 +400,11 @@ final class AgentSessionsModel: ObservableObject {
         let now = Date()
         let metas = readSessionMetas()   // live terminals, by sessionId
 
+        // Drop identity-cache entries for pids no longer live (keyed by pid, so a
+        // recycled pid is also caught by the sessionId guard in resolveIdentity).
+        let livePids = Set(metas.values.map { Int32($0.pid) })
+        identityCache = identityCache.filter { livePids.contains($0.key) }
+
         // Drop parsers whose transcript file vanished.
         for (path, _) in parsers where !FileManager.default.fileExists(atPath: path) {
             parsers.removeValue(forKey: path)
@@ -422,8 +456,10 @@ final class AgentSessionsModel: ObservableObject {
             }
             let since = sessionStates[id]!.since
 
-            built.append((makeSession(id: id, parser: p, meta: meta, state: resolved,
-                                      since: since, lastActivity: lastActivity ?? since),
+            let identity = meta.map { resolveIdentity(pid: $0.pid, sid: id) } ?? .none
+            built.append((makeSession(id: id, parser: p, meta: meta, identity: identity,
+                                      state: resolved, since: since,
+                                      lastActivity: lastActivity ?? since),
                           prev?.state))
         }
         // Forget state for sessions that closed.
@@ -493,16 +529,21 @@ final class AgentSessionsModel: ObservableObject {
         return out
     }
 
-    /// Fold the authoritative live status over the transcript-derived state.
-    /// Interrupt (from the transcript) wins; then busy/waiting from the process;
-    /// "idle" defers to the transcript (which distinguishes complete vs idle).
-    private func applyStatus(base: AgentState, meta: SessionMeta?) -> AgentState {
-        guard let meta, base != .interrupted else { return base }
-        switch meta.status {
-        case "busy":    return .working
-        case "waiting": return .waiting
-        default:        return base
+    /// Cached terminal-identity lookup (see `identityCache`). Resolves via
+    /// syscalls only — never spawns — and reuses the result for a live pid. The
+    /// stored sessionId guards against pid recycling: if this pid now belongs to
+    /// a different session, the stale entry is discarded and re-resolved.
+    private func resolveIdentity(pid: Int, sid: String) -> TerminalIdentity {
+        let key = Int32(pid)
+        if let hit = identityCache[key], hit.sid == sid { return hit.identity }
+        let identity = TerminalIdentity.resolve(pid: key, selfPid: selfPid,
+                                                builtinShellPids: builtinShellPids())
+        // Don't cache an unresolved notch session (the built-in shell list may not
+        // have bubbled in yet) — let the next tick resolve it once the tab exists.
+        if identity.host != .none || identity.tty != nil {
+            identityCache[key] = (sid, identity)
         }
+        return identity
     }
 
     private func jsonlFiles() -> [String] {
@@ -664,7 +705,7 @@ final class AgentSessionsModel: ObservableObject {
     }
 
     private func makeSession(id: String, parser p: FileParser?, meta: SessionMeta?,
-                             state: AgentState, since: Date,
+                             identity: TerminalIdentity, state: AgentState, since: Date,
                              lastActivity: Date) -> AgentSession {
         let (display, window) = Self.resolveModel(p?.latestModel ?? nil,
                                                   observedContextTokens: p?.maxContextTokens ?? 0)
@@ -692,7 +733,8 @@ final class AgentSessionsModel: ObservableObject {
             outputTokens: p?.outputTokens ?? 0,
             messageCount: p?.messageCount ?? 0,
             cwd: cwd,
-            tty: nil,
+            tty: identity.tty,
+            host: identity.host,
             pid: meta?.pid,
             name: meta?.name)
     }

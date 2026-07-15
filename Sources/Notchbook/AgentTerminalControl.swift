@@ -12,7 +12,13 @@ import Foundation
 /// their own scripting dictionaries.
 enum AgentTerminalControl {
 
-    /// The session process's controlling terminal → `/dev/ttysNNN`.
+    /// Result of a control attempt, so the caller can surface a "tab not found"
+    /// toast instead of a silent no-op.
+    enum Outcome { case ok, notFound, noTTY }
+
+    /// The session process's controlling terminal → `/dev/ttysNNN`. Fallback for
+    /// when the model hasn't resolved the tty yet; the syscall path in
+    /// `TerminalIdentity` is preferred and spawns nothing.
     static func tty(forPID pid: Int) -> String? {
         guard let raw = runProcess("/bin/ps", ["-o", "tty=", "-p", "\(pid)"])?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -20,18 +26,26 @@ enum AgentTerminalControl {
         return raw.hasPrefix("/dev/") ? raw : "/dev/\(raw)"
     }
 
-    /// Raise Terminal, its window, and select the tab owning `pid`.
-    static func focus(pid: Int) {
-        guard let tty = tty(forPID: pid) else { return }
-        _ = runOSA(script: Self.focusScript, arg: tty)
+    /// Raise Terminal, its window, and select the tab owning `pid`. Prefers the
+    /// already-resolved `ttyPath` (`/dev/ttysNNN`); spawns `ps` only if it's nil.
+    @discardableResult
+    static func focus(pid: Int, ttyPath: String? = nil) -> Outcome {
+        run(script: Self.focusScript, pid: pid, ttyPath: ttyPath)
     }
 
     /// Send a Return to the tab owning `pid` — selects the highlighted (default,
     /// "allow once") option of a Claude Code permission prompt. Does not steal
     /// focus; the keystroke goes straight to that tab's tty.
-    static func approve(pid: Int) {
-        guard let tty = tty(forPID: pid) else { return }
-        _ = runOSA(script: Self.approveScript, arg: tty)
+    @discardableResult
+    static func approve(pid: Int, ttyPath: String? = nil) -> Outcome {
+        run(script: Self.approveScript, pid: pid, ttyPath: ttyPath)
+    }
+
+    private static func run(script: String, pid: Int, ttyPath: String?) -> Outcome {
+        guard let tty = ttyPath ?? tty(forPID: pid) else { return .noTTY }
+        let out = runOSA(script: script, arg: tty)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return out == "ok" ? .ok : .notFound
     }
 
     // MARK: - AppleScript

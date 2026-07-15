@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Agents
@@ -140,6 +141,8 @@ private struct UsageHeader: View {
 
 private struct AgentRow: View {
     @EnvironmentObject var agents: AgentSessionsModel
+    @EnvironmentObject var terminals: TerminalSessionsModel
+    @EnvironmentObject var state: NotchState
     let session: AgentSession
     let now: Date
 
@@ -171,6 +174,17 @@ private struct AgentRow: View {
                         .foregroundStyle(.white.opacity(0.9))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    // Session name ("core-00") — the primary discriminator when
+                    // several sessions share one cwd (the user's parallel-terminal
+                    // workflow). Dim + mono so it reads as an identifier, distinct
+                    // from the branch beside it.
+                    if let name = session.name, name != session.project {
+                        Text(name)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                     if let branch = session.gitBranch {
                         Text(branch)
                             .font(.system(size: 10))
@@ -198,6 +212,7 @@ private struct AgentRow: View {
                             .foregroundStyle(.white.opacity(0.4))
                             .monospacedDigit()
                     }
+                    terminalTag
                     Spacer(minLength: 4)
                     contextLabel
                 }
@@ -220,15 +235,53 @@ private struct AgentRow: View {
     // Working-state pulse target (animates between 0.35 and 1).
     @State private var pulse: Double = 1
 
-    /// Trailing actions. A waiting session (permission prompt / your turn) gets a
-    /// prominent green Approve — one click sends Return to its Terminal tab and
-    /// accepts the default option. Any session with a known process gets Open
-    /// (jump to its terminal), shown on hover for non-waiting rows.
+    /// The session's terminal identity — a small mono tty tag (`⌗ ttys003`) or
+    /// `notch` for a session hosted in the island's own Terminal tab. Nothing for
+    /// a headless / unknown host (`.none`).
+    @ViewBuilder
+    private var terminalTag: some View {
+        if let tag = terminalTagText {
+            HStack(spacing: 2) {
+                Image(systemName: tag.symbol).font(.system(size: 8))
+                Text(tag.text).font(.system(size: 9, design: .monospaced))
+            }
+            .foregroundStyle(.white.opacity(0.4))
+            .padding(.leading, 4)
+        }
+    }
+
+    private var terminalTagText: (symbol: String, text: String)? {
+        switch session.host {
+        case .notch:                       return ("sparkle", "notch")
+        case .terminalApp, .other:         return session.tty.map { ("terminal", $0) }
+        case .none:                        return nil
+        }
+    }
+
+    /// Whether a green Approve makes sense: only hosts we can actually send a
+    /// Return to — Terminal.app (Apple Events) or the built-in notch tab (PTY).
+    private var canApprove: Bool {
+        switch session.host {
+        case .terminalApp, .notch: return true
+        case .other, .none:        return false
+        }
+    }
+
+    /// Whether Open can do anything: Terminal.app tab, the notch tab, or (as an
+    /// activate-the-app fallback) another recognized host. Not for `.none`.
+    private var canOpen: Bool {
+        session.pid != nil && session.host != .none
+    }
+
+    /// Trailing actions, host-aware. A waiting session gets a prominent green
+    /// Approve (only where a Return can land); any hosted session gets Open. For
+    /// `.other` Open just activates the app; for `.none` no buttons render, so a
+    /// headless session shows no dead controls.
     @ViewBuilder
     private var actions: some View {
         HStack(spacing: 5) {
-            if session.state == .waiting, session.pid != nil {
-                Button { agents.approve(session) } label: {
+            if session.state == .waiting, canApprove {
+                Button { approve() } label: {
                     Image(systemName: "checkmark")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.black)
@@ -238,8 +291,8 @@ private struct AgentRow: View {
                 .buttonStyle(.plain)
                 .help("Approve — send Return to accept the prompt")
             }
-            if session.pid != nil, hovered || session.needsAttention {
-                Button { agents.focus(session) } label: {
+            if canOpen, hovered || session.needsAttention {
+                Button { open() } label: {
                     Image(systemName: "arrow.up.forward")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
@@ -247,10 +300,61 @@ private struct AgentRow: View {
                         .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(0.12)))
                 }
                 .buttonStyle(.plain)
-                .help("Jump to this session's terminal")
+                .help(openHelp)
             }
         }
         .animation(.easeOut(duration: 0.12), value: hovered)
+    }
+
+    private var openHelp: String {
+        if case .other(let app) = session.host { return "Open \(app)" }
+        return "Jump to this session's terminal"
+    }
+
+    // MARK: Host-aware actions
+
+    /// Jump to the session's terminal. Terminal.app raises the tab (toast if it's
+    /// gone); the notch switches to its Terminal tab and selects the session;
+    /// `.other` activates the hosting app as a best-effort fallback.
+    private func open() {
+        switch session.host {
+        case .terminalApp:
+            agents.focus(session) { missed in if missed { missedToast() } }
+        case .notch(let sid):
+            state.currentTab = .terminal
+            terminals.selectedID = sid
+        case .other(let app):
+            activateApp(named: app)
+        case .none:
+            break
+        }
+    }
+
+    /// Answer the pending permission prompt in place — Return to the Terminal.app
+    /// tab, or a carriage return straight to the built-in notch session's PTY.
+    private func approve() {
+        switch session.host {
+        case .terminalApp:
+            agents.approve(session) { missed in if missed { missedToast() } }
+        case .notch(let sid):
+            terminals.sendReturn(to: sid)
+        case .other, .none:
+            break
+        }
+    }
+
+    private func missedToast() {
+        state.showToast(NotchToast(icon: "terminal", title: "Terminal tab not found",
+                                   color: .gray))
+    }
+
+    /// Best-effort activate a recognized non-scriptable host app (iTerm2, Code…).
+    private func activateApp(named app: String) {
+        let match = NSWorkspace.shared.runningApplications.first {
+            $0.activationPolicy == .regular &&
+            ($0.localizedName == app || $0.executableURL?.lastPathComponent == app)
+        }
+        match?.activate(options: [.activateIgnoringOtherApps])
     }
 
     private var modelBadge: some View {
