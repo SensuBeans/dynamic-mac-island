@@ -193,7 +193,8 @@ private struct ServerRow: View {
                 // glyph + tint (green ▶ start / faint ■ stop), not a heavy fill.
                 Image(systemName: server.running ? "stop.fill" : "play.fill")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(server.running ? Color.white.opacity(0.7) : Color.green)
+                    .foregroundStyle(server.running ? Color(red: 0.96, green: 0.38, blue: 0.38)
+                                                     : Color.green)
                     .frame(width: 30, height: 22)
                     .background(Capsule().fill(.white.opacity(0.12)))
             }
