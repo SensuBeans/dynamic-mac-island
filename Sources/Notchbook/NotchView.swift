@@ -99,6 +99,11 @@ struct NotchView: View {
         // on no-notch Macs; below the physical notch on MacBooks.
         let navTop: CGFloat = metrics.hasNotch
             ? metrics.notchHeight + gap : 2
+        // No-notch Macs: the dock shrinks to FIT inside the menu bar, so the
+        // panel below never has to step aside for it.
+        let dockHeight: CGFloat = metrics.hasNotch
+            ? NotchMetrics.navIslandHeight
+            : max(18, metrics.menuBarHeight - 4)
         let totalExpandedHeight = metrics.notchHeight + gap
             + NotchMetrics.navIslandHeight + gap + expandedSize.height
         return ZStack(alignment: .top) {
@@ -191,10 +196,10 @@ struct NotchView: View {
                 .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
                                             style: .continuous))
                 .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
-                // The dock's slot only exists while the dock is out: hidden,
-                // the panel hugs the notch; revealed, it steps down clear of
-                // the dock (which lives up in the menu-bar strip).
-                .padding(.top, navShown
+                // Notch Macs: the panel steps down while the dock is out.
+                // No-notch Macs: the dock fits inside the menu bar above the
+                // panel's normal top, so the panel NEVER shifts.
+                .padding(.top, navShown && metrics.hasNotch
                          ? navTop + NotchMetrics.navIslandHeight + gap
                          : metrics.notchHeight + gap)
                 // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
@@ -212,7 +217,7 @@ struct NotchView: View {
             // rides the bubble-pop (it used to visibly "grow" with the
             // island) — it fades/slides in place at constant size.
             navIsland
-                .frame(height: NotchMetrics.navIslandHeight)
+                .frame(height: dockHeight)
                 .padding(.top, navTop)
                 .opacity(state.isExpanded && navShown ? 1 : 0)
                 .offset(y: navShown ? 0 : -10)
@@ -735,18 +740,21 @@ struct NotchView: View {
         let selected = state.currentTab == tab
         let targeted = swipeTarget == tab
         let isDragging = draggingTab == tab
+        // Chips scale down when the dock lives inside the menu bar (no-notch).
+        let chipFont: CGFloat = metrics.hasNotch ? 11 : 10
+        let chipHeight: CGFloat = metrics.hasNotch ? 24 : 16
         return HStack(spacing: 4) {
             Image(systemName: tab.icon)
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: chipFont, weight: .medium))
             if selected {
                 Text(tab.title)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: chipFont, weight: .semibold))
             }
         }
         .foregroundStyle(selected ? .white
                          : .white.opacity(targeted ? 0.9 : 0.45))
         .padding(.horizontal, selected ? 10 : 8)
-        .frame(height: 24)
+        .frame(height: chipHeight)
         .background(
             Capsule().fill(.white.opacity(
                 isDragging ? 0.3 : (selected ? 0.16 : (targeted ? 0.09 : 0))))
