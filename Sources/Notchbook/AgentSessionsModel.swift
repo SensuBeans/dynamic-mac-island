@@ -586,7 +586,7 @@ final class AgentSessionsModel: ObservableObject {
 
         updateAckCount(ordered)
         publish(ordered)
-        pruneModelSpool(now: now)
+        pruneModelSpool(now: now, liveIDs: liveIDs)
     }
 
     /// Poll the statusline-written usage spool (tiny file, cheap on the 1.5 s
@@ -811,20 +811,29 @@ final class AgentSessionsModel: ObservableObject {
         return id
     }
 
-    /// Drop model-spool files older than an hour: a live session's statusline
-    /// rewrites its file on every render, so a stale file belongs to a session
-    /// that's gone. Keeps the spool dir from accumulating a file per session
-    /// ever run. Throttled — the dir is tiny, but no need to walk it every tick.
-    private func pruneModelSpool(now: Date) {
+    /// Prune orphaned model-spool files. Liveness — NOT age — is the deletion
+    /// criterion: a live session may sit idle for hours (its statusline only
+    /// re-renders on activity), so its spool file goes stale on disk while the
+    /// session is very much alive. Deleting on age alone would strip that
+    /// session's badge back to the transcript's lagging model — the exact
+    /// inaccuracy this spool exists to kill. So we keep every file whose sid is
+    /// a currently-live session regardless of mtime, and only reap files for
+    /// sids NOT in the live set, and even then only past a 48h long-stop (so a
+    /// crashed/force-killed session that never cleaned up eventually clears,
+    /// without churning files a session might still resume into). Throttled —
+    /// the dir is tiny, but no need to walk it every tick.
+    private func pruneModelSpool(now: Date, liveIDs: Set<String>) {
         guard now.timeIntervalSince(lastModelPrune) > 300 else { return }
         lastModelPrune = now
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: modelsURL.path)
         else { return }
         for name in names where name.hasSuffix(".json") {
+            let sid = String(name.dropLast(".json".count))
+            if liveIDs.contains(sid) { continue }   // live session: never prune on age
             let url = modelsURL.appendingPathComponent(name)
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                let mtime = attrs[.modificationDate] as? Date,
-               now.timeIntervalSince(mtime) > 3600 {
+               now.timeIntervalSince(mtime) > 48 * 3600 {
                 try? FileManager.default.removeItem(at: url)
             }
         }
