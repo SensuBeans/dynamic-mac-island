@@ -1798,18 +1798,29 @@ struct EqualizerBars: View {
     private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        HStack(spacing: barWidth) {
-            ForEach(0..<barCount, id: \.self) { i in
-                Capsule()
-                    .fill(color)
-                    .frame(width: barWidth, height: height(i))
-                    .frame(height: maxHeight, alignment: .center)
+        let gap = barWidth
+        let w = CGFloat(barCount) * barWidth + CGFloat(max(0, barCount - 1)) * gap
+        // Draw the bars in a Canvas with a FIXED frame. Only the pixels inside
+        // redraw on each 20fps tick — the view's geometry never changes — so the
+        // refresh can't yank the bars out of the island's own move animation.
+        // (The old HStack rebuilt a row of Capsule views every tick and carried
+        // its own `.animation`, so the bars escaped the parent transaction and
+        // arrived early or lagged as the panel slid.) Canvas redraws off the
+        // Timer-fed `t`/`levels` state — no display link, so it keeps ticking
+        // inside the non-key overlay panel.
+        return Canvas { ctx, size in
+            _ = t  // touch state so the closure re-runs each tick
+            for i in 0..<barCount {
+                let h = max(barWidth, height(i))
+                let x = CGFloat(i) * (barWidth + gap)
+                let rect = CGRect(x: x, y: (size.height - h) / 2, width: barWidth, height: h)
+                ctx.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(color))
             }
         }
+        .frame(width: w, height: maxHeight)
         .onReceive(timer) { _ in
             if animating, levels == nil { t += 1.0 / 20.0 }
         }
-        .animation(.linear(duration: 0.09), value: levels)
     }
 
     private func height(_ i: Int) -> CGFloat {
