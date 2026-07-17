@@ -503,20 +503,43 @@ struct NotchView: View {
         .frame(height: metrics.notchHeight, alignment: .center)
     }
 
-    /// Claude's starburst mark, drawn as radiating tapered rays — recognizable
-    /// at glyph size where a bitmap logo would smear. Inherits foregroundStyle.
-    private struct ClaudeSpark: View {
-        var size: CGFloat = 11
+    /// Clawd — Claude Code's crab mascot, as original 8-bit pixel art (the
+    /// mascot's own blocky style, which also stays crisp at pill size).
+    /// `#` pixels take the tint (Claude terracotta), `o` pixels are the eyes.
+    private struct ClawdMark: View {
+        var size: CGFloat = 13  // overall height; the crab is a bit wider
+        var tint: Color
+
+        private static let rows: [String] = [
+            "#.#.....#.#",  // open pincer prongs
+            ".#.......#.",  // pincer joints
+            "..#.....#..",  // arms angling in
+            "..#######..",  // shell top
+            ".##o###o##.",  // eyes
+            "###########",  // shell, full width
+            ".#########.",
+            "..#.#.#.#..",  // leg stubs
+        ]
+
         var body: some View {
-            ZStack {
-                ForEach(0..<8, id: \.self) { i in
-                    Capsule()
-                        .frame(width: size * 0.17, height: size * 0.46)
-                        .offset(y: -size * 0.27)
-                        .rotationEffect(.degrees(Double(i) * 45))
+            Canvas { ctx, sz in
+                let rows = Self.rows
+                let cols = CGFloat(rows[0].count)
+                let px = min(sz.width / cols, sz.height / CGFloat(rows.count))
+                let x0 = (sz.width - px * cols) / 2
+                let y0 = (sz.height - px * CGFloat(rows.count)) / 2
+                for (r, row) in rows.enumerated() {
+                    for (c, ch) in row.enumerated() where ch != "." {
+                        // +0.4 overlap so grid seams never show at non-integral
+                        // pixel sizes.
+                        let rect = CGRect(x: x0 + CGFloat(c) * px,
+                                          y: y0 + CGFloat(r) * px,
+                                          width: px + 0.4, height: px + 0.4)
+                        ctx.fill(Path(rect), with: .color(ch == "o" ? .white : tint))
+                    }
                 }
             }
-            .frame(width: size, height: size)
+            .frame(width: size * 1.375, height: size)
         }
     }
 
@@ -548,8 +571,7 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    ClaudeSpark(size: 11)
-                        .foregroundStyle(tint)
+                    ClawdMark(size: 13, tint: tint)
                         .opacity(pulse ? 0.35 : 1)
                         .onAppear { pulse = true }
                         .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
