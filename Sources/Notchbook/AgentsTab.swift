@@ -9,6 +9,7 @@ import SwiftUI
 struct AgentsTab: View {
     @EnvironmentObject var agents: AgentSessionsModel
     @EnvironmentObject var state: NotchState
+    @EnvironmentObject var terminals: TerminalSessionsModel
 
     /// One shared clock so every row's "time-in-state" and context freshness
     /// advance together without a timer per row.
@@ -58,6 +59,14 @@ struct AgentsTab: View {
             Text("No Claude Code sessions running")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.5))
+            // Neutral launch button (not an accent fill — green/amber/orange are
+            // reserved for session state in this tab). Opens the notch's own
+            // terminal so a `claude` started there comes back as a .notch row.
+            LaunchButton(icon: "plus", label: "Launch Terminal") {
+                state.currentTab = .terminal
+                terminals.newSession()
+            }
+            .help("New terminal in the notch — start a Claude session")
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

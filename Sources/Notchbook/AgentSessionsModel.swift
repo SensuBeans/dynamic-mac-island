@@ -772,6 +772,12 @@ final class AgentSessionsModel: ObservableObject {
                   let sid = obj["sessionId"] as? String,
                   let pid = (obj["pid"] as? NSNumber)?.int32Value,
                   kill(pid, 0) == 0 else { continue }
+            // Claude Code 2.1+ pre-warms `bg-spare` processes and runs headless
+            // background jobs — both write a `<pid>.json` with kind == "bg".
+            // They're not terminals the user "has open" (nothing to jump to) and
+            // would just inflate the list, so show only interactive sessions.
+            // Files with no `kind` are older Claude Code — treat as interactive.
+            if (obj["kind"] as? String) == "bg" { continue }
             out[sid] = SessionMeta(pid: Int(pid),
                                    name: obj["name"] as? String,
                                    status: obj["status"] as? String ?? "idle",

@@ -734,7 +734,7 @@ private struct InstrumentalDots: View {
     }
 }
 
-private struct LaunchButton: View {
+struct LaunchButton: View {
     let icon: String
     let label: String
     let action: () -> Void
