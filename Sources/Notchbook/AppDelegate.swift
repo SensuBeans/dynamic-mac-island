@@ -869,7 +869,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Left boundary: trailing edge of the frontmost app's last menu title.
+        // Unknown (our own menu-bar-less app frontmost at launch, AX hiccup):
+        // SKIP the whole update — a fallback left edge of "screen edge" once
+        // computed a -280pt nudge that flung the pill over the app menus.
         var leftEdge = f.minX + 8
+        var leftKnown = false
         if AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication {
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             var barRef: CFTypeRef?
@@ -889,6 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                        AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
                        AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) {
                         leftEdge = max(leftEdge, pos.x + size.width)
+                        leftKnown = true
                     }
                 }
             }
@@ -902,17 +907,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 || (pomodoro.isRunning && settings.timerCountdownEar),
             toast: state.toast != nil,
             withAgent: agentSessions.hasActivePill).width
+        guard leftKnown else { return }
+
         // collapsedSize already pads its ears generously (agentEar is wider
         // than the rendered capsule), so only a whisker of margin here — too
         // much and the pill hides on bars it would actually fit.
         let crowded = rightEdge - leftEdge < pillWidth + 4
         if state.pillCrowded != crowded { state.pillCrowded = crowded }
-        guard !crowded else { return }
 
         // Center of the free stretch, as an offset from screen-center. Only
         // ever nudge LEFT (a crowded left side must not push the pill into
-        // the status items), and ignore sub-2pt jitter so it doesn't wander.
-        let nudge = min(0, (leftEdge + rightEdge) / 2 - f.midX)
+        // the status items), never so far the pill crosses the menus, and
+        // ignore sub-2pt jitter so it doesn't wander. Updated even while
+        // crowded/hidden: the same spot is the click-to-open target, and
+        // mid-gap is the one place that fights neither menus nor icons.
+        let target = (leftEdge + rightEdge) / 2 - f.midX
+        let floor = leftEdge + 4 + pillWidth / 2 - f.midX
+        let nudge = min(0, max(target, floor))
         if abs(nudge - state.pillNudge) > 2 { state.pillNudge = nudge }
     }
 

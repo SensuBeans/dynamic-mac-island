@@ -203,10 +203,12 @@ struct NotchView: View {
                 .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
                 // Notch Macs: the panel steps down while the dock is out.
                 // No-notch Macs: the dock fits inside the menu bar above the
-                // panel's normal top, so the panel NEVER shifts.
-                .padding(.top, navShown && metrics.hasNotch
-                         ? navTop + NotchMetrics.navIslandHeight + gap
-                         : metrics.notchHeight + gap)
+                // panel's normal top, so the panel NEVER shifts — it hangs a
+                // touch below the menu bar for breathing room.
+                .padding(.top, metrics.hasNotch
+                         ? (navShown ? navTop + NotchMetrics.navIslandHeight + gap
+                                     : metrics.notchHeight + gap)
+                         : metrics.menuBarHeight + gap + 4)
                 // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
                 .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
                 .opacity(state.isExpanded ? 1 : 0)
