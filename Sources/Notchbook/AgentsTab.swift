@@ -210,28 +210,32 @@ private struct AgentRow: View {
                 }
 
                 // State label + time-in-state, or output tokens on hover.
-                HStack(spacing: 5) {
-                    if hovered {
-                        Text("↑ \(tokenString(session.outputTokens)) out")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .monospacedDigit()
-                    } else if session.state == .waiting, let pending = session.pendingTool {
-                        // Approve preview: show WHAT is being approved instead of
-                        // "Waiting · 12s". Same 9pt line, no extra row.
-                        approvePreview(pending)
-                    } else {
-                        Text(session.state.label)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(session.state.tint.opacity(0.9))
-                        Text("· \(timeInState)")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white.opacity(0.4))
-                            .monospacedDigit()
+                // Second line: on a waiting row, the FULL pending command (wraps,
+                // wins over the hover→tokens flip so you can always read what
+                // you're approving); otherwise state + time-in-state, or output
+                // tokens on hover.
+                if session.state == .waiting, let pending = session.pendingTool {
+                    approvePreview(pending)
+                } else {
+                    HStack(spacing: 5) {
+                        if hovered {
+                            Text("↑ \(tokenString(session.outputTokens)) out")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .monospacedDigit()
+                        } else {
+                            Text(session.state.label)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(session.state.tint.opacity(0.9))
+                            Text("· \(timeInState)")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.4))
+                                .monospacedDigit()
+                        }
+                        terminalTag
+                        Spacer(minLength: 4)
+                        contextLabel
                     }
-                    terminalTag
-                    Spacer(minLength: 4)
-                    contextLabel
                 }
 
                 contextMeter
@@ -267,26 +271,27 @@ private struct AgentRow: View {
         }
     }
 
-    /// Replaces the "Waiting · 12s" state line on a `.waiting` row with the
-    /// pending tool call: `Bash · <command>` — tool name in orange semibold, the
-    /// detail (command / path / host) in dim mono, one line, middle-truncated so
-    /// a long command yields gracefully. No time-in-state here: the command is
-    /// the payload and the ✓ tooltip carries it in full — dropping the timer
-    /// keeps this to a single fixed-height line (the island's geometry is
-    /// sacred). Same 9pt row as the label it stands in for; adds no line.
+    /// Replaces the "Waiting · 12s" state line on a `.waiting` row with the pending
+    /// tool call, showing the ENTIRE command: `Bash · <command>` — tool name in
+    /// orange semibold, the full command (or path / host) in dim mono, wrapping
+    /// across as many lines as it needs so you can read exactly what you're about
+    /// to approve. The Agents list scrolls inside the fixed island panel, so a
+    /// taller waiting row grows the scroll content, never the island's outer
+    /// geometry. Built by Text concatenation so it wraps as one paragraph.
     @ViewBuilder
     private func approvePreview(_ pending: (name: String, detail: String)) -> some View {
-        Text(pending.name)
+        let head = Text(pending.name)
             .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(Color.orange.opacity(0.95))
-            .fixedSize()
-        if !pending.detail.isEmpty {
-            Text("· \(pending.detail)")
-                .font(.system(size: 9, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.55))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
+            .foregroundColor(.orange)
+        let detail = pending.detail.isEmpty
+            ? Text("")
+            : Text(" · ").font(.system(size: 9)).foregroundColor(.white.opacity(0.4))
+              + Text(pending.detail).font(.system(size: 9, design: .monospaced))
+                  .foregroundColor(.white.opacity(0.62))
+        (head + detail)
+            .lineSpacing(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var terminalTagText: (symbol: String, text: String)? {
@@ -348,8 +353,8 @@ private struct AgentRow: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: resumeCancelling)
     }
 
-    /// Approve tooltip — names the exact pending call (full detail, ≤200 chars)
-    /// so the user can read the whole command the row can only show truncated.
+    /// Approve tooltip — names the exact pending call (full command, ≤2000 chars).
+    /// The row already shows the whole command wrapped; this mirrors it on hover.
     private var approveHelp: String {
         if let p = session.pendingTool, !p.detail.isEmpty {
             return "Approve: \(p.name) \(p.detail)"

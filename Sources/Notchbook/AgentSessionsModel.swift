@@ -996,25 +996,25 @@ final class AgentSessionsModel: ObservableObject {
         }
     }
 
-    /// One-line, ≤200-char human detail for a pending tool call, per tool:
-    /// Bash → first line of the command (whitespace collapsed); Edit/Write/Read →
-    /// last two path components of file_path; WebFetch → the url's host; anything
-    /// else → "" (the name alone carries the preview).
+    /// Human detail for a pending tool call, per tool. Bash returns the ENTIRE
+    /// command (all lines preserved, only outer whitespace trimmed) so the
+    /// Approve row can show exactly what's being approved — the UI wraps it. A
+    /// generous 2000-char cap only guards against a pathological megabyte command
+    /// bloating the row; real commands are far shorter. Edit/Write/Read → last
+    /// two path components; WebFetch → the url's host; anything else → "".
     private static func toolDetail(name: String, input: [String: Any]) -> String {
-        func cap(_ s: String) -> String { String(s.prefix(200)) }
         switch name {
         case "Bash":
-            let cmd = (input["command"] as? String) ?? ""
-            let firstLine = cmd.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
-            let collapsed = firstLine.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            return cap(collapsed)
+            let cmd = ((input["command"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return String(cmd.prefix(2000))
         case "Edit", "Write", "Read", "NotebookEdit":
             let path = (input["file_path"] as? String) ?? (input["notebook_path"] as? String) ?? ""
             let parts = path.split(separator: "/").suffix(2)
-            return cap(parts.joined(separator: "/"))
+            return String(parts.joined(separator: "/").prefix(200))
         case "WebFetch":
             let url = (input["url"] as? String) ?? ""
-            return cap(URL(string: url)?.host ?? "")
+            return String((URL(string: url)?.host ?? "").prefix(200))
         default:
             return ""
         }
@@ -1259,7 +1259,7 @@ private final class FileParser {
     // the assistant produces a tool-less (final-text) turn.
     var pendingToolID: String?
     var pendingToolName = ""
-    var pendingToolDetail = ""   // pre-truncated to ≤200 chars
+    var pendingToolDetail = ""   // full command (Bash) / path / host; ≤2000 chars
 
     /// The unanswered tool call, if any — name + one-line detail. The model only
     /// surfaces this on `.waiting` rows (a working session's in-flight tool must
