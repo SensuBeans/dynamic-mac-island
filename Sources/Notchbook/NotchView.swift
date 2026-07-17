@@ -177,8 +177,15 @@ struct NotchView: View {
             }
 
             // Expanded: the nav bar and the content panel are each their
-            // OWN floating island, stacked below the notch.
+            // OWN floating island, stacked below the notch — nav on top,
+            // right under the notch, panel below it.
             VStack(spacing: gap) {
+                navIsland
+                    .frame(height: NotchMetrics.navIslandHeight)
+                    .opacity(navShown ? 1 : 0)
+                    .offset(y: navShown ? 0 : -10)
+                    .allowsHitTesting(navShown)
+                    .animation(.easeOut(duration: 0.18), value: navShown)
                 contentIsland(size: expandedSize)
                     .frame(width: expandedSize.width, height: expandedSize.height)
                     // Corner radius relaxes slightly in flight (34 hidden → 26
@@ -186,12 +193,6 @@ struct NotchView: View {
                     .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
                                                 style: .continuous))
                     .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
-                navIsland
-                    .frame(height: NotchMetrics.navIslandHeight)
-                    .opacity(navShown ? 1 : 0)
-                    .offset(y: navShown ? 0 : -10)
-                    .allowsHitTesting(navShown)
-                    .animation(.easeOut(duration: 0.18), value: navShown)
             }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
@@ -724,10 +725,10 @@ struct NotchView: View {
         return HStack(spacing: 4) {
             Image(systemName: tab.icon)
                 .font(.system(size: 11, weight: .medium))
-            if selected {
-                Text(tab.title)
-                    .font(.system(size: 11, weight: .semibold))
-            }
+            // Every chip carries its label — icon-only chips read as a
+            // guessing game once the tab count grows.
+            Text(tab.title)
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
         }
         .foregroundStyle(selected ? .white
                          : .white.opacity(targeted ? 0.9 : 0.45))

@@ -767,13 +767,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
             let mouse = NSEvent.mouseLocation
-            // The nav dock lives in the bottom strip of the island stack
-            // (screen coords are bottom-up); it shows only while the cursor
-            // is down there or a swipe is in flight.
-            let navZone = NSRect(x: visible.minX, y: visible.minY,
-                                 width: visible.width,
-                                 height: NotchMetrics.navIslandHeight
-                                     + NotchMetrics.islandGap + 16)
+            // The nav dock sits at the TOP of the island stack, right under
+            // the notch; it shows while the cursor is up there (notch or nav
+            // strip — screen coords are bottom-up, so that's near maxY) or a
+            // swipe is in flight.
+            let navHeight = self.metrics.notchHeight + NotchMetrics.islandGap
+                + NotchMetrics.navIslandHeight + 16
+            let navZone = NSRect(x: visible.minX, y: visible.maxY - navHeight,
+                                 width: visible.width, height: navHeight)
             let inNav = navZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
             // While the user is actively typing in a terminal (the panel is
