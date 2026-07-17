@@ -95,6 +95,10 @@ struct NotchView: View {
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
+        // Where the dock's top edge sits: pushed up into the menu-bar strip
+        // on no-notch Macs; below the physical notch on MacBooks.
+        let navTop: CGFloat = metrics.hasNotch
+            ? metrics.notchHeight + gap : 2
         let totalExpandedHeight = metrics.notchHeight + gap
             + NotchMetrics.navIslandHeight + gap + expandedSize.height
         return ZStack(alignment: .top) {
@@ -188,9 +192,11 @@ struct NotchView: View {
                                             style: .continuous))
                 .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
                 // The dock's slot only exists while the dock is out: hidden,
-                // the panel hugs the notch; revealed, it steps down for it.
-                .padding(.top, metrics.notchHeight + gap
-                         + (navShown ? NotchMetrics.navIslandHeight + gap : 0))
+                // the panel hugs the notch; revealed, it steps down clear of
+                // the dock (which lives up in the menu-bar strip).
+                .padding(.top, navShown
+                         ? navTop + NotchMetrics.navIslandHeight + gap
+                         : metrics.notchHeight + gap)
                 // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
                 .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
                 .opacity(state.isExpanded ? 1 : 0)
@@ -200,13 +206,14 @@ struct NotchView: View {
                 .allowsHitTesting(state.isExpanded)
                 .animation(.spring(response: 0.28, dampingFraction: 0.8), value: navShown)
 
-            // Nav dock: its own FIXED layer under the notch. Deliberately
-            // outside the panel's scaling stack so it never rides the
-            // bubble-pop (it used to visibly "grow" with the island) — it
-            // fades/slides in place at constant size.
+            // Nav dock: its own FIXED layer pushed up INTO the menu-bar strip
+            // (notch Macs keep it below the notch — the hardware would cover
+            // it). Deliberately outside the panel's scaling stack so it never
+            // rides the bubble-pop (it used to visibly "grow" with the
+            // island) — it fades/slides in place at constant size.
             navIsland
                 .frame(height: NotchMetrics.navIslandHeight)
-                .padding(.top, metrics.notchHeight + gap)
+                .padding(.top, navTop)
                 .opacity(state.isExpanded && navShown ? 1 : 0)
                 .offset(y: navShown ? 0 : -10)
                 .allowsHitTesting(state.isExpanded && navShown)
