@@ -86,12 +86,12 @@ struct NotchView: View {
         // so the standby pill is always visible and waiting to be hovered
         // (there, a toast still grows the pill itself into a bubble).
         let collapsedVisible = hasMedia || !metrics.hasNotch
-        // On the low-DPI second monitor, hide the pitch-black standby pill while
-        // Chrome is frontmost (browsing) so it doesn't sit over the page — but
-        // only when idle; the hover zone stays live so it still expands, and
-        // media / toasts still appear.
-        let hideStandby = !metrics.hasNotch && metrics.isLowDPI && state.chromeActive
-            && !hasMedia && !hasToast && !state.isExpanded
+        // Hide the pill (hover zone stays live) when: browsing in Chrome on
+        // the low-DPI monitor with an idle pill — or whenever the menu bar's
+        // free stretch is too crowded to fit it without overlapping.
+        let hideStandby = !metrics.hasNotch && !state.isExpanded
+            && (state.pillCrowded
+                || (metrics.isLowDPI && state.chromeActive && !hasMedia && !hasToast))
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap

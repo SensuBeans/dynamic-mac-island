@@ -122,6 +122,10 @@ final class NotchState: ObservableObject {
     /// centers in the EMPTY stretch of the menu bar (between the frontmost
     /// app's menus and the leftmost status item). 0 on notch Macs.
     @Published var pillNudge: CGFloat = 0
+    /// Pill mode: the menu bar's free stretch is too small for the pill's
+    /// current width (long menus / many status items) — hide it entirely
+    /// rather than overlap; the hover zone stays live.
+    @Published var pillCrowded = false
 
     private var toastWork: DispatchWorkItem?
     /// Default on-screen seconds for toasts whose caller doesn't specify one.

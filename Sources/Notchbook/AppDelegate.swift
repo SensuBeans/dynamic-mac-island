@@ -224,6 +224,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updatePillNudge()
         }
         nudgePoll?.tolerance = 5
+        // The pill's width changes with media/toast/agent state, and with it
+        // whether it still fits the free stretch — re-measure on transitions
+        // (async so the published value has settled first).
+        media.$nowPlaying.map { _ in }
+            .merge(with: media.$earHidden.map { _ in },
+                   state.$toast.map { _ in },
+                   agentSessions.$sessions.map { _ in })
+            .sink { [weak self] in
+                DispatchQueue.main.async { self?.updatePillNudge() }
+            }
+            .store(in: &cancellables)
 
         setupToasts()
 
@@ -828,9 +839,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var rightEdge = f.maxX - 8
         if let infos = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
             as? [[String: Any]] {
+            let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
             for w in infos {
                 guard let layer = w[kCGWindowLayer as String] as? Int,
                       layer == Int(CGWindowLevelForKey(.statusWindow)),  // status items
+                      // The island's own panel ALSO lives at .statusBar level —
+                      // seeing ourselves would clamp the gap to zero and hide
+                      // the pill forever.
+                      (w[kCGWindowOwnerPID as String] as? Int) != ownPID,
                       let b = w[kCGWindowBounds as String] as? [String: CGFloat],
                       let x = b["X"], let y = b["Y"], let h = b["Height"],
                       y >= 0, y + h <= barBottom,           // in the menu bar strip
@@ -866,11 +882,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // If the free stretch can't fit the pill's CURRENT width (some apps
+        // have long menus, some days more status items), the pill hides
+        // entirely rather than overlap — hover-expand stays live.
+        let pillWidth = m.collapsedSize(
+            withMedia: (media.nowPlaying != nil && !media.earHidden)
+                || (pomodoro.isRunning && settings.timerCountdownEar),
+            toast: state.toast != nil,
+            withAgent: agentSessions.hasActivePill).width
+        // collapsedSize already pads its ears generously (agentEar is wider
+        // than the rendered capsule), so only a whisker of margin here — too
+        // much and the pill hides on bars it would actually fit.
+        let crowded = rightEdge - leftEdge < pillWidth + 4
+        if state.pillCrowded != crowded { state.pillCrowded = crowded }
+        guard !crowded else { return }
+
         // Center of the free stretch, as an offset from screen-center. Only
         // ever nudge LEFT (a crowded left side must not push the pill into
-        // the status items), keep a floor so it can't cross the menus, and
-        // ignore sub-2pt jitter so the pill doesn't wander.
-        guard rightEdge - leftEdge > 120 else { return }
+        // the status items), and ignore sub-2pt jitter so it doesn't wander.
         let nudge = min(0, (leftEdge + rightEdge) / 2 - f.midX)
         if abs(nudge - state.pillNudge) > 2 { state.pillNudge = nudge }
     }
