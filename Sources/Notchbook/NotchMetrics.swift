@@ -18,10 +18,11 @@ struct NotchMetrics {
     static let islandGap: CGFloat = 6
     /// Height of the floating nav-bar island.
     static let navIslandHeight: CGFloat = 34
-    /// Resting gap between the nav bar and the content panel. Wider than
-    /// `islandGap` on purpose: the goo neck must fully pinch off here so the nav
-    /// reads as a separated capsule when shown, only fusing mid-transition.
-    static let navContentGap: CGFloat = 14
+    /// Resting gap between the nav bar and the content panel. Kept tight so the
+    /// nav reads as hugging the panel, but still wide enough that the goo neck
+    /// fully pinches off here — the nav reads as a separated capsule when shown,
+    /// only fusing mid-transition.
+    static let navContentGap: CGFloat = 9
 
     static let expandedContentSize = CGSize(width: 460, height: 158)
     /// Larger island used while the mirror is zoomed.

@@ -32,9 +32,13 @@ struct NotchView: View {
     /// audio sample — faster when the music is loud, frozen when paused.
     @State private var colorPhase: Double = 0
     /// Nav-bar reveal progress (0 = melted into the panel, 1 = separated
-    /// capsule). Spring-driven off `navShown`; drives the LiquidNav goo morph,
-    /// the panel's downward shift, and the controls' fade-in.
+    /// capsule). Driven off `navShown` on an easeInOutCubic timing curve; drives
+    /// the LiquidNav goo morph, the panel's downward shift, and the controls' fade-in.
     @State private var navT: Double = 0
+    /// `-LiquidNavDebug 1`: slow the goo morph 8× (paired with the AppDelegate
+    /// auto-loop) so the neck can be tuned frame-by-frame with `screencapture`.
+    /// Off in normal use.
+    private var liquidNavDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidNavDebug") }
     /// Measured intrinsic width of the nav controls, so the liquid capsule hugs
     /// them (default until the first measurement lands).
     @State private var navBarWidth: CGFloat = 220
@@ -189,12 +193,14 @@ struct NotchView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
-        // Spring `navT` toward the nav's shown/hidden state — the goo neck
-        // stretches + settles on this curve (a little underdamped for a liquid
-        // wobble). Collapsing snaps it to 0 with no animation so the next expand
-        // starts clean.
+        // Drive `navT` on a plain easeInOutCubic timing curve — NO spring or
+        // overshoot (that's variant 03): 0.95 s to reveal the capsule, 0.80 s to
+        // melt it back. `-LiquidNavDebug` stretches both 8× for screenshot tuning.
+        // Collapsing snaps to 0 with no animation so the next expand starts clean.
         .onChange(of: navShown) { show in
-            withAnimation(.spring(response: 0.52, dampingFraction: 0.68)) {
+            let base = show ? 0.95 : 0.80
+            let dur = base * (liquidNavDebug ? 8 : 1)
+            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 navT = show ? 1 : 0
             }
         }
@@ -521,16 +527,36 @@ struct NotchView: View {
     private var liquidNavLayer: some View {
         if navT > 0.02 {
             let navBlobW = min(expandedSize.width - 16, navBarWidth + 22)
-            LiquidNav(t: navT,
-                      panelWidth: expandedSize.width,
-                      navWidth: navBlobW,
-                      navHeight: NotchMetrics.navIslandHeight,
-                      navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
-                      panelTopRadius: state.isExpanded ? 26 : 34)
-                .frame(width: expandedSize.width,
-                       height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
-                .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
-                .allowsHitTesting(false)
+            // Cross-fade the flat goo out and the real glass capsule in over the
+            // last of the settle: the metaball's flat fill only ever shows in
+            // flight; at rest the nav is the same VisualEffectBlur glass as the
+            // panel, so materials + shadows match the pre-goo look.
+            let s = min(1, max(0, (navT - 0.86) / 0.14))
+            let rest = s * s * (3 - 2 * s)          // 0 mid-flight → 1 settled
+            ZStack(alignment: .top) {
+                LiquidNav(t: navT,
+                          panelWidth: expandedSize.width,
+                          navWidth: navBlobW,
+                          navHeight: NotchMetrics.navIslandHeight,
+                          navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
+                          panelTopRadius: state.isExpanded ? 26 : 34)
+                    .frame(width: expandedSize.width,
+                           height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
+                    .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+                    .opacity(1 - rest)
+                // Real crisp capsule, same footprint as the settled goo capsule.
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.clear)
+                    .background(VisualEffectBlur().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.32)))
+                    .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
+                    .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+                    .opacity(rest)
+            }
+            .frame(width: expandedSize.width,
+                   height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46,
+                   alignment: .top)
+            .allowsHitTesting(false)
         }
     }
 

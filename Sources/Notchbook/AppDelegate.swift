@@ -65,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let autoResumeLock = NSLock()
     private var autoResumeSnapshot = true
 
+    /// Drives the `-LiquidNavDebug` auto-loop (nav show→hide) for goo tuning.
+    private var liquidNavDebugTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
@@ -158,6 +161,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.autoresizingMask = [.width, .height]
         panel.contentView = host
         panel.orderFrontRegardless()
+
+        // Liquid-nav tuning harness (`-LiquidNavDebug 1`): force the panel open
+        // and auto-loop the nav show/hide so the goo morph (slowed 8× in
+        // NotchView) can be screenshotted frame-by-frame. No-op otherwise.
+        startLiquidNavDebugIfNeeded()
 
         // Esc collapses while the panel has focus — except on the Terminal
         // tab, where Esc must reach the shell (vim/less would be unusable
@@ -723,10 +731,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         media.setProgressPolling(false)
     }
 
+    /// `-LiquidNavDebug 1`: a self-driving harness for tuning the Goo Merge
+    /// liquid nav. Forces the panel expanded and auto-loops the nav show→hide so
+    /// the morph (slowed 8× in NotchView while this flag is on) can be captured
+    /// frame-by-frame with `screencapture`. Off by default — never runs unless
+    /// the launch arg / user default is set.
+    private func startLiquidNavDebugIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: "LiquidNavDebug") else { return }
+        var shown = false
+        let toggle: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.state.isExpanded = true      // hold it open; nothing collapses us
+            shown.toggle()
+            self.state.navHovered = shown     // drives navShown → the navT morph
+        }
+        toggle()                              // begin with a reveal
+        // Period exceeds the slowed morph (0.95·8 ≈ 7.6 s show / 0.80·8 ≈ 6.4 s
+        // hide) plus a settle hold, so each direction finishes before reversing.
+        liquidNavDebugTimer = Timer.scheduledTimer(withTimeInterval: 9.0,
+                                                   repeats: true) { _ in toggle() }
+    }
+
     /// Collapse the moment the cursor leaves the visible island bounds.
     private func startMouseWatch() {
         let check: () -> Void = { [weak self] in
             guard let self, self.state.isExpanded else { return }
+            // The debug harness owns nav state while looping — don't let a stray
+            // cursor override navHovered or collapse the panel out from under it.
+            if self.liquidNavDebugTimer != nil { return }
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)

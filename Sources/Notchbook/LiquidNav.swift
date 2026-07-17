@@ -29,8 +29,11 @@ struct LiquidNav: View {
     /// wider gap and pinches later; smaller = thin neck that snaps sooner.
     static let blur: CGFloat = 6
     /// Alpha cutoff. Higher = tighter silhouette + cleaner pinch (less bridging
-    /// across the resting gap); lower = gooier, stays connected longer.
-    static let threshold: Double = 0.56
+    /// across the resting gap); lower = gooier, stays connected longer. The
+    /// mockup's feColorMatrix implies ~0.42 (8/19), but at our real 9pt resting
+    /// gap that leaves a broad web that never fully pinches; 0.52 lands a clean
+    /// separated capsule at rest while still necking through the transition.
+    static let threshold: Double = 0.52
     /// The island's material tone — a dark glass, near-opaque so a hint of the
     /// desktop still reads through. (Drawn directly, not masked over an
     /// NSVisualEffectView, which ignores masks and left the goo invisible.)
