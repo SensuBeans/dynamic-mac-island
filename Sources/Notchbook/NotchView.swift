@@ -206,7 +206,13 @@ struct NotchView: View {
             // paused means a still wave, whatever else the system sounds.
             // Off via settings: never create the audio tap (privacy); the
             // waveform falls back to synthetic bars.
-            spectrum.setActive(settings.liveWaveform && state.isExpanded && playing == true)
+            _ = playing
+            spectrum.setActive(spectrumShouldBeActive)
+        }
+        .onChange(of: media.earHidden) { _ in
+            // The collapsed ear's equalizer is live too — toggle the tap as the
+            // ear shows/hides so the little bars track real audio, not a sine.
+            spectrum.setActive(spectrumShouldBeActive)
         }
         .onChange(of: spectrum.levels) { levels in
             // Each fresh audio sample nudges the ambient colors along,
@@ -225,7 +231,7 @@ struct NotchView: View {
             media.setProgressPolling(expanded && state.currentTab == .media)
             stats.setPolling(expanded && state.currentTab == .stats)
             servers.setPolling(expanded && state.currentTab == .servers)
-            spectrum.setActive(settings.liveWaveform && expanded && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(spectrumShouldBeActive)
             // MirrorTab stays mounted while hidden (the panel is opacity-0,
             // not removed), so its onAppear never re-fires — restart here.
             if expanded && state.currentTab == .mirror {
@@ -245,7 +251,7 @@ struct NotchView: View {
             media.setProgressPolling(state.isExpanded && tab == .media)
             stats.setPolling(state.isExpanded && tab == .stats)
             servers.setPolling(state.isExpanded && tab == .servers)
-            spectrum.setActive(settings.liveWaveform && state.isExpanded && media.nowPlaying?.isPlaying == true)
+            spectrum.setActive(spectrumShouldBeActive)
             if tab == .calendar { calendarModel.load() }
             if tab != .mirror {
                 mirror.stop()
@@ -271,6 +277,16 @@ struct NotchView: View {
         let recent = spectrum.levels.suffix(3)
         guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
         return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
+    }
+
+    /// Whether the audio tap should be running: the live-waveform setting is on,
+    /// something is actually playing, and a waveform is on screen — the expanded
+    /// media panel OR the collapsed ear's little equalizer. (Off via the setting
+    /// never creates the tap — privacy; the bars fall back to synthetic motion.)
+    private var spectrumShouldBeActive: Bool {
+        settings.liveWaveform
+            && media.nowPlaying?.isPlaying == true
+            && (state.isExpanded || !media.earHidden)
     }
 
     /// Dynamic Island ears: album art on the left, live activity on the right.
@@ -328,7 +344,9 @@ struct NotchView: View {
                                 Group {
                                     if np.isPlaying {
                                         EqualizerBars(barCount: 4, maxHeight: 14,
-                                                      color: media.accent)
+                                                      color: media.accent,
+                                                      levels: !spectrum.levels.isEmpty
+                                                          ? spectrum.levels : nil)
                                     } else {
                                         Image(systemName: "play.fill")
                                             .font(.system(size: 10))

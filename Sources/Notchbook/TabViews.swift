@@ -1795,42 +1795,65 @@ struct EqualizerBars: View {
     var levels: [Float]? = nil
 
     @State private var t: Double = 0
-    private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
+    /// Smoothed per-bar heights, eased toward their targets every frame so raw
+    /// spectrum samples don't make the bars jump.
+    @State private var displayed: [CGFloat] = []
+    private let timer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let gap = barWidth
         let w = CGFloat(barCount) * barWidth + CGFloat(max(0, barCount - 1)) * gap
         // Draw the bars in a Canvas with a FIXED frame. Only the pixels inside
-        // redraw on each 20fps tick — the view's geometry never changes — so the
-        // refresh can't yank the bars out of the island's own move animation.
-        // (The old HStack rebuilt a row of Capsule views every tick and carried
-        // its own `.animation`, so the bars escaped the parent transaction and
-        // arrived early or lagged as the panel slid.) Canvas redraws off the
-        // Timer-fed `t`/`levels` state — no display link, so it keeps ticking
-        // inside the non-key overlay panel.
+        // redraw each tick — the view's geometry never changes — so the refresh
+        // can't yank the bars out of the island's own move animation. (The old
+        // HStack rebuilt a row of Capsule views every tick and carried its own
+        // `.animation`, so the bars escaped the parent transaction and arrived
+        // early or lagged as the panel slid.) Motion is smoothed by easing the
+        // heights toward their targets here at 30fps instead of via `.animation`
+        // — no display link, so it keeps ticking inside the non-key overlay panel.
         return Canvas { ctx, size in
-            _ = t  // touch state so the closure re-runs each tick
             for i in 0..<barCount {
-                let h = max(barWidth, height(i))
+                let h = max(barWidth, i < displayed.count ? displayed[i] : maxHeight * 0.25)
                 let x = CGFloat(i) * (barWidth + gap)
                 let rect = CGRect(x: x, y: (size.height - h) / 2, width: barWidth, height: h)
                 ctx.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(color))
             }
         }
         .frame(width: w, height: maxHeight)
-        .onReceive(timer) { _ in
-            if animating, levels == nil { t += 1.0 / 20.0 }
+        .onReceive(timer) { _ in step() }
+    }
+
+    private func step() {
+        let rest = maxHeight * 0.25
+        if displayed.count != barCount {
+            displayed = Array(repeating: rest, count: barCount)
+        }
+        // Idle (paused, no live samples): settle flat once, then stop redrawing.
+        let live = animating || !(levels?.isEmpty ?? true)
+        guard live else {
+            if displayed.contains(where: { abs($0 - rest) > 0.25 }) {
+                displayed = Array(repeating: rest, count: barCount)
+            }
+            return
+        }
+        if levels == nil { t += 1.0 / 30.0 }
+        // Ease toward the target — snap up fast on transients, fall a touch
+        // slower, so the bars feel lively but never jitter.
+        for i in 0..<barCount {
+            let target = targetHeight(i, rest: rest)
+            let s: CGFloat = target > displayed[i] ? 0.5 : 0.22
+            displayed[i] += (target - displayed[i]) * s
         }
     }
 
-    private func height(_ i: Int) -> CGFloat {
+    private func targetHeight(_ i: Int, rest: CGFloat) -> CGFloat {
         if let levels, !levels.isEmpty {
             // Map bars onto the history, newest sample on the right.
             let idx = levels.count - 1 - ((barCount - 1 - i) * levels.count) / barCount
             let level = levels[max(0, min(levels.count - 1, idx))]
             return max(barWidth, maxHeight * CGFloat(level))
         }
-        guard animating else { return maxHeight * 0.25 }
+        guard animating else { return rest }
         let speed = 2.2 + Double(i % 4) * 0.35
         let phase = Double(i) * 0.9
         let v = (sin(t * speed + phase) + 1) / 2
