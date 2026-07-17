@@ -503,43 +503,7 @@ struct NotchView: View {
         .frame(height: metrics.notchHeight, alignment: .center)
     }
 
-    /// Clawd — pixel-for-pixel the mark Claude Code draws at startup
-    /// (`▗ ▗   ▖ ▖` over `▘▘ ▝▝` in quadrant blocks): a wide flat terracotta
-    /// bar, two black eye-notches on its bottom edge, four staggered feet.
-    /// `#` pixels take the tint, `o` pixels are the black eyes.
-    private struct ClawdMark: View {
-        var size: CGFloat = 13  // overall width; the mark is wide and flat
-        var tint: Color
-
-        private static let rows: [String] = [
-            "..##############..",  // bar top
-            ".####o######o####.",  // bar bottom edge, eye notches
-            "..#.#........#.#..",  // feet
-        ]
-
-        var body: some View {
-            Canvas { ctx, sz in
-                let rows = Self.rows
-                let cols = CGFloat(rows[0].count)
-                let px = min(sz.width / cols, sz.height / CGFloat(rows.count))
-                let x0 = (sz.width - px * cols) / 2
-                let y0 = (sz.height - px * CGFloat(rows.count)) / 2
-                for (r, row) in rows.enumerated() {
-                    for (c, ch) in row.enumerated() where ch != "." {
-                        // +0.4 overlap so grid seams never show at non-integral
-                        // pixel sizes.
-                        let rect = CGRect(x: x0 + CGFloat(c) * px,
-                                          y: y0 + CGFloat(r) * px,
-                                          width: px + 0.4, height: px + 0.4)
-                        ctx.fill(Path(rect), with: .color(ch == "o" ? .black : tint))
-                    }
-                }
-            }
-            .frame(width: size, height: size * 3 / 18 + 2)
-        }
-    }
-
-    /// The pill's glyph + count capsule; `.working` pulses the Claude spark.
+    /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
     private struct AgentPillLabel: View {
         let pill: AgentSessionsModel.CollapsedPill
         @State private var pulse = false
@@ -552,13 +516,10 @@ struct NotchView: View {
         /// Bounded so a big fan-out ("● 14") can't overflow the reserved
         /// `agentEar` width and clip into the media ear.
         private var countLabel: String { count > 9 ? "9+" : "\(count)" }
-        /// Claude's brand terracotta — the working glyph is Claude running.
-        private static let claude = Color(red: 0.85, green: 0.47, blue: 0.34)
-
         private var tint: Color {
             switch pill {
             case .waiting:  return .orange
-            case .working:  return Self.claude
+            case .working:  return .blue
             case .complete: return .green
             }
         }
@@ -567,9 +528,10 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    // 18pt = exactly 1pt per art pixel — eyes stay crisp.
-                    ClawdMark(size: 18, tint: tint)
-                        .opacity(pulse ? 0.35 : 1)
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 7, height: 7)
+                        .opacity(pulse ? 0.3 : 1)
                         .onAppear { pulse = true }
                         .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
                                    value: pulse)
