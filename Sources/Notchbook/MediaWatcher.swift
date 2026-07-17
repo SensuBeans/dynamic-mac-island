@@ -351,7 +351,10 @@ final class MediaWatcher: ObservableObject {
             return
         }
         if np.title != nowPlaying?.title { position = 0 }
-        nowPlaying = np
+        // Publish only on change: re-emitting an identical paused state
+        // reschedules the ear-hide countdown forever (same guard as the
+        // YouTube poll).
+        if np != nowPlaying { nowPlaying = np }
         fetchArtworkIfNeeded(for: np)
     }
 
@@ -427,7 +430,10 @@ final class MediaWatcher: ObservableObject {
             guard parts.count >= 3 else { continue }
             let np = NowPlaying(title: parts[0], artist: parts[1],
                                 isPlaying: parts[2] == "true", source: source)
-            nowPlaying = np
+            // Publish only on change — refresh() runs on every hover-expand,
+            // and re-emitting the same paused track restarts the ear-hide
+            // countdown each time, so a paused ear could linger for hours.
+            if np != nowPlaying { nowPlaying = np }
             fetchArtworkIfNeeded(for: np)
             if np.isPlaying { break }
         }
