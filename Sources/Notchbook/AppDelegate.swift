@@ -218,6 +218,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { _ in syncFrontApp() })
+        // While the pill is hidden (Chrome frontmost / crowded bar) the window
+        // goes fully click-through, so clicks land on whatever is under it —
+        // e.g. Chrome's tab strip right where the pill normally sits.
+        state.$chromeActive.map { _ in }
+            .merge(with: state.$pillCrowded.map { _ in },
+                   state.$isExpanded.map { _ in })
+            .sink { [weak self] in
+                DispatchQueue.main.async { self?.updateClickThrough() }
+            }
+            .store(in: &cancellables)
+
         // Status items come and go without any notification — re-measure on a
         // slow cadence (CGWindowList + AX are too heavy for the hover poll).
         nudgePoll = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
@@ -418,6 +429,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
             }
             guard !self.state.isExpanded else { return }
+            // Pill hidden (Chrome frontmost / crowded bar): no hover-expand,
+            // no ear hover — the cursor up there belongs to the app below.
+            guard !self.state.chromeActive, !self.state.pillCrowded else { return }
             let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
             let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
             let islandScreen = self.panel.convertToScreen(
@@ -902,6 +916,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the status items), and ignore sub-2pt jitter so it doesn't wander.
         let nudge = min(0, (leftEdge + rightEdge) / 2 - f.midX)
         if abs(nudge - state.pillNudge) > 2 { state.pillNudge = nudge }
+    }
+
+    /// The hidden pill must not eat clicks meant for the app beneath it:
+    /// while it is hidden (and the island collapsed), the whole panel ignores
+    /// mouse events. Hover-expand is intentionally off in that state — click
+    /// or hover anywhere over Chrome goes to Chrome, full stop.
+    private func updateClickThrough() {
+        let pillHidden = !state.isExpanded && !(metrics?.hasNotch ?? true)
+            && (state.chromeActive || state.pillCrowded)
+        if panel.ignoresMouseEvents != pillHidden {
+            panel.ignoresMouseEvents = pillHidden
+        }
     }
 
     private func rebuildMetrics() {
