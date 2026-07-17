@@ -238,6 +238,18 @@ final class AgentSessionsModel: ObservableObject {
     private let sessionsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude/sessions", isDirectory: true)
 
+    /// Per-session live-model spool the statusline writes (`models/<sid>.json`
+    /// with `{id, display}`). Claude Code's session file carries NO model, and
+    /// the transcript only records the previous turn's model — so it lags a
+    /// `/model` switch and can't show the current selection before the next
+    /// turn lands. This spool is the authoritative live model (updated on every
+    /// statusline render). Absent when the statusline isn't the notch-aware one
+    /// — then we fall back to the transcript model.
+    private let modelsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Notchbook/models", isDirectory: true)
+    /// Throttle for pruning stale model-spool files (once every few minutes).
+    private var lastModelPrune = Date.distantPast
+
     /// path -> incremental parser state. Touched only on `ioQueue`.
     private var parsers: [String: FileParser] = [:]
     /// sessionId -> current state + when it entered that state. Keyed by session,
@@ -574,6 +586,7 @@ final class AgentSessionsModel: ObservableObject {
 
         updateAckCount(ordered)
         publish(ordered)
+        pruneModelSpool(now: now)
     }
 
     /// Poll the statusline-written usage spool (tiny file, cheap on the 1.5 s
@@ -786,6 +799,37 @@ final class AgentSessionsModel: ObservableObject {
         return out
     }
 
+    /// The live model id the statusline last spooled for this session, if any.
+    /// Preferred over the transcript's model so a `/model` switch shows up
+    /// immediately (the statusline re-renders on the switch). Empty/missing =>
+    /// nil, and the caller falls back to the transcript's last-seen model.
+    private func liveModelID(for sessionId: String) -> String? {
+        let url = modelsURL.appendingPathComponent("\(sessionId).json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let id = obj["id"] as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// Drop model-spool files older than an hour: a live session's statusline
+    /// rewrites its file on every render, so a stale file belongs to a session
+    /// that's gone. Keeps the spool dir from accumulating a file per session
+    /// ever run. Throttled — the dir is tiny, but no need to walk it every tick.
+    private func pruneModelSpool(now: Date) {
+        guard now.timeIntervalSince(lastModelPrune) > 300 else { return }
+        lastModelPrune = now
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: modelsURL.path)
+        else { return }
+        for name in names where name.hasSuffix(".json") {
+            let url = modelsURL.appendingPathComponent(name)
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let mtime = attrs[.modificationDate] as? Date,
+               now.timeIntervalSince(mtime) > 3600 {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
     /// Cached terminal-identity lookup (see `identityCache`). Resolves via
     /// syscalls only — never spawns — and reuses the result for a live pid. The
     /// stored sessionId guards against pid recycling: if this pid now belongs to
@@ -964,7 +1008,10 @@ final class AgentSessionsModel: ObservableObject {
     private func makeSession(id: String, parser p: FileParser?, meta: SessionMeta?,
                              identity: TerminalIdentity, state: AgentState, since: Date,
                              lastActivity: Date) -> AgentSession {
-        let (display, window) = Self.resolveModel(p?.latestModel ?? nil,
+        // Prefer the statusline's live model spool (reflects a /model switch at
+        // once); fall back to the transcript's last-seen model when the spool is
+        // absent (non-notch statusline, or nothing rendered yet).
+        let (display, window) = Self.resolveModel(liveModelID(for: id) ?? p?.latestModel ?? nil,
                                                   observedContextTokens: p?.maxContextTokens ?? 0)
         let branch: String? = {
             guard let b = p?.gitBranch?.trimmingCharacters(in: .whitespacesAndNewlines),

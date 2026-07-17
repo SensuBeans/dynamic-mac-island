@@ -118,9 +118,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 x = self.metrics.expandedLeadingPad(width: s.width)
                 // The panel floats below the notch — the interactive rect
                 // bridges notch, gap, and panel so crossing the gap doesn't
-                // read as leaving the island.
-                s.height += self.metrics.notchHeight + NotchMetrics.islandGap * 2
-                    + NotchMetrics.navIslandHeight
+                // read as leaving the island. (notch→nav gap + nav bar +
+                // nav→content gap.)
+                s.height += self.metrics.notchHeight + NotchMetrics.islandGap
+                    + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
             } else {
                 s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
                                                toast: self.state.toast != nil,
@@ -731,13 +732,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
             let mouse = NSEvent.mouseLocation
-            // The nav dock lives in the bottom strip of the island stack
-            // (screen coords are bottom-up); it shows only while the cursor
-            // is down there or a swipe is in flight.
-            let navZone = NSRect(x: visible.minX, y: visible.minY,
+            // The nav dock rides the TOP of the island, but the bar itself is
+            // rendered `notchHeight + gap` BELOW the rect's top edge (the rect
+            // bridges the notch + gap). So the trigger band must span the notch,
+            // the gap, the full nav bar, AND a buffer into the content — else
+            // the cursor over the bar's lower half falls outside and it retracts
+            // out from under the pointer. Screen coords are bottom-up, so the
+            // band hangs off the maxY (top) edge.
+            let navZoneHeight = self.metrics.notchHeight
+                + NotchMetrics.islandGap
+                + NotchMetrics.navIslandHeight + 28
+            let navZone = NSRect(x: visible.minX,
+                                 y: visible.maxY - navZoneHeight,
                                  width: visible.width,
-                                 height: NotchMetrics.navIslandHeight
-                                     + NotchMetrics.islandGap + 16)
+                                 height: navZoneHeight)
             let inNav = navZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
             // While the user is actively typing in a terminal (the panel is

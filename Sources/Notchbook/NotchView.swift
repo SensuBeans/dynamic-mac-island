@@ -31,6 +31,13 @@ struct NotchView: View {
     /// Accumulated rotation of the ambient color layers. Advances with each
     /// audio sample — faster when the music is loud, frozen when paused.
     @State private var colorPhase: Double = 0
+    /// Nav-bar reveal progress (0 = melted into the panel, 1 = separated
+    /// capsule). Spring-driven off `navShown`; drives the LiquidNav goo morph,
+    /// the panel's downward shift, and the controls' fade-in.
+    @State private var navT: Double = 0
+    /// Measured intrinsic width of the nav controls, so the liquid capsule hugs
+    /// them (default until the first measurement lands).
+    @State private var navBarWidth: CGFloat = 220
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -41,36 +48,37 @@ struct NotchView: View {
         .environment(\.colorScheme, .dark)
     }
 
+    /// The expanded panel size for the current tab. A struct-level property so
+    /// both `island` and the expanded-panel layer helpers can read it. Must stay
+    /// in lockstep with AppDelegate.islandRect.
+    private var expandedSize: CGSize {
+        // Settings pages always use the standard panel size, whatever tab they
+        // were opened from (so settings on mirror/tray/terminal isn't oversized).
+        if state.showingSettings {
+            return metrics.expandedSize()
+        }
+        if state.currentTab == .tray {
+            return metrics.trayExpandedSize(itemCount: tray.items.count,
+                                            cell: settings.trayTileSize)
+        } else if state.currentTab == .terminal {
+            return NotchMetrics.terminalIslandSize
+        } else if state.currentTab == .agents {
+            return NotchMetrics.agentsIslandSize
+        } else if state.currentTab == .servers {
+            return NotchMetrics.serversIslandSize
+        } else if state.currentTab == .calendar {
+            return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
+        }
+        let onMirror = state.currentTab == .mirror
+        return metrics.expandedSize(zoomed: onMirror, large: onMirror && state.mirrorBig)
+    }
+
     private var island: some View {
         let hasMedia = (media.nowPlaying != nil && !media.earHidden)
             || (pomodoro.isRunning && settings.timerCountdownEar)
         let hasToast = state.toast != nil
         let hasAgent = agentSessions.hasActivePill
-        // The mirror always gets the big panel — a postage-stamp selfie
-        // preview isn't useful, so the old zoom toggle is gone. Its overlay
-        // button doubles it again (mirrorBig).
-        let onMirror = state.currentTab == .mirror
-        let expandedSize: CGSize = {
-            // Settings pages always use the standard panel size, whatever tab
-            // they were opened from (so settings on mirror/tray/terminal isn't
-            // oversized). Must stay in lockstep with AppDelegate.islandRect.
-            if state.showingSettings {
-                return metrics.expandedSize()
-            }
-            if state.currentTab == .tray {
-                return metrics.trayExpandedSize(itemCount: tray.items.count,
-                                                cell: settings.trayTileSize)
-            } else if state.currentTab == .terminal {
-                return NotchMetrics.terminalIslandSize
-            } else if state.currentTab == .agents {
-                return NotchMetrics.agentsIslandSize
-            } else if state.currentTab == .servers {
-                return NotchMetrics.serversIslandSize
-            } else if state.currentTab == .calendar {
-                return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
-            }
-            return metrics.expandedSize(zoomed: onMirror, large: onMirror && state.mirrorBig)
-        }()
+        let expandedSize = expandedSize
         let size = state.isExpanded
             ? expandedSize
             : metrics.collapsedSize(withMedia: hasMedia, toast: hasToast, withAgent: hasAgent)
@@ -85,11 +93,13 @@ struct NotchView: View {
         // floating glass capsule beside the notch (like the agent pill), so it
         // no longer fills / widens the bar.
         let collapsedVisible = hasMedia
-        // The nav dock appears on hover over its strip or mid tab-swipe.
+        // The nav dock appears on hover over its top strip (flush under the
+        // notch) or mid tab-swipe; otherwise it retracts and the content panel
+        // slides up to fill its height.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
         let totalExpandedHeight = metrics.notchHeight + gap
-            + NotchMetrics.navIslandHeight + gap + expandedSize.height
+            + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + expandedSize.height
         return ZStack(alignment: .top) {
             // Collapsed island. Two SEPARATE layers so content can never hide
             // under the notch: (1) the dark notch-shaped backing, clipped to the
@@ -134,23 +144,18 @@ struct NotchView: View {
             // bar never rides the expanded panel's bubble motion.
             .animation(.easeOut(duration: 0.2), value: state.isExpanded)
 
-            // Expanded: the nav bar and the content panel are each their
-            // OWN floating island, stacked below the notch.
-            VStack(spacing: gap) {
-                contentIsland(size: expandedSize)
-                    .frame(width: expandedSize.width, height: expandedSize.height)
-                    // Corner radius relaxes slightly in flight (34 hidden → 26
-                    // open) for the soft "bubble" read; animatable via the spring.
-                    .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
-                                                style: .continuous))
-                    .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
-                navIsland
-                    .frame(height: NotchMetrics.navIslandHeight)
-                    .opacity(navShown ? 1 : 0)
-                    .offset(y: navShown ? 0 : -10)
-                    .allowsHitTesting(navShown)
-                    .animation(.easeOut(duration: 0.18), value: navShown)
+            // Expanded: nav bar + content panel below the notch. The nav bar
+            // "goo merges" — it buds up out of the panel's top edge on a liquid
+            // neck that pinches off (LiquidNav), and melts back in on retract.
+            // `navT` (0…1, spring-driven) drives the whole morph: the panel
+            // shifts down to open the gap, the metaball forms the capsule, and
+            // the controls fade in on top of it.
+            ZStack(alignment: .top) {
+                liquidNavLayer                       // goo capsule + neck (behind)
+                expandedPanelLayer                   // content panel (shifts down)
+                navControlsLayer                     // tabs/pin/settings/quit (on top)
             }
+            .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
             // offset animate — so the panel drops dead-vertical, no diagonal.
@@ -184,6 +189,18 @@ struct NotchView: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
+        // Spring `navT` toward the nav's shown/hidden state — the goo neck
+        // stretches + settles on this curve (a little underdamped for a liquid
+        // wobble). Collapsing snaps it to 0 with no animation so the next expand
+        // starts clean.
+        .onChange(of: navShown) { show in
+            withAnimation(.spring(response: 0.52, dampingFraction: 0.68)) {
+                navT = show ? 1 : 0
+            }
+        }
+        .onChange(of: state.isExpanded) { expanded in
+            if !expanded { navT = 0 }
+        }
         .onChange(of: media.nowPlaying?.isPlaying) { playing in
             // The tap only listens while the player itself is playing —
             // paused means a still wave, whatever else the system sounds.
@@ -479,8 +496,63 @@ struct NotchView: View {
 
     // MARK: - Expanded panel
 
-    /// The nav bar as its own floating capsule island: tabs + pin + quit.
-    private var navIsland: some View {
+    /// Goo capsule + liquid neck (glass masked to the metaball), behind the
+    /// panel so the neck tucks in seamlessly. Only drawn while there's something
+    /// to reveal. The blob hugs the measured control width.
+    @ViewBuilder
+    private var liquidNavLayer: some View {
+        if navT > 0.02 {
+            let navBlobW = min(expandedSize.width - 16, navBarWidth + 22)
+            LiquidNav(t: navT,
+                      panelWidth: expandedSize.width,
+                      navWidth: navBlobW,
+                      navHeight: NotchMetrics.navIslandHeight,
+                      navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
+                      panelTopRadius: state.isExpanded ? 26 : 34)
+                .frame(width: expandedSize.width,
+                       height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
+                .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// The content panel, shifted down as the nav emerges and up as it melts.
+    private var expandedPanelLayer: some View {
+        let shift = (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(navT)
+        return contentIsland(size: expandedSize)
+            .frame(width: expandedSize.width, height: expandedSize.height)
+            // Corner radius relaxes slightly in flight (34 hidden → 26 open) for
+            // the soft "bubble" read; animatable via the spring.
+            .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
+                                        style: .continuous))
+            .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+            .offset(y: shift)
+    }
+
+    /// Nav controls riding the liquid capsule, fading + settling in as the
+    /// droplet forms. Intrinsic width, measured into `NavWidthKey` for the blob.
+    private var navControlsLayer: some View {
+        // Resolve the controls only once the capsule is basically formed, and
+        // quickly — a short smoothstep over the tail of the reveal, so the text
+        // snaps in with the droplet instead of the old slow cross-fade.
+        let raw = min(1, max(0, (navT - 0.66) / 0.24))
+        let op = raw * raw * (3 - 2 * raw)
+        let scale = 0.94 + 0.06 * CGFloat(min(1, max(0, navT)))
+        return navControls
+            .frame(height: NotchMetrics.navIslandHeight)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: NavWidthKey.self, value: g.size.width)
+            })
+            .opacity(op)
+            .scaleEffect(scale, anchor: .center)
+            .allowsHitTesting(navT > 0.6)
+    }
+
+    /// The nav bar controls: tabs + pin + settings + quit. Just the controls —
+    /// the capsule background is drawn by LiquidNav (the goo glass), so this
+    /// carries no material of its own.
+    private var navControls: some View {
         HStack(spacing: 10) {
             tabBar
             Button { state.pinned.toggle() } label: {
@@ -513,9 +585,6 @@ struct NotchView: View {
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
-        .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.32) } }
-        .clipShape(Capsule())
-        .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
     }
 
     /// The content panel island: frosted glass, ambient album glow, the tab.
