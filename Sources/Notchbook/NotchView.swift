@@ -176,41 +176,42 @@ struct NotchView: View {
                 .animation(.easeOut(duration: 0.2), value: state.isExpanded)
             }
 
-            // Expanded: the nav bar and the content panel are each their
-            // OWN floating island, stacked below the notch — nav on top,
-            // right under the notch, panel below it.
-            VStack(spacing: gap) {
-                navIsland
-                    .frame(height: NotchMetrics.navIslandHeight)
-                    .opacity(navShown ? 1 : 0)
-                    .offset(y: navShown ? 0 : -10)
-                    .allowsHitTesting(navShown)
-                    .animation(.easeOut(duration: 0.18), value: navShown)
-                contentIsland(size: expandedSize)
-                    .frame(width: expandedSize.width, height: expandedSize.height)
-                    // Corner radius relaxes slightly in flight (34 hidden → 26
-                    // open) for the soft "bubble" read; animatable via the spring.
-                    .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
-                                                style: .continuous))
-                    .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
-                    // With the dock hidden the panel rides up into its slot,
-                    // hugging the notch; revealing the dock nudges it back down.
-                    .offset(y: navShown ? 0 : -(NotchMetrics.navIslandHeight + gap))
-                    .animation(.spring(response: 0.28, dampingFraction: 0.8),
-                               value: navShown)
-            }
+            // Expanded content panel: its own floating island below the notch.
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
             // offset animate — so the panel drops dead-vertical, no diagonal.
-            .frame(width: expandedSize.width)
-            .padding(.top, metrics.notchHeight + gap)
-            // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
-            .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
-            .opacity(state.isExpanded ? 1 : 0)
-            // Constant hidden travel (NOT the tab-dependent full height) so every
-            // tab drops the same distance at the same perceived speed.
-            .offset(y: state.isExpanded ? 0 : -(metrics.notchHeight + NotchMetrics.islandGap + 60))
-            .allowsHitTesting(state.isExpanded)
+            contentIsland(size: expandedSize)
+                .frame(width: expandedSize.width, height: expandedSize.height)
+                // Corner radius relaxes slightly in flight (34 hidden → 26
+                // open) for the soft "bubble" read; animatable via the spring.
+                .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
+                                            style: .continuous))
+                .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+                // The dock's slot only exists while the dock is out: hidden,
+                // the panel hugs the notch; revealed, it steps down for it.
+                .padding(.top, metrics.notchHeight + gap
+                         + (navShown ? NotchMetrics.navIslandHeight + gap : 0))
+                // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
+                .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
+                .opacity(state.isExpanded ? 1 : 0)
+                // Constant hidden travel (NOT the tab-dependent full height) so every
+                // tab drops the same distance at the same perceived speed.
+                .offset(y: state.isExpanded ? 0 : -(metrics.notchHeight + NotchMetrics.islandGap + 60))
+                .allowsHitTesting(state.isExpanded)
+                .animation(.spring(response: 0.28, dampingFraction: 0.8), value: navShown)
+
+            // Nav dock: its own FIXED layer under the notch. Deliberately
+            // outside the panel's scaling stack so it never rides the
+            // bubble-pop (it used to visibly "grow" with the island) — it
+            // fades/slides in place at constant size.
+            navIsland
+                .frame(height: NotchMetrics.navIslandHeight)
+                .padding(.top, metrics.notchHeight + gap)
+                .opacity(state.isExpanded && navShown ? 1 : 0)
+                .offset(y: navShown ? 0 : -10)
+                .allowsHitTesting(state.isExpanded && navShown)
+                .animation(.easeOut(duration: 0.18), value: navShown)
+                .animation(.easeOut(duration: 0.15), value: state.isExpanded)
         }
         // Full-window width, non-animating horizontally — each layer owns its own
         // constant anchor, so expand/collapse has zero sideways drift.
