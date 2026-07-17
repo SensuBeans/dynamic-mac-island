@@ -731,10 +731,10 @@ struct NotchView: View {
         return HStack(spacing: 4) {
             Image(systemName: tab.icon)
                 .font(.system(size: 11, weight: .medium))
-            // Every chip carries its label — icon-only chips read as a
-            // guessing game once the tab count grows.
-            Text(tab.title)
-                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+            if selected {
+                Text(tab.title)
+                    .font(.system(size: 11, weight: .semibold))
+            }
         }
         .foregroundStyle(selected ? .white
                          : .white.opacity(targeted ? 0.9 : 0.45))
