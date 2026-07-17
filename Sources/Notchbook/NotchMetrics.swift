@@ -57,6 +57,10 @@ struct NotchMetrics {
     static let agentsIslandSize = CGSize(width: 470, height: 300)
     /// The Servers tab (Local Starter list) — same footprint as the Agents tab.
     static let serversIslandSize = CGSize(width: 470, height: 300)
+    /// Settings pages: roomier than the standard panel — they list a dozen
+    /// rows, which the 128pt-tall standard island crams into a sliver.
+    /// Final island size, used verbatim like the terminal's.
+    static let settingsIslandSize = CGSize(width: 560, height: 340)
     /// Transparent margin around the expanded shape so its shadow isn't clipped.
     static let shadowPad: CGFloat = 40
     /// Extra ear width either side of the notch while media is active, so the

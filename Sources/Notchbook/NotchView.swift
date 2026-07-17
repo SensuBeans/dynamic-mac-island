@@ -51,11 +51,12 @@ struct NotchView: View {
         // button doubles it again (mirrorBig).
         let onMirror = state.currentTab == .mirror
         let expandedSize: CGSize = {
-            // Settings pages always use the standard panel size, whatever tab
-            // they were opened from (so settings on mirror/tray/terminal isn't
-            // oversized). Must stay in lockstep with AppDelegate.islandRect.
+            // Settings pages always use their own roomy fixed size, whatever
+            // tab they were opened from (so settings on mirror/tray/terminal
+            // isn't oversized and settings on a small tab isn't cramped).
+            // Must stay in lockstep with AppDelegate.islandRect.
             if state.showingSettings {
-                return metrics.expandedSize()
+                return NotchMetrics.settingsIslandSize
             }
             if state.currentTab == .tray {
                 return metrics.trayExpandedSize(itemCount: tray.items.count,
@@ -502,7 +503,24 @@ struct NotchView: View {
         .frame(height: metrics.notchHeight, alignment: .center)
     }
 
-    /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
+    /// Claude's starburst mark, drawn as radiating tapered rays — recognizable
+    /// at glyph size where a bitmap logo would smear. Inherits foregroundStyle.
+    private struct ClaudeSpark: View {
+        var size: CGFloat = 11
+        var body: some View {
+            ZStack {
+                ForEach(0..<8, id: \.self) { i in
+                    Capsule()
+                        .frame(width: size * 0.17, height: size * 0.46)
+                        .offset(y: -size * 0.27)
+                        .rotationEffect(.degrees(Double(i) * 45))
+                }
+            }
+            .frame(width: size, height: size)
+        }
+    }
+
+    /// The pill's glyph + count capsule; `.working` pulses the Claude spark.
     private struct AgentPillLabel: View {
         let pill: AgentSessionsModel.CollapsedPill
         @State private var pulse = false
@@ -515,10 +533,13 @@ struct NotchView: View {
         /// Bounded so a big fan-out ("● 14") can't overflow the reserved
         /// `agentEar` width and clip into the media ear.
         private var countLabel: String { count > 9 ? "9+" : "\(count)" }
+        /// Claude's brand terracotta — the working glyph is Claude running.
+        private static let claude = Color(red: 0.85, green: 0.47, blue: 0.34)
+
         private var tint: Color {
             switch pill {
             case .waiting:  return .orange
-            case .working:  return .blue
+            case .working:  return Self.claude
             case .complete: return .green
             }
         }
@@ -527,10 +548,9 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    Circle()
-                        .fill(tint)
-                        .frame(width: 7, height: 7)
-                        .opacity(pulse ? 0.3 : 1)
+                    ClaudeSpark(size: 11)
+                        .foregroundStyle(tint)
+                        .opacity(pulse ? 0.35 : 1)
                         .onAppear { pulse = true }
                         .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
                                    value: pulse)

@@ -97,7 +97,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let x: CGFloat
             if self.state.isExpanded {
                 let onMirror = self.state.currentTab == .mirror
-                if self.state.currentTab == .tray {
+                // Settings pages use their own fixed size regardless of the
+                // tab they were opened from — must match NotchView, or the
+                // hover rect outgrows the rendered island and the nav strip
+                // (bottom of the rect) lands below the actual nav bar.
+                if self.state.showingSettings {
+                    s = NotchMetrics.settingsIslandSize
+                } else if self.state.currentTab == .tray {
                     s = self.metrics.trayExpandedSize(itemCount: self.tray.items.count,
                                                       cell: self.settings.trayTileSize)
                 } else if self.state.currentTab == .terminal {
