@@ -253,7 +253,15 @@ final class AgentSessionsModel: ObservableObject {
     /// — then we fall back to the transcript model.
     private let modelsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Notchbook/models", isDirectory: true)
-    /// Throttle for pruning stale model-spool files (once every few minutes).
+    /// Per-session PENDING-tool spool the PreToolUse hook writes (`pending/<sid>.json`
+    /// with `{name, detail, ts}`). The transcript carries NO pending `tool_use`
+    /// while a permission prompt is up (Claude Code writes the block only after
+    /// you answer), so transcript tailing can't show WHAT is awaiting approval.
+    /// The hook fires BEFORE the prompt, so this spool is the only live source
+    /// for the Approve preview. Absent when the hook isn't installed.
+    private let pendingURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Notchbook/pending", isDirectory: true)
+    /// Throttle for pruning stale model/pending-spool files (once every few minutes).
     private var lastModelPrune = Date.distantPast
 
     /// path -> incremental parser state. Touched only on `ioQueue`.
@@ -817,6 +825,28 @@ final class AgentSessionsModel: ObservableObject {
         return id
     }
 
+    /// The pending tool call the PreToolUse hook last spooled for this session —
+    /// name + detail + when it was written. Read on `.waiting` rows to show what's
+    /// awaiting approval (the transcript can't; see `pendingURL`). The write-time
+    /// (`ts`, falling back to file mtime) lets the caller reject a STALE spool: a
+    /// permission prompt's hook fires at prompt-onset, so a fresh spool means this
+    /// waiting state really is a tool prompt, not some other pause holding an old
+    /// last-tool on disk.
+    private func pendingSpool(for sessionId: String) -> (name: String, detail: String, at: Date)? {
+        let url = pendingURL.appendingPathComponent("\(sessionId).json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let name = obj["name"] as? String, !name.isEmpty else { return nil }
+        let detail = (obj["detail"] as? String) ?? ""
+        let at: Date = {
+            if let ts = obj["ts"] as? Double { return Date(timeIntervalSince1970: ts) }
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let m = attrs[.modificationDate] as? Date { return m }
+            return .distantPast
+        }()
+        return (name, detail, at)
+    }
+
     /// Prune orphaned model-spool files. Liveness — NOT age — is the deletion
     /// criterion: a live session may sit idle for hours (its statusline only
     /// re-renders on activity), so its spool file goes stale on disk while the
@@ -831,16 +861,20 @@ final class AgentSessionsModel: ObservableObject {
     private func pruneModelSpool(now: Date, liveIDs: Set<String>) {
         guard now.timeIntervalSince(lastModelPrune) > 300 else { return }
         lastModelPrune = now
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: modelsURL.path)
-        else { return }
-        for name in names where name.hasSuffix(".json") {
-            let sid = String(name.dropLast(".json".count))
-            if liveIDs.contains(sid) { continue }   // live session: never prune on age
-            let url = modelsURL.appendingPathComponent(name)
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-               let mtime = attrs[.modificationDate] as? Date,
-               now.timeIntervalSince(mtime) > 48 * 3600 {
-                try? FileManager.default.removeItem(at: url)
+        // Both the model spool and the pending-tool spool are keyed by sid and
+        // share the same liveness rule (see above).
+        for dir in [modelsURL, pendingURL] {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path)
+            else { continue }
+            for name in names where name.hasSuffix(".json") {
+                let sid = String(name.dropLast(".json".count))
+                if liveIDs.contains(sid) { continue }   // live session: never prune on age
+                let url = dir.appendingPathComponent(name)
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let mtime = attrs[.modificationDate] as? Date,
+                   now.timeIntervalSince(mtime) > 48 * 3600 {
+                    try? FileManager.default.removeItem(at: url)
+                }
             }
         }
     }
@@ -1116,10 +1150,30 @@ final class AgentSessionsModel: ObservableObject {
             pid: meta?.pid,
             name: meta?.name,
             autoResumeAt: nil,
-            // Only a session the process reports as waiting shows an approve
-            // preview; otherwise nil, so a working session's live tool call never
-            // reads as a pending permission prompt.
-            pendingTool: state == .waiting ? p?.pendingTool : nil)
+            // Approve preview: what this waiting row is being asked to approve.
+            // Sourced from the PreToolUse-hook spool — the ONLY thing that holds
+            // the pending call while the prompt is up (the transcript doesn't
+            // write the tool_use until you answer). Gated on .waiting + spool
+            // freshness so a non-prompt pause never surfaces a stale last-tool.
+            pendingTool: pendingPreview(state: state, sid: id, since: since,
+                                        parserFallback: p?.pendingTool))
+    }
+
+    /// The pending tool to preview on a row, or nil. Only `.waiting` rows preview
+    /// (a working session's in-flight tool must not read as a permission prompt),
+    /// and only when the hook spooled the call at/after this waiting state began
+    /// — a fresh spool means the pause really is a tool prompt, not some other
+    /// wait holding an old last-tool on disk. `parserFallback` is the transcript
+    /// parser's view: inert during a real prompt today (the block isn't logged
+    /// yet), but a harmless safety net if a future Claude Code writes it.
+    private func pendingPreview(state: AgentState, sid: String, since: Date,
+                                parserFallback: (name: String, detail: String)?)
+        -> (name: String, detail: String)? {
+        guard state == .waiting else { return nil }
+        if let s = pendingSpool(for: sid), s.at >= since.addingTimeInterval(-60) {
+            return (s.name, s.detail)
+        }
+        return parserFallback
     }
 
     // MARK: - Ack count + publish throttle (ioQueue only)
