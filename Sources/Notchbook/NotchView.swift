@@ -180,8 +180,12 @@ struct NotchView: View {
 
                     agentPill
                 }
-                // The pill floats a few points below the top edge.
-                .offset(y: metrics.pillDrop)
+                // The pill floats a few points below the top edge, and slides
+                // toward the free stretch of the menu bar (between the app
+                // menus and the status items) rather than dead screen-center.
+                .offset(x: state.pillNudge, y: metrics.pillDrop)
+                .animation(.spring(response: 0.35, dampingFraction: 0.85),
+                           value: state.pillNudge)
                 .opacity(state.isExpanded || hideStandby ? 0 : 1)
                 .animation(.easeInOut(duration: 0.2), value: hideStandby)
                 .animation(.easeOut(duration: 0.2), value: state.isExpanded)

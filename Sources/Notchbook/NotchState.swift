@@ -118,6 +118,10 @@ final class NotchState: ObservableObject {
     /// Google Chrome is the frontmost app. Used (on the low-DPI second monitor)
     /// to hide the standby pill while browsing, without disabling hover-expand.
     @Published var chromeActive = false
+    /// Pill mode: horizontal shift from screen-center so the collapsed pill
+    /// centers in the EMPTY stretch of the menu bar (between the frontmost
+    /// app's menus and the leftmost status item). 0 on notch Macs.
+    @Published var pillNudge: CGFloat = 0
 
     private var toastWork: DispatchWorkItem?
     /// Default on-screen seconds for toasts whose caller doesn't specify one.

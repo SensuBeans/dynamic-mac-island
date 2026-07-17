@@ -32,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var expandWork: DispatchWorkItem?
     private var hoverPoll: Timer?
     private var spacePoll: Timer?
+    private var nudgePoll: Timer?
     private var batteryTimer: Timer?
     private var lastBattery: (charging: Bool, low: Bool)?
     private var spaceWork: DispatchWorkItem?
@@ -132,6 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                toast: self.state.toast != nil,
                                                withAgent: self.agentSessions.hasActivePill)
                 x = self.metrics.islandLeadingPad(expanded: false, collapsed: s)
+                    + self.state.pillNudge
             }
             // The collapsed pill floats below the top edge (no-notch Macs); its
             // hit rect must follow so hover still lands on it.
@@ -158,7 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let s = self.metrics.hoverZoneSize
             let drop = self.metrics.hasNotch ? 0 : self.metrics.pillDrop
             let y = self.host.isFlipped ? drop : b.height - s.height - drop
-            return NSRect(x: (b.width - s.width) / 2, y: y,
+            return NSRect(x: (b.width - s.width) / 2 + self.state.pillNudge, y: y,
                           width: s.width, height: s.height)
         }
         host.earBoundaryX = { [weak self] in
@@ -204,16 +206,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Track whether Chrome is frontmost, so the standby pill can hide while
-        // browsing on the second monitor (hover-expand still works).
+        // browsing on the second monitor (hover-expand still works). App
+        // activation also moves the menu titles, so re-center the pill.
         let syncFrontApp: () -> Void = { [weak self] in
             let id = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
             self?.state.chromeActive = (id == "com.google.Chrome")
+            self?.updatePillNudge()
         }
         syncFrontApp()
         observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { _ in syncFrontApp() })
+        // Status items come and go without any notification — re-measure on a
+        // slow cadence (CGWindowList + AX are too heavy for the hover poll).
+        nudgePoll = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
+            self?.updatePillNudge()
+        }
+        nudgePoll?.tolerance = 5
 
         setupToasts()
 
@@ -802,6 +812,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         localMouseMonitor = nil
     }
 
+    /// Pill mode: center the collapsed pill in the EMPTY stretch of the menu
+    /// bar — right of the frontmost app's menu titles (AX, already-granted
+    /// Accessibility), left of the leftmost status item (status-level windows
+    /// from CGWindowList; no extra permission — bounds don't need Screen
+    /// Recording). Falls back to screen-center when either edge is unknown.
+    /// The island stays pinned to the PRIMARY screen, so all coordinates are
+    /// in that screen's space (CG top-left x == AppKit x there).
+    private func updatePillNudge() {
+        guard let m = metrics, !m.hasNotch else { state.pillNudge = 0; return }
+        let f = m.screen.frame
+        let barBottom = m.menuBarHeight + 4
+
+        // Right boundary: leftmost status item on the island's screen.
+        var rightEdge = f.maxX - 8
+        if let infos = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
+            as? [[String: Any]] {
+            for w in infos {
+                guard let layer = w[kCGWindowLayer as String] as? Int,
+                      layer == Int(CGWindowLevelForKey(.statusWindow)),  // status items
+                      let b = w[kCGWindowBounds as String] as? [String: CGFloat],
+                      let x = b["X"], let y = b["Y"], let h = b["Height"],
+                      y >= 0, y + h <= barBottom,           // in the menu bar strip
+                      x >= f.minX, x < f.maxX               // on this screen
+                else { continue }
+                rightEdge = min(rightEdge, x)
+            }
+        }
+
+        // Left boundary: trailing edge of the frontmost app's last menu title.
+        var leftEdge = f.minX + 8
+        if AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication {
+            let ax = AXUIElementCreateApplication(app.processIdentifier)
+            var barRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(ax, kAXMenuBarAttribute as CFString,
+                                             &barRef) == .success {
+                let bar = barRef as! AXUIElement
+                var kidsRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(bar, kAXChildrenAttribute as CFString,
+                                                 &kidsRef) == .success,
+                   let kids = kidsRef as? [AXUIElement], let last = kids.last {
+                    var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+                    var pos = CGPoint.zero, size = CGSize.zero
+                    if AXUIElementCopyAttributeValue(last, kAXPositionAttribute as CFString,
+                                                     &posRef) == .success,
+                       AXUIElementCopyAttributeValue(last, kAXSizeAttribute as CFString,
+                                                     &sizeRef) == .success,
+                       AXValueGetValue(posRef as! AXValue, .cgPoint, &pos),
+                       AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) {
+                        leftEdge = max(leftEdge, pos.x + size.width)
+                    }
+                }
+            }
+        }
+
+        // Center of the free stretch, as an offset from screen-center. Only
+        // ever nudge LEFT (a crowded left side must not push the pill into
+        // the status items), keep a floor so it can't cross the menus, and
+        // ignore sub-2pt jitter so the pill doesn't wander.
+        guard rightEdge - leftEdge > 120 else { return }
+        let nudge = min(0, (leftEdge + rightEdge) / 2 - f.midX)
+        if abs(nudge - state.pillNudge) > 2 { state.pillNudge = nudge }
+    }
+
     private func rebuildMetrics() {
         // During display reconfiguration NSScreen.screens can be momentarily
         // empty; keep the existing metrics until a screen reappears rather than
@@ -822,5 +895,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         metrics = new
         panel.setFrame(metrics.windowFrame, display: true)
         host.rootView = makeRoot()
+        updatePillNudge()
     }
 }
