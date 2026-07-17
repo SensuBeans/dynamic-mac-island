@@ -145,9 +145,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
-        // With hover-to-expand off, a click in the notch opens the panel.
+        // A click in the notch/pill zone opens the panel when hover-to-expand
+        // is off — and ALSO while the pill is hidden (Chrome frontmost /
+        // crowded bar), where hovering is deliberately inert.
         host.onZoneClick = { [weak self] in
-            guard let self, !self.settings.hoverToExpand, !self.state.isExpanded else { return }
+            guard let self, !self.state.isExpanded,
+                  !self.settings.hoverToExpand || self.pillHidden else { return }
             self.expand()
         }
         panel.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
@@ -218,17 +221,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { _ in syncFrontApp() })
-        // While the pill is hidden (Chrome frontmost / crowded bar) the window
-        // goes fully click-through, so clicks land on whatever is under it —
-        // e.g. Chrome's tab strip right where the pill normally sits.
-        state.$chromeActive.map { _ in }
-            .merge(with: state.$pillCrowded.map { _ in },
-                   state.$isExpanded.map { _ in })
-            .sink { [weak self] in
-                DispatchQueue.main.async { self?.updateClickThrough() }
-            }
-            .store(in: &cancellables)
-
         // Status items come and go without any notification — re-measure on a
         // slow cadence (CGWindowList + AX are too heavy for the hover poll).
         nudgePoll = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
@@ -242,6 +234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .merge(with: media.$earHidden.map { _ in },
                    state.$toast.map { _ in },
                    agentSessions.$sessions.map { _ in })
+            // The agent scanner republishes every few seconds — throttle so
+            // CGWindowList + AX run at most once a second, not per publish.
+            .throttle(for: .seconds(1), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] in
                 DispatchQueue.main.async { self?.updatePillNudge() }
             }
@@ -753,6 +748,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Hover-to-expand off: the panel only opens on a click in the notch
         // (see host.onZoneClick).
         guard settings.hoverToExpand else { return }
+        // Pill hidden (Chrome frontmost / crowded bar): hovering must not pop
+        // the island over the user's work — only a click opens it.
+        guard !pillHidden else { return }
         guard inside, !state.isExpanded else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.state.isExpanded else { return }
@@ -918,16 +916,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if abs(nudge - state.pillNudge) > 2 { state.pillNudge = nudge }
     }
 
-    /// The hidden pill must not eat clicks meant for the app beneath it:
-    /// while it is hidden (and the island collapsed), the whole panel ignores
-    /// mouse events. Hover-expand is intentionally off in that state — click
-    /// or hover anywhere over Chrome goes to Chrome, full stop.
-    private func updateClickThrough() {
-        let pillHidden = !state.isExpanded && !(metrics?.hasNotch ?? true)
-            && (state.chromeActive || state.pillCrowded)
-        if panel.ignoresMouseEvents != pillHidden {
-            panel.ignoresMouseEvents = pillHidden
-        }
+    /// The pill is hidden and hover-expand disarmed (Chrome frontmost or a
+    /// crowded menu bar): the island must not pop over the user's work, but
+    /// stays reachable by a DELIBERATE click on the pill's spot.
+    private var pillHidden: Bool {
+        !(metrics?.hasNotch ?? true) && (state.chromeActive || state.pillCrowded)
     }
 
     private func rebuildMetrics() {
