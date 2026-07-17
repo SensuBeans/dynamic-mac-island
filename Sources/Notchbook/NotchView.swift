@@ -95,15 +95,17 @@ struct NotchView: View {
         // The nav dock appears on hover over its strip or mid tab-swipe.
         let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
         let gap = NotchMetrics.islandGap
-        // Where the dock's top edge sits: pushed up into the menu-bar strip
-        // on no-notch Macs; below the physical notch on MacBooks.
-        let navTop: CGFloat = metrics.hasNotch
-            ? metrics.notchHeight + gap : 2
         // No-notch Macs: the dock shrinks to FIT inside the menu bar, so the
         // panel below never has to step aside for it.
         let dockHeight: CGFloat = metrics.hasNotch
             ? NotchMetrics.navIslandHeight
             : max(18, metrics.menuBarHeight - 4)
+        // Where the dock's top edge sits: centered in the menu-bar strip on
+        // no-notch Macs (same alignment as the pill); below the physical
+        // notch on MacBooks.
+        let navTop: CGFloat = metrics.hasNotch
+            ? metrics.notchHeight + gap
+            : max(2, (metrics.menuBarHeight - dockHeight) / 2)
         let totalExpandedHeight = metrics.notchHeight + gap
             + NotchMetrics.navIslandHeight + gap + expandedSize.height
         return ZStack(alignment: .top) {

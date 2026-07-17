@@ -19,15 +19,16 @@ struct NotchMetrics {
     /// True on a lower-DPI (non-retina) panel — e.g. the 1080p second monitor.
     var isLowDPI: Bool { screen.backingScaleFactor < 2 }
 
-    /// Top offset of the standby pill on no-notch Macs. On retina panels it
-    /// sits vertically centered within the menu bar — neat among the status
-    /// icons. Lower-DPI panels render everything larger, so it rides a little
-    /// higher there. Taller media / toast states grow downward from here.
+    /// Top offset of the standby pill on no-notch Macs: vertically centered
+    /// within THIS screen's menu bar — neat among the status icons — whatever
+    /// the panel's DPI. (The old hardcoded low-DPI drop was tuned when that
+    /// panel was a secondary display; as the menu-bar screen it must center
+    /// like any other.) Taller media / toast states grow downward from here.
+    /// No menu bar (hidden/secondary): a small fixed drop.
     var pillDrop: CGFloat {
-        if screen.backingScaleFactor >= 2 {
-            return max(1, (menuBarHeight - notchHeight) / 2 - 2)
-        }
-        return 2
+        guard menuBarHeight > 0 else { return 2 }
+        let centered = (menuBarHeight - notchHeight) / 2
+        return max(1, screen.backingScaleFactor >= 2 ? centered - 2 : centered)
     }
 
     /// Height of the compact now-playing pill (pill mode): album art + waves.
