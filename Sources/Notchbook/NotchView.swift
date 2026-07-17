@@ -503,22 +503,18 @@ struct NotchView: View {
         .frame(height: metrics.notchHeight, alignment: .center)
     }
 
-    /// Clawd — Claude Code's crab mascot, as original 8-bit pixel art (the
-    /// mascot's own blocky style, which also stays crisp at pill size).
-    /// `#` pixels take the tint (Claude terracotta), `o` pixels are the eyes.
+    /// Clawd — pixel-for-pixel the mark Claude Code draws at startup
+    /// (`▗ ▗   ▖ ▖` over `▘▘ ▝▝` in quadrant blocks): a wide flat terracotta
+    /// bar, two black eye-notches on its bottom edge, four staggered feet.
+    /// `#` pixels take the tint, `o` pixels are the black eyes.
     private struct ClawdMark: View {
-        var size: CGFloat = 13  // overall height; the crab is a bit wider
+        var size: CGFloat = 13  // overall width; the mark is wide and flat
         var tint: Color
 
         private static let rows: [String] = [
-            "#.#.....#.#",  // open pincer prongs
-            ".#.......#.",  // pincer joints
-            "..#.....#..",  // arms angling in
-            "..#######..",  // shell top
-            ".##o###o##.",  // eyes
-            "###########",  // shell, full width
-            ".#########.",
-            "..#.#.#.#..",  // leg stubs
+            "..##############..",  // bar top
+            ".####o######o####.",  // bar bottom edge, eye notches
+            "..#.#........#.#..",  // feet
         ]
 
         var body: some View {
@@ -535,11 +531,11 @@ struct NotchView: View {
                         let rect = CGRect(x: x0 + CGFloat(c) * px,
                                           y: y0 + CGFloat(r) * px,
                                           width: px + 0.4, height: px + 0.4)
-                        ctx.fill(Path(rect), with: .color(ch == "o" ? .white : tint))
+                        ctx.fill(Path(rect), with: .color(ch == "o" ? .black : tint))
                     }
                 }
             }
-            .frame(width: size * 1.375, height: size)
+            .frame(width: size, height: size * 3 / 18 + 2)
         }
     }
 
@@ -571,7 +567,8 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    ClawdMark(size: 13, tint: tint)
+                    // 18pt = exactly 1pt per art pixel — eyes stay crisp.
+                    ClawdMark(size: 18, tint: tint)
                         .opacity(pulse ? 0.35 : 1)
                         .onAppear { pulse = true }
                         .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
