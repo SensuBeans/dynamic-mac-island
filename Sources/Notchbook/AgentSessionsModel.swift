@@ -88,6 +88,12 @@ struct AgentSession: Identifiable {
     var name: String?         // friendly session name ("core-00")
     var autoResumeAt: Date?   // armed auto-resume fire time (nil = not armed / notify-only)
 
+    /// The tool call this row is waiting to approve — name + one-line detail.
+    /// Non-nil ONLY on `.waiting` rows (populated in `makeSession`); a working
+    /// session's in-flight tool call is deliberately left nil so it can't
+    /// masquerade as a permission prompt in the UI.
+    var pendingTool: (name: String, detail: String)?
+
     /// A session parked waiting for the user (a permission prompt or the end of
     /// a turn) — the states the notch offers an Approve / Open action for.
     var needsAttention: Bool { state == .waiting || state == .interrupted }
@@ -948,10 +954,69 @@ final class AgentSessionsModel: ObservableObject {
                 if ctx > p.maxContextTokens { p.maxContextTokens = ctx }
                 p.outputTokens += usage["output_tokens"] as? Int ?? 0
             }
+
+            // Pending-tool tracking: the LAST tool_use block in this assistant
+            // turn becomes the pending call; a tool-less (final-text) turn clears
+            // it. Results may still arrive out of order for parallel calls, but
+            // the most-recent tool_use is the one the prompt is gating on, and
+            // its result is the last to land — so tracking just the last id is
+            // enough and keeps this O(1), no unbounded seen-set.
+            if let blocks = message["content"] as? [[String: Any]] {
+                var lastToolUse: (id: String, name: String, input: [String: Any])?
+                for b in blocks where (b["type"] as? String) == "tool_use" {
+                    if let id = b["id"] as? String, let name = b["name"] as? String {
+                        lastToolUse = (id, name, b["input"] as? [String: Any] ?? [:])
+                    }
+                }
+                if let tu = lastToolUse {
+                    p.pendingToolID = tu.id
+                    p.pendingToolName = tu.name
+                    p.pendingToolDetail = Self.toolDetail(name: tu.name, input: tu.input)
+                } else {
+                    p.pendingToolID = nil           // final-text turn: nothing pending
+                    p.pendingToolName = ""
+                    p.pendingToolDetail = ""
+                }
+            }
         } else {   // user
             p.lastMsgIsAssistant = false
             p.lastMsgStopReason = nil
             p.lastMsgIsInterrupt = Self.isInterrupt(message["content"])
+
+            // A tool_result answering the pending call clears the preview.
+            if let blocks = message["content"] as? [[String: Any]] {
+                for b in blocks where (b["type"] as? String) == "tool_result" {
+                    if let rid = b["tool_use_id"] as? String, rid == p.pendingToolID {
+                        p.pendingToolID = nil
+                        p.pendingToolName = ""
+                        p.pendingToolDetail = ""
+                    }
+                }
+            }
+        }
+    }
+
+    /// One-line, ≤200-char human detail for a pending tool call, per tool:
+    /// Bash → first line of the command (whitespace collapsed); Edit/Write/Read →
+    /// last two path components of file_path; WebFetch → the url's host; anything
+    /// else → "" (the name alone carries the preview).
+    private static func toolDetail(name: String, input: [String: Any]) -> String {
+        func cap(_ s: String) -> String { String(s.prefix(200)) }
+        switch name {
+        case "Bash":
+            let cmd = (input["command"] as? String) ?? ""
+            let firstLine = cmd.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            let collapsed = firstLine.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            return cap(collapsed)
+        case "Edit", "Write", "Read", "NotebookEdit":
+            let path = (input["file_path"] as? String) ?? (input["notebook_path"] as? String) ?? ""
+            let parts = path.split(separator: "/").suffix(2)
+            return cap(parts.joined(separator: "/"))
+        case "WebFetch":
+            let url = (input["url"] as? String) ?? ""
+            return cap(URL(string: url)?.host ?? "")
+        default:
+            return ""
         }
     }
 
@@ -1050,7 +1115,11 @@ final class AgentSessionsModel: ObservableObject {
             host: identity.host,
             pid: meta?.pid,
             name: meta?.name,
-            autoResumeAt: nil)
+            autoResumeAt: nil,
+            // Only a session the process reports as waiting shows an approve
+            // preview; otherwise nil, so a working session's live tool call never
+            // reads as a pending permission prompt.
+            pendingTool: state == .waiting ? p?.pendingTool : nil)
     }
 
     // MARK: - Ack count + publish throttle (ioQueue only)
@@ -1183,6 +1252,23 @@ private final class FileParser {
     var lastMsgStopReason: String?
     var lastMsgIsInterrupt = false
 
+    // Pending tool call (for the Approve preview). The last assistant `tool_use`
+    // block whose id has not yet been answered by a `tool_result`. A session
+    // parked at a permission prompt is exactly this shape: the assistant turn
+    // proposed a tool, no result has landed. Cleared when its result arrives or
+    // the assistant produces a tool-less (final-text) turn.
+    var pendingToolID: String?
+    var pendingToolName = ""
+    var pendingToolDetail = ""   // pre-truncated to ≤200 chars
+
+    /// The unanswered tool call, if any — name + one-line detail. The model only
+    /// surfaces this on `.waiting` rows (a working session's in-flight tool must
+    /// not read as a permission prompt), so callers gate on state, not here.
+    var pendingTool: (name: String, detail: String)? {
+        guard pendingToolID != nil, !pendingToolName.isEmpty else { return nil }
+        return (pendingToolName, pendingToolDetail)
+    }
+
     // Debounce / transition tracking.
     var currentState: AgentState?
     var stateSince: Date
@@ -1208,6 +1294,9 @@ private final class FileParser {
         lastMsgIsAssistant = false
         lastMsgStopReason = nil
         lastMsgIsInterrupt = false
+        pendingToolID = nil
+        pendingToolName = ""
+        pendingToolDetail = ""
         currentState = nil
         stateSince = now
     }

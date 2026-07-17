@@ -216,6 +216,10 @@ private struct AgentRow: View {
                             .font(.system(size: 9))
                             .foregroundStyle(.white.opacity(0.5))
                             .monospacedDigit()
+                    } else if session.state == .waiting, let pending = session.pendingTool {
+                        // Approve preview: show WHAT is being approved instead of
+                        // "Waiting · 12s". Same 9pt line, no extra row.
+                        approvePreview(pending)
                     } else {
                         Text(session.state.label)
                             .font(.system(size: 9, weight: .medium))
@@ -263,6 +267,28 @@ private struct AgentRow: View {
         }
     }
 
+    /// Replaces the "Waiting · 12s" state line on a `.waiting` row with the
+    /// pending tool call: `Bash · <command>` — tool name in orange semibold, the
+    /// detail (command / path / host) in dim mono, one line, middle-truncated so
+    /// a long command yields gracefully. No time-in-state here: the command is
+    /// the payload and the ✓ tooltip carries it in full — dropping the timer
+    /// keeps this to a single fixed-height line (the island's geometry is
+    /// sacred). Same 9pt row as the label it stands in for; adds no line.
+    @ViewBuilder
+    private func approvePreview(_ pending: (name: String, detail: String)) -> some View {
+        Text(pending.name)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(Color.orange.opacity(0.95))
+            .fixedSize()
+        if !pending.detail.isEmpty {
+            Text("· \(pending.detail)")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.55))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
     private var terminalTagText: (symbol: String, text: String)? {
         switch session.host {
         case .notch:                       return ("sparkle", "notch")
@@ -303,7 +329,7 @@ private struct AgentRow: View {
                         .background(Capsule().fill(.green))
                 }
                 .buttonStyle(.plain)
-                .help("Approve — send Return to accept the prompt")
+                .help(approveHelp)
             }
             if canOpen, hovered || session.needsAttention {
                 Button { open() } label: {
@@ -320,6 +346,15 @@ private struct AgentRow: View {
         .animation(.easeOut(duration: 0.12), value: hovered)
         .animation(.spring(response: 0.35, dampingFraction: 0.7), value: session.autoResumeAt)
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: resumeCancelling)
+    }
+
+    /// Approve tooltip — names the exact pending call (full detail, ≤200 chars)
+    /// so the user can read the whole command the row can only show truncated.
+    private var approveHelp: String {
+        if let p = session.pendingTool, !p.detail.isEmpty {
+            return "Approve: \(p.name) \(p.detail)"
+        }
+        return "Approve — send Return to accept the prompt"
     }
 
     private var openHelp: String {
