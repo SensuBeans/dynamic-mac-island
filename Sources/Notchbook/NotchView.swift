@@ -193,6 +193,11 @@ struct NotchView: View {
                     .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
                                                 style: .continuous))
                     .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
+                    // With the dock hidden the panel rides up into its slot,
+                    // hugging the notch; revealing the dock nudges it back down.
+                    .offset(y: navShown ? 0 : -(NotchMetrics.navIslandHeight + gap))
+                    .animation(.spring(response: 0.28, dampingFraction: 0.8),
+                               value: navShown)
             }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
