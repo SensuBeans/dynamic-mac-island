@@ -80,6 +80,27 @@ struct NotchView: View {
     /// churned underneath it — the reported open stutter. This work item defers
     /// the reveal until the state settles, so the ear opens ONCE, cleanly.
     @State private var earRevealWork: DispatchWorkItem?
+    /// Uptime past which the reveal stops waiting for artwork and opens with
+    /// whatever content exists (see the show leg of the earT onChange).
+    @State private var earRevealGiveUp: Double = 0
+
+    /// One reveal tick: if the artwork hasn't landed and the budget hasn't
+    /// lapsed, re-arm; otherwise run the morph. Every tick re-checks
+    /// `showMediaEar` so a track stopping mid-wait cancels cleanly, and the
+    /// pending item stays in `earRevealWork` so any state flip cancels it.
+    private func scheduleEarReveal(delay: Double, animate: @escaping (Double) -> Void) {
+        let work = DispatchWorkItem {
+            guard showMediaEar else { return }
+            if media.artwork == nil,
+               ProcessInfo.processInfo.systemUptime < earRevealGiveUp {
+                scheduleEarReveal(delay: 0.2, animate: animate)
+                return
+            }
+            animate(1)
+        }
+        earRevealWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
     /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
     /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
     private var earTFreeze: Double? {
@@ -520,13 +541,18 @@ struct NotchView: View {
                 // now-playing toast, the width spring), THEN open in one clean pass.
                 // No wait under the debug harness — it forces a synthetic ear with
                 // no real player, so there is nothing to settle.
-                let settle = liquidIslandDebug ? 0 : 0.32
-                let work = DispatchWorkItem {
-                    guard showMediaEar else { return }   // still wanted after settling
+                if liquidIslandDebug {
                     animateEar(1)
+                } else {
+                    // BOTH content pieces must activate together (user diagnosis:
+                    // the art and the sound wave arriving separately IS the
+                    // end-of-reveal glitch — EQ lands with the morph, artwork
+                    // pops in whenever its fetch finishes). Hold the reveal
+                    // until the artwork exists, within a budget; art-less
+                    // sources reveal EQ-only when the budget lapses.
+                    earRevealGiveUp = ProcessInfo.processInfo.systemUptime + 1.8
+                    scheduleEarReveal(delay: 0.32, animate: animateEar)
                 }
-                earRevealWork = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + settle, execute: work)
             } else {
                 animateEar(0)
             }
