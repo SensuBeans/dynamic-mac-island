@@ -60,16 +60,16 @@ struct NotchView: View {
     /// you switch pages and the power button is never clipped. Starts at a sane
     /// default until the first probe measurement lands (within one layout pass).
     @State private var navBarWidth: CGFloat = 300
+    /// Live glyph centers of the nav controls (in navRow space) + row width,
+    /// fed to LiquidNav so each icon-melt dot lands exactly on its real icon.
+    @State private var navIconCenters: [CGFloat] = []
+    @State private var navRowWidth: CGFloat = 0
 
     /// Media-ear reveal progress (0 = bare notch, 1 = ear resting). Driven off
     /// `showMediaEar` on an easeInOutCubic curve; drives the LiquidEar "Side
     /// Bulge" morph (E1). Its rest window hands off to the crisp backing + real
     /// ear content, so the goo is gone once settled.
     @State private var earT: Double = 0
-    /// Measured album-thumb + equalizer-cluster centers (in "earIsland" space) so
-    /// the content dots melt to exactly the real views — the ear's `NavIconCenters`.
-    @State private var earArtCenterX: CGFloat = 0
-    @State private var earEqCenterX: CGFloat = 0
     /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
     /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
     private var earTFreeze: Double? {
@@ -93,6 +93,12 @@ struct NotchView: View {
     private var renderCloseT: Double { closeTFreeze ?? closeT }
     /// `-LiquidClosePink 1`: flood the close goo silhouette flat pink.
     private var liquidClosePink: Bool { UserDefaults.standard.bool(forKey: "LiquidClosePink") }
+    /// While the Surface Return close runs, the container must KEEP its expanded
+    /// height — the legacy 0.28s collapse spring was crushing the liquid's canvas
+    /// mid-flight (the reported "janky, fast, fades instead of merging"). Set on
+    /// close, released just after the morph's duration; the height snap at
+    /// release is invisible (everything but the notch is black/absorbed by then).
+    @State private var morphHoldExpanded = false
     /// `-LiquidIslandDebug 1`: slow BOTH island morphs 6× (paired with the
     /// AppDelegate auto-loop) so ear + close can be captured frame-by-frame.
     private var liquidIslandDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidIslandDebug") }
@@ -205,8 +211,6 @@ struct NotchView: View {
                               notchWidth: metrics.notchWidth,
                               notchHeight: metrics.notchHeight,
                               earWidth: metrics.mediaEarWidth,
-                              artCenterX: earArtCenterX > 0 ? earArtCenterX : nil,
-                              eqCenterX: earEqCenterX > 0 ? earEqCenterX : nil,
                               debugPink: liquidEarPink)
                         .frame(width: metrics.notchWidth + metrics.mediaEarWidth
                                        + LiquidEar.rightPad,
@@ -233,21 +237,19 @@ struct NotchView: View {
                 .frame(height: metrics.notchHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // Anchor for measuring the ear-content dot targets: x=0 is the notch's
-            // left edge, matching LiquidEar's canvas space.
-            .coordinateSpace(name: "earIsland")
-            .onPreferenceChange(EarContentCentersKey.self) { centers in
-                if centers.count >= 2 { earArtCenterX = centers[0]; earEqCenterX = centers[1] }
-            }
             // Own its constant collapsed anchor (left edge flush at the notch).
             // Nothing here animates horizontally on expand — the bar just fades
             // IN PLACE, killing the old diagonal drag.
             .padding(.leading, metrics.islandLeadingPad(expanded: false))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(state.isExpanded ? 0 : 1)
+            // Hidden while expanded AND while the close liquid is still traveling
+            // — the ears/pill may only appear after the mass has been absorbed
+            // into the notch, not fade in over the morph (the reported ghost).
+            .opacity((state.isExpanded || morphHoldExpanded) ? 0 : 1)
             // Quick fade, its own curve (closer than the container spring) so the
             // bar never rides the expanded panel's bubble motion.
             .animation(.easeOut(duration: 0.2), value: state.isExpanded)
+            .animation(.easeOut(duration: 0.2), value: morphHoldExpanded)
 
             // Expanded: nav bar + content panel below the notch. The nav bar
             // "goo merges" — it buds up out of the panel's top edge on a liquid
@@ -290,8 +292,8 @@ struct NotchView: View {
         // Full-window width, non-animating horizontally — each layer owns its own
         // constant anchor, so expand/collapse has zero sideways drift.
         .frame(maxWidth: .infinity,
-               minHeight: state.isExpanded ? totalExpandedHeight : size.height,
-               maxHeight: state.isExpanded ? totalExpandedHeight : size.height,
+               minHeight: (state.isExpanded || morphHoldExpanded) ? totalExpandedHeight : size.height,
+               maxHeight: (state.isExpanded || morphHoldExpanded) ? totalExpandedHeight : size.height,
                alignment: .top)
         .opacity(state.spaceTransitioning && !state.pinned ? 0 : 1)
         .animation(.easeOut(duration: 0.12), value: state.spaceTransitioning)
@@ -342,6 +344,18 @@ struct NotchView: View {
             let dur = base * (liquidIslandDebug ? 6 : 1)
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 closeT = expanded ? 0 : 1
+            }
+            // Hold the container at expanded height for the whole close morph so
+            // the legacy collapse spring can't crush the liquid's canvas; release
+            // just past the duration (the snap is invisible — all mass is inside
+            // the notch by then). Expanding cancels any pending hold instantly.
+            if expanded {
+                morphHoldExpanded = false
+            } else {
+                morphHoldExpanded = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.05) {
+                    if !state.isExpanded { morphHoldExpanded = false }
+                }
             }
             // Animate the nav melt (was a hard snap) so it reads as the capsule-
             // melt beat of the close, then rests flat for the next expand.
@@ -491,7 +505,6 @@ struct NotchView: View {
                         } else {
                             HStack(spacing: 6) {
                                 artworkThumb(side: metrics.notchHeight - 10)
-                                    .background(earDotAnchor)
                                 Group {
                                     if np.isPlaying {
                                         EqualizerBars(barCount: 4, maxHeight: 14,
@@ -505,7 +518,6 @@ struct NotchView: View {
                                     }
                                 }
                                 .frame(width: 30)
-                                .background(earDotAnchor)
                             }
                             .transition(.opacity.combined(with: .scale(scale: 0.85)))
                         }
@@ -648,15 +660,6 @@ struct NotchView: View {
         }
     }
 
-    /// Reports a media-ear element's center-x in "earIsland" space as a LiquidEar
-    /// dot target. Emitted in tree order: album thumb first, then equalizer.
-    private var earDotAnchor: some View {
-        GeometryReader { g in
-            Color.clear.preference(key: EarContentCentersKey.self,
-                                   value: [g.frame(in: .named("earIsland")).midX])
-        }
-    }
-
     private func artworkThumb(side: CGFloat) -> some View {
         Group {
             if let art = media.artwork {
@@ -699,6 +702,31 @@ struct NotchView: View {
         var body: some View { content(t) }
     }
 
+    /// Each nav control's glyph center-x within the control row ("navRow"
+    /// space). The icon-melt dots spread to EXACTLY these positions, so every
+    /// icon sharpens out of its own dot — without this the dots landed on an
+    /// even grid that matched nothing and the handoff read as two separate
+    /// animations.
+    private struct NavIconCentersKey: PreferenceKey {
+        static var defaultValue: [CGFloat] = []
+        static func reduce(value: inout [CGFloat], nextValue: () -> [CGFloat]) {
+            value.append(contentsOf: nextValue())
+        }
+    }
+    private struct NavRowWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+    /// Anchor a control's dot target: reports its center-x in navRow space.
+    private func dotAnchor<V: View>(_ view: V) -> some View {
+        view.background(GeometryReader { g in
+            Color.clear.preference(key: NavIconCentersKey.self,
+                                   value: [g.frame(in: .named("navRow")).midX])
+        })
+    }
+
     /// Surface-bulge droplet + liquid neck (metaball), behind the panel so the
     /// neck tucks in seamlessly. Only drawn while there's something to reveal.
     /// The blob hugs the measured control width.
@@ -724,6 +752,18 @@ struct NotchView: View {
                           navHeight: NotchMetrics.navIslandHeight,
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
+                          // One dot per real control: every visible page tab
+                          // plus the pin, settings, and power buttons — the
+                          // dots sharpen into exactly the icons that exist.
+                          iconCount: state.visibleTabs.count + 3,
+                          iconSpacing: (navBlobW - 70)
+                              / CGFloat(max(1, state.visibleTabs.count + 2)),
+                          // Measured glyph centers → each dot IS its icon's
+                          // position; empty until the first layout lands, then
+                          // the uniform fallback above never shows again.
+                          iconOffsets: navRowWidth > 0
+                              ? navIconCenters.map { $0 - navRowWidth / 2 }
+                              : [],
                           debugPink: liquidNavPink)
                     // 18pt taller + shifted up to match LiquidNav's topPad —
                     // gives the droplet overshoot room instead of a flat clip.
@@ -809,14 +849,17 @@ struct NotchView: View {
         // fade in over iconIn = smooth(0.88, 1) with a slight scale-up, so the
         // dots sharpen INTO the real icons rather than popping over them.
         NavTDriven(t: renderNavT) { navT in
-            // The crisp SF Symbols cross-fade straight onto the formed goo capsule
-            // over iconIn = smooth(0.84, 1) with a gentle scale-up — no dot-melt.
+            // The dot metaball carries the icons until the very end, then the
+            // crisp controls cross-fade in over iconIn = smooth(0.84, 1) with a
+            // gentle scale-up, so the dots sharpen INTO the real icons.
             let raw = min(1, max(0, (navT - 0.84) / 0.16))
             let iconIn = raw * raw * (3 - 2 * raw)
             let scale = 0.85 + 0.15 * CGFloat(iconIn)
             navControls()
                 .frame(height: NotchMetrics.navIslandHeight)
                 .fixedSize(horizontal: true, vertical: false)
+                .onPreferenceChange(NavIconCentersKey.self) { navIconCenters = $0 }
+                .onPreferenceChange(NavRowWidthKey.self) { navRowWidth = $0 }
                 .opacity(iconIn)
                 .scaleEffect(scale, anchor: .center)
                 // Hit areas live only at rest — mid-morph the buttons aren't there.
@@ -856,36 +899,40 @@ struct NotchView: View {
                              measuring: Bool = false) -> some View {
         HStack(spacing: 10) {
             tabBar(selectedOverride: selectedOverride, measuring: measuring)
-            Button { state.pinned.toggle() } label: {
+            dotAnchor(Button { state.pinned.toggle() } label: {
                 Image(systemName: state.pinned ? "pin.fill" : "pin")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
                     .rotationEffect(.degrees(state.pinned ? 0 : 45))
-            }
+            })
             .buttonStyle(.plain)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
             .help(state.pinned ? "Unpin — collapse when the mouse leaves"
                                : "Pin the panel open")
-            Button {
+            dotAnchor(Button {
                 // Gear toggles the whole section: open at the root list, or close.
                 state.settingsRoute = state.settingsRoute == nil ? .root : nil
             } label: {
                 Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.showingSettings ? 0.9 : 0.4))
-            }
+            })
             .buttonStyle(.plain)
             .help("Settings")
-            Button { state.onQuit?() } label: {
+            dotAnchor(Button { state.onQuit?() } label: {
                 Image(systemName: "power")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.4))
-            }
+            })
             .buttonStyle(.plain)
             .help("Quit Notchbook")
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
+        .coordinateSpace(name: "navRow")
+        .background(GeometryReader { g in
+            Color.clear.preference(key: NavRowWidthKey.self, value: g.size.width)
+        })
     }
 
     /// The content panel island: frosted glass, ambient album glow, the tab.
@@ -1000,8 +1047,8 @@ struct NotchView: View {
         let targeted = selectedOverride == nil && swipeTarget == tab
         let isDragging = selectedOverride == nil && draggingTab == tab
         return HStack(spacing: 4) {
-            Image(systemName: tab.icon)
-                .font(.system(size: 11, weight: .medium))
+            dotAnchor(Image(systemName: tab.icon)
+                .font(.system(size: 11, weight: .medium)))
             if selected {
                 Text(tab.title)
                     .font(.system(size: 11, weight: .semibold))

@@ -36,6 +36,12 @@ struct LiquidNav: View, Animatable {
     var navHeight: CGFloat        // 34
     var navSlot: CGFloat          // navIslandHeight + gap (43): panel-top travel
     var panelTopRadius: CGFloat
+    var iconCount: Int = 5
+    var iconSpacing: CGFloat = 40 // dot spread between adjacent icons at full spread
+    /// Measured per-icon center offsets from the capsule's center. When set,
+    /// dots spread from the cluster to EXACTLY these positions so every real
+    /// icon sharpens out of its own dot; overrides iconCount/iconSpacing.
+    var iconOffsets: [CGFloat] = []
     /// `-LiquidNavPink 1`: fill the metaball body fully-opaque hot pink (no glow
     /// tint, no fade) so the raw silhouette can be judged frame-by-frame. Phase-1
     /// geometry harness only; off in normal use.
@@ -50,10 +56,17 @@ struct LiquidNav: View, Animatable {
     /// bridge — 0.42 necks through the transition and the crisp cross-fade
     /// (e ∈ [0.9,1]) hides whatever web remains at the very end.
     static let bodyThreshold: Double = 0.42
+    /// The icon dots are tiny; full-strength blur would dissolve them, so the
+    /// dot pass runs a gentler blur with the same 8/19 cutoff. Small radii merge
+    /// into one blob when clustered and separate cleanly as they spread.
+    static let dotBlur: CGFloat = 3.5
+    static let dotThreshold: Double = 0.42
     /// The island's material tone — a dark glass, near-opaque so a hint of the
     /// desktop still reads through. (Drawn directly, not masked over an
     /// NSVisualEffectView, which ignores masks and left the goo invisible.)
     static let fill = Color(red: 0.12, green: 0.13, blue: 0.155)
+    /// The icon dots read as light (they become the white SF Symbols).
+    static let dotFill = Color(white: 0.86)
 
     var body: some View {
         Canvas { ctx, size in
@@ -213,9 +226,36 @@ struct LiquidNav: View, Animatable {
                             lineWidth: 0.9)
                 }
             }
-            // The capsule forms as bare liquid glass; the real SF Symbols simply
-            // cross-fade in on top (NotchView's `navControlsLayer`, iconIn window).
-            // No intermediate dot-melt — the icons resolve straight onto the goo.
+
+            // --- Icon melt: one light blob → five spreading dots → SF Symbols ---
+            // The dots ride the droplet's center. They only exist once the body
+            // has formed (appear) and dissolve as the real icons cross-fade in
+            // (iconIn); the real icons themselves are drawn by NotchView.
+            let appear = smooth(0.5, 0.68, e)
+            let iconIn = smooth(0.84, 1, e)   // matches NotchView's icon fade-in window
+            let dotsOpacity = appear * (1 - iconIn)
+            if dotsOpacity > 0.001 {
+                let spread = smooth(0.62, 0.9, e)  // clustered → spread apart
+                let dotR = 7 - 2 * spread          // 7pt merged → 5pt distinct
+                var dotCtx = ctx
+                dotCtx.opacity = Double(dotsOpacity)
+                dotCtx.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))
+                dotCtx.addFilter(.blur(radius: Self.dotBlur))
+                dotCtx.drawLayer { layer in
+                    // Cluster → each icon's REAL measured position (fallback:
+                    // symmetric uniform spread until the first layout lands).
+                    let mid = CGFloat(iconCount - 1) / 2
+                    let offsets = !iconOffsets.isEmpty
+                        ? iconOffsets
+                        : (0..<iconCount).map { (CGFloat($0) - mid) * iconSpacing }
+                    for off0 in offsets {
+                        let off = off0 * spread
+                        let d = CGRect(x: cx + off - dotR, y: centerY - dotR,
+                                       width: dotR * 2, height: dotR * 2)
+                        layer.fill(Path(ellipseIn: d), with: .color(.white))
+                    }
+                }
+            }
         }
         .opacity(debugPink ? 1 : 0.95)
     }
