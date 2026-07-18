@@ -250,7 +250,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     title: "Limits reset — \(project)",
                     subtitle: name.map { "\($0) is waiting for you" } ?? "waiting for you",
                     color: .orange))
-                NSSound(named: "Glass")?.play()
             } else {
                 self.state.showToast(NotchToast(
                     icon: "bolt.fill",
@@ -276,7 +275,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                             title: "Needs you — \(session.project)",
                                             subtitle: session.name,
                                             color: .orange))
-            NSSound(named: "Glass")?.play()
         }
 
         pomodoro.onPhaseEnd = { [weak self] ended in

@@ -196,6 +196,7 @@ struct MediaTab: View {
     /// not scrubbing. Shown live; the actual seek fires on release.
     @State private var scrubFraction: Double?
     @State private var progressHover = false
+    @State private var volumeHover = false
 
     var body: some View {
         if let np = media.nowPlaying {
@@ -242,11 +243,13 @@ struct MediaTab: View {
                         .frame(height: 4)
                     Capsule().fill(media.accent)
                         .frame(width: max(4, geo.size.width * volume / 100), height: 4)
-                    // Knob so the slider reads as a slider.
+                    // Knob appears on hover, like the progress bar's — the
+                    // resting look stays clean.
                     Circle().fill(.white)
                         .frame(width: 10, height: 10)
                         .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
                         .offset(x: max(0, geo.size.width * volume / 100 - 5))
+                        .opacity(volumeHover ? 1 : 0)
                 }
                 .frame(height: geo.size.height)
                 .contentShape(Rectangle().inset(by: -8))
@@ -257,8 +260,10 @@ struct MediaTab: View {
                         }
                         .onEnded { _ in media.setPlayerVolume(volume) }
                 )
+                .onHover { volumeHover = $0 }
             }
             .frame(height: 10)
+            .animation(.easeOut(duration: 0.12), value: volumeHover)
             Image(systemName: "speaker.wave.2.fill")
                 .font(.system(size: 8))
                 .foregroundStyle(.white.opacity(0.4))
