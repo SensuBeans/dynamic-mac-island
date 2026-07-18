@@ -106,20 +106,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let x: CGFloat
             if self.state.isExpanded {
                 let onMirror = self.state.currentTab == .mirror
-                if self.state.currentTab == .tray {
+                // LOCKSTEP with NotchView.expandedSize — every branch below
+                // must mirror it exactly (settings footprint, hug-sized tabs,
+                // mirror's opt-in placeholder) or the hover rect drifts from
+                // the rendered island and it collapses under the cursor.
+                if self.state.showingSettings {
+                    s = NotchMetrics.agentsIslandSize
+                } else if self.state.currentTab == .tray {
                     s = self.metrics.trayExpandedSize(itemCount: self.tray.items.count,
                                                       cell: self.settings.trayTileSize)
                 } else if self.state.currentTab == .terminal {
                     s = NotchMetrics.terminalIslandSize
                 } else if self.state.currentTab == .agents {
-                    s = NotchMetrics.agentsIslandSize
+                    s = NotchView.hugSize(cap: NotchMetrics.agentsIslandSize,
+                                          natural: self.state.tabHugHeight)
                 } else if self.state.currentTab == .servers {
-                    s = NotchMetrics.serversIslandSize
+                    s = NotchView.hugSize(cap: NotchMetrics.serversIslandSize,
+                                          natural: self.state.tabHugHeight)
                 } else if self.state.currentTab == .calendar {
                     s = self.metrics.calendarExpandedSize(monthMode: self.state.calendarMonthMode)
                 } else {
-                    s = self.metrics.expandedSize(zoomed: onMirror,
-                                                  large: onMirror && self.state.mirrorBig)
+                    let mirrorLive = onMirror && self.mirror.wantsRunning
+                    s = self.metrics.expandedSize(zoomed: mirrorLive,
+                                                  large: mirrorLive && self.state.mirrorBig)
                 }
                 // Center on the ACTUAL island width so hover hit-testing tracks
                 // the rendered island (terminal is wider than the standard

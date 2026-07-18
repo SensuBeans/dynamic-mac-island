@@ -206,9 +206,11 @@ struct NotchView: View {
         } else if state.currentTab == .terminal {
             return NotchMetrics.terminalIslandSize
         } else if state.currentTab == .agents {
-            return NotchMetrics.agentsIslandSize
+            return Self.hugSize(cap: NotchMetrics.agentsIslandSize,
+                                natural: state.tabHugHeight)
         } else if state.currentTab == .servers {
-            return NotchMetrics.serversIslandSize
+            return Self.hugSize(cap: NotchMetrics.serversIslandSize,
+                                natural: state.tabHugHeight)
         } else if state.currentTab == .calendar {
             return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
         }
@@ -217,6 +219,17 @@ struct NotchView: View {
         // does it expand to the zoomed footprint — and shrinks back on stop.
         let mirrorLive = state.currentTab == .mirror && mirror.wantsRunning
         return metrics.expandedSize(zoomed: mirrorLive, large: mirrorLive && state.mirrorBig)
+    }
+
+    /// Hug-sized tab panels (Agents/Servers): content height + the panel's
+    /// vertical chrome (12 top + 14 bottom), clamped between a sane floor and
+    /// the tab's cap. Before the first measurement lands, use the cap (a brief
+    /// too-big beat beats a jump from tiny). SHARED MATH with AppDelegate's
+    /// islandRect — change both or the hover rect drifts from the render.
+    static func hugSize(cap: CGSize, natural: CGFloat?) -> CGSize {
+        guard let natural else { return cap }
+        return CGSize(width: cap.width,
+                      height: min(cap.height, max(120, ceil(natural) + 26)))
     }
 
     private var island: some View {
@@ -403,6 +416,9 @@ struct NotchView: View {
             // as a zero-footprint background so it measures even while collapsed.
             .background(navWidthProbe)
             .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
+            // Hug-sized tabs report their natural content height; published on
+            // NotchState so AppDelegate's hover rect tracks the same height.
+            .onPreferenceChange(TabHugHeightKey.self) { state.tabHugHeight = $0 }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — the Surface Return
             // choreography (LiquidClose) carries all vertical motion.
@@ -440,6 +456,8 @@ struct NotchView: View {
         // Docked↔parked layout swap (nav strip placement, panel shift) springs
         // instead of snapping when the drag crosses the home threshold.
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.parked)
+        // Hug-sized tabs (Agents/Servers) grow/shrink per row — spring it.
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.tabHugHeight)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         // The placeholder→live mirror growth (standard → zoomed panel) rides

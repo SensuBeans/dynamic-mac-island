@@ -19,6 +19,17 @@ enum SettingsRoute: Equatable {
     case page(NotchTab)
 }
 
+/// Natural (unclamped) content height reported by hug-sized tabs (Agents,
+/// Servers): the island shrinks to fit their rows and grows row-by-row up to
+/// the tab's size cap instead of always renting the full 300pt panel.
+/// One mounted tab reports at a time (the content switch unmounts the rest).
+struct TabHugHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
 enum NotchTab: String, CaseIterable {
     case media, notes, timer, tray, terminal, agents, servers, calendar, mirror, stats, toggles
 
@@ -70,6 +81,11 @@ final class NotchState: ObservableObject {
     /// once the island really left the notch, otherwise pinning visibly
     /// shoved the capsule up into the hardware notch (user-flagged).
     @Published var parked = false
+    /// Live natural content height of the current hug-sized tab (Agents /
+    /// Servers), from TabHugHeightKey. Published so AppDelegate's islandRect
+    /// hover-rect can track the same dynamic height the view renders — the
+    /// two must never disagree or the island collapses under the cursor.
+    @Published var tabHugHeight: CGFloat?
     /// Cursor is over the nav dock's strip below the panel (drives its
     /// show/hide — the dock stays hidden until summoned).
     @Published var navHovered = false

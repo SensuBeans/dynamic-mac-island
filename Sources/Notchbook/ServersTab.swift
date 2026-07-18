@@ -10,12 +10,28 @@ struct ServersTab: View {
     @EnvironmentObject var servers: ServersModel
     @EnvironmentObject var state: NotchState
 
+    /// Measured natural heights for hug sizing (see TabHugHeightKey): the
+    /// island grows row-by-row with each added server up to the size cap.
+    @State private var headerH: CGFloat = 0
+    @State private var listH: CGFloat = 0
+
+    private var naturalHeight: CGFloat {
+        if servers.loaded, !servers.reachable { return 140 }
+        if servers.loaded, servers.servers.isEmpty { return 150 }
+        return headerH + 8 + listH
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             if servers.loaded, !servers.reachable {
                 unreachable
             } else {
                 header
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { headerH = g.size.height }
+                            .onChange(of: g.size.height) { headerH = $0 }
+                    })
                 if servers.loaded, servers.servers.isEmpty {
                     emptyState("No servers yet — tap ＋ to add a folder")
                 } else {
@@ -23,6 +39,7 @@ struct ServersTab: View {
                 }
             }
         }
+        .preference(key: TabHugHeightKey.self, value: naturalHeight)
         .onAppear { servers.refresh() }
     }
 
@@ -98,6 +115,12 @@ struct ServersTab: View {
             VStack(spacing: 6) {
                 ForEach(servers.servers) { ServerRow(server: $0) }
             }
+            // Natural row-stack height (unclamped, inside the scroll content).
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { listH = g.size.height }
+                    .onChange(of: g.size.height) { listH = $0 }
+            })
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }

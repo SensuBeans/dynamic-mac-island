@@ -15,6 +15,18 @@ struct AgentsTab: View {
     /// advance together without a timer per row.
     @State private var now = Date()
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Measured natural heights (usage header, row stack) so the island can
+    /// hug the content instead of renting the whole 300pt panel (the reported
+    /// "big empty space"). Reported up via TabHugHeightKey.
+    @State private var usageH: CGFloat = 0
+    @State private var rowsH: CGFloat = 0
+
+    private var hasUsage: Bool { !(agents.usage?.isEmpty ?? true) }
+    private var naturalHeight: CGFloat {
+        agents.sessions.isEmpty
+            ? 150   // empty state: sparkles + label + launch button, compact
+            : (hasUsage ? usageH + 8 : 0) + rowsH
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -23,9 +35,15 @@ struct AgentsTab: View {
             // written them at least once).
             if let usage = agents.usage, !usage.isEmpty {
                 UsageHeader(usage: usage, now: now)
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { usageH = g.size.height }
+                            .onChange(of: g.size.height) { usageH = $0 }
+                    })
             }
             sessionList
         }
+        .preference(key: TabHugHeightKey.self, value: naturalHeight)
         .onReceive(timer) { now = $0 }
         .onAppear { agents.acknowledgeCompletes() }
     }
@@ -39,6 +57,13 @@ struct AgentsTab: View {
             // simply doesn't scroll. maxHeight:.infinity bounds the scroll region.
             ScrollView(showsIndicators: true) {
                 VStack(spacing: 6) { rows }
+                    // Natural row-stack height (inside the scroll content, so
+                    // it's unclamped by the viewport) for the hug sizing.
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { rowsH = g.size.height }
+                            .onChange(of: g.size.height) { rowsH = $0 }
+                    })
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
