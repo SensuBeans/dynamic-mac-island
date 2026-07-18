@@ -732,7 +732,14 @@ struct NotchView: View {
                  // At rest this is 1, so the hover→transport morph works normally.
                  .opacity(smoothstep(0.84, 1, earE))
                 }
-                .transition(.opacity)
+                // The LiquidEar goo + the relay opacity above OWN the reveal. A
+                // plain `.transition(.opacity)` also fired on INSERTION (when
+                // nowPlaying flips), and — driven by the container's
+                // `.animation(value: hasMedia)` spring — faded the album + waves in
+                // a SECOND time on top of the goo: the reported activation glitch.
+                // Insertion is now `.identity` (liquid owns it); removal keeps the
+                // fade so music-stop tears down gracefully as the branch unmounts.
+                .transition(.asymmetric(insertion: .identity, removal: .opacity))
             }
         }
     }
