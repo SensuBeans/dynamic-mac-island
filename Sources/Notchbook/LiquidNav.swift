@@ -236,7 +236,7 @@ struct LiquidNav: View, Animatable {
             let dotsOpacity = appear * (1 - iconIn)
             if dotsOpacity > 0.001 {
                 let spread = smooth(0.62, 0.9, e)  // clustered → spread apart
-                let dotR = 7 - 2 * spread          // 7pt merged → 5pt distinct
+                let dotR = 5 - 1.5 * spread        // 5pt merged → 3.5pt distinct (user: smaller)
                 var dotCtx = ctx
                 dotCtx.opacity = Double(dotsOpacity)
                 dotCtx.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))

@@ -66,16 +66,26 @@ struct LiquidClose: View, Animatable {
             // leaves nubs sticking out under its corners after absorption.
             let w = lerp(panelWidth, notchWidth - 6, smooth(0.42, 0.96, e))
             let h = max(5, botY - topY)
+            // Dilation compensation: the 0.42 threshold pushes the silhouette
+            // ~2.5pt OUTSIDE the drawn rect, so at morph start the stand-in was
+            // born visibly fatter than the real panel it replaces (user-flagged
+            // first frame). Inset by the dilation while young; relax to the full
+            // metaball body by mid-flight when the neck needs the fat alpha.
+            let inset = 2.5 * (1 - smooth(0.25, 0.5, e))
             let panelRect = CGRect(x: cx - w / 2, y: topY, width: w, height: h)
-            let panelCorner = min(22, h / 2)
+                .insetBy(dx: inset, dy: min(inset, h / 4))
+            let panelCorner = min(22, max(2, h / 2 - inset))
             let notchFrame = CGRect(x: cx - notchWidth / 2, y: 0,
                                     width: notchWidth, height: notchHeight)
 
             let bodyShapes: (inout GraphicsContext) -> Void = { layer in
-                // The notch (real silhouette) so the panel necks into the true
-                // underside; it never deforms — the liquid meets it.
-                layer.fill(NotchShape(topRadius: NotchMetrics.topFlare, bottomRadius: 10)
-                            .path(in: notchFrame), with: .color(.white))
+                // The notch joins the liquid body only once the mass is within
+                // fusing range — before that it contributes nothing but a dilated
+                // halo over the real notch (part of the fat first frame).
+                if topY < notchHeight + 3 * Self.bodyBlur {
+                    layer.fill(NotchShape(topRadius: NotchMetrics.topFlare, bottomRadius: 10)
+                                .path(in: notchFrame), with: .color(.white))
+                }
                 // Once the mass is fully absorbed (a sliver hidden inside the
                 // notch), its blur still bleeds around the notch and DILATES the
                 // fused silhouette — a fat halo-notch that can only fade out

@@ -99,6 +99,12 @@ struct NotchView: View {
     /// close, released just after the morph's duration; the height snap at
     /// release is invisible (everything but the notch is black/absorbed by then).
     @State private var morphHoldExpanded = false
+    /// Pending debounced nav melt — cancelled whenever the nav is re-wanted, so
+    /// gesture flicker (swipe ratchet zero-crossings) can't restart the morph.
+    @State private var navHideWork: DispatchWorkItem?
+    /// Whether the current reveal was gesture-driven (swipe) — those pop in
+    /// statically and linger, instead of running the full liquid morph.
+    @State private var navShowWasSwipe = false
     /// `-LiquidIslandDebug 1`: slow BOTH island morphs 6× (paired with the
     /// AppDelegate auto-loop) so ear + close can be captured frame-by-frame.
     private var liquidIslandDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidIslandDebug") }
@@ -322,10 +328,38 @@ struct NotchView: View {
         // for screenshot tuning. Collapsing snaps to 0 with no animation so the
         // next expand starts from a flat surface.
         .onChange(of: navShown) { show in
-            let base = show ? 0.85 : 0.70
-            let dur = base * (liquidNavDebug ? 8 : 1)
-            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
-                navT = show ? 1 : 0
+            // Any pending melt dies the moment the nav is wanted again.
+            navHideWork?.cancel()
+            navHideWork = nil
+            if show {
+                // GESTURE-driven reveals don't liquid-morph: while swiping,
+                // the bar is a tab indicator and must be there NOW, static —
+                // the full bulge is for deliberate hover reveals. A swipe
+                // gets a quick pop-in instead of an 0.85s goo cycle.
+                let swipeDriven = abs(state.tabSwipeProgress) > 0.01
+                navShowWasSwipe = swipeDriven
+                let dur = swipeDriven ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
+                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                    navT = 1
+                }
+            } else {
+                // DEBOUNCED melt: the tab-swipe ratchet passes tabSwipeProgress
+                // through ZERO at every committed step, flickering navShown
+                // false for a frame — which restarted the full 0.85s morph over
+                // and over mid-gesture (the reported glitching). Only melt after
+                // navShown has been continuously false for a beat; a flicker
+                // cancels it and the capsule stays put under the gesture.
+                let work = DispatchWorkItem {
+                    withAnimation(.timingCurve(0.65, 0, 0.35, 1,
+                                               duration: 0.70 * (liquidNavDebug ? 8 : 1))) {
+                        navT = 0
+                    }
+                }
+                navHideWork = work
+                // Swipe-revealed bars LINGER (1s) so back-to-back swipes never
+                // cycle melt/reveal; hover-away melts on the short fuse.
+                let linger = navShowWasSwipe ? 1.0 : 0.25
+                DispatchQueue.main.asyncAfter(deadline: .now() + linger, execute: work)
             }
         }
         // Drive `earT` (E1 Side Bulge) on easeInOutCubic: 0.70 s show / 0.55 s
@@ -780,9 +814,15 @@ struct NotchView: View {
             let s = min(1, max(0, (navT - 0.9) / 0.1))
             // Pink harness: no cross-fade, no dimming — show the raw silhouette.
             let rest = liquidNavPink ? 0 : s * s * (3 - 2 * s)  // 0 mid-flight → 1 settled
+            // CONSTANT canvas world: framed to the STANDARD panel width, never
+            // this tab's. Tabs differ in panel size (media 460 / agents 470 /
+            // terminal 620), so a swipe's per-step tab commits were resizing
+            // the goo canvas through the container spring — the capsule
+            // convulsed on every ratchet step (the reported gesture glitching).
+            let stdW = metrics.expandedSize().width
             ZStack(alignment: .top) {
                 LiquidNav(t: navT,
-                          panelWidth: expandedSize.width,
+                          panelWidth: stdW,
                           navWidth: navBlobW,
                           navHeight: NotchMetrics.navIslandHeight,
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
@@ -802,7 +842,7 @@ struct NotchView: View {
                           debugPink: liquidNavPink)
                     // 18pt taller + shifted up to match LiquidNav's topPad —
                     // gives the droplet overshoot room instead of a flat clip.
-                    .frame(width: expandedSize.width,
+                    .frame(width: stdW,
                            height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46 + 18)
                     .offset(y: -18)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
@@ -816,7 +856,7 @@ struct NotchView: View {
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(rest)
             }
-            .frame(width: expandedSize.width,
+            .frame(width: stdW,
                    height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46,
                    alignment: .top)
             .allowsHitTesting(false)
