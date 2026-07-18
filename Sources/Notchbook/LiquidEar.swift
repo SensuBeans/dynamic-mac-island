@@ -115,8 +115,10 @@ struct LiquidEar: View, Animatable {
                 let eqX = eqCenterX ?? (notchRight + 6 + artSide + 6 + 15)
                 let ax = lerp(seamX, artX, spread)
                 let bx = lerp(seamX, eqX, spread)
-                let ar = 5.0 * s * da * (1 - 0.2 * spread)
-                let br = 4.2 * s * db * (1 - 0.2 * spread)
+                // Radii at ~65% of the first cut (5.0 / 4.2) — user-flagged as
+                // too big; this matches the nav bar's icon-melt dot scale.
+                let ar = 3.2 * s * da * (1 - 0.2 * spread)
+                let br = 2.7 * s * db * (1 - 0.2 * spread)
                 var dotCtx = ctx
                 dotCtx.opacity = dotsOpacity
                 dotCtx.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))
