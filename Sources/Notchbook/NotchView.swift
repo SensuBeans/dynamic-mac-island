@@ -389,6 +389,13 @@ struct NotchView: View {
             .padding(.top, metrics.notchHeight + gap)
             // Interactivity gated to rest — mid-morph the controls aren't there.
             .allowsHitTesting(state.isExpanded && renderCloseT < 0.05)
+            // Pinned = parkable: grab any non-interactive part of the panel or
+            // nav capsule and drag the island anywhere (native window drag —
+            // buttons/sliders/editors still win the gesture). Unpinning snaps
+            // the window back to its notch home (AppDelegate's $pinned sink).
+            // Availability-gated only for the deployment target — this Mac
+            // (macOS 26) always takes the drag branch.
+            .modifier(PinnedWindowDrag(enabled: state.pinned))
         }
         // Full-window width, non-animating horizontally — each layer owns its own
         // constant anchor, so expand/collapse has zero sideways drift.
@@ -891,6 +898,20 @@ struct NotchView: View {
     /// through this — reading the raw @State inside withAnimation snaps
     /// straight to the end value, so the branch logic never sees mid-flight
     /// t's and the liquid never draws a live frame.
+    /// Window-drag for the pinned island. `WindowDragGesture` is macOS 15+;
+    /// below that the modifier is inert (pin still holds the island open, it
+    /// just isn't parkable).
+    private struct PinnedWindowDrag: ViewModifier {
+        let enabled: Bool
+        func body(content: Content) -> some View {
+            if #available(macOS 15.0, *) {
+                content.gesture(WindowDragGesture(), isEnabled: enabled)
+            } else {
+                content
+            }
+        }
+    }
+
     private struct NavTDriven<Content: View>: View, Animatable {
         var t: Double
         private let content: (Double) -> Content

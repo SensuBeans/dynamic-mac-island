@@ -141,6 +141,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return NSRect(x: x, y: y, width: s.width, height: s.height)
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
+        // Pin = parkable island: the panel window becomes user-movable (the
+        // WindowDragGesture in NotchView needs it) and stays wherever it is
+        // dropped. Unpinning — including the collapse path, which always
+        // unpins — snaps the window back to its exact notch-home frame, so
+        // the one-fixed-window geometry holds whenever the island is docked.
+        state.$pinned
+            .removeDuplicates()
+            .sink { [weak self] pinned in
+                guard let self else { return }
+                self.panel.isMovable = pinned
+                if !pinned, let m = self.metrics {
+                    self.panel.setFrame(m.windowFrame, display: true)
+                }
+            }
+            .store(in: &cancellables)
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
         // With hover-to-expand off, a click in the notch opens the panel.
         host.onZoneClick = { [weak self] in
