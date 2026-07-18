@@ -70,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Drives the `-LiquidIslandDebug` auto-loop (ear show/hide + panel close/open,
     /// alternating) for tuning the two island morphs.
     private var liquidIslandDebugTimer: Timer?
+    /// Drives the `-LiquidAgentDebug` auto-loop (agent pill show/hide) for tuning
+    /// the LiquidAgent bud-and-pinch with a synthetic injected pill.
+    private var liquidAgentDebugTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
@@ -173,6 +176,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Liquid-island tuning harness (`-LiquidIslandDebug 1`): auto-loop the
         // ear reveal + panel close/open (slowed 6× in NotchView). No-op otherwise.
         startLiquidIslandDebugIfNeeded()
+
+        // Liquid agent-pill tuning harness (`-LiquidAgentDebug 1`): auto-loop the
+        // pill show/hide with a synthetic pill (slowed 6× in NotchView). No-op
+        // otherwise; `-LiquidAgentFreeze <e>` holds it collapsed for stills.
+        startLiquidAgentDebugIfNeeded()
 
         // Esc collapses while the panel has focus — except on the Terminal
         // tab, where Esc must reach the shell (vim/less would be unusable
@@ -874,6 +882,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                       repeats: true) { _ in step() }
     }
 
+    /// `-LiquidAgentDebug 1`: a self-driving harness for the agent-pill liquid.
+    /// It injects a SYNTHETIC collapsed pill (never touching the real agent
+    /// sessions) and loops show → hide forever while the island stays collapsed,
+    /// so the LiquidAgent bud-and-pinch (slowed 6× in NotchView) can be captured
+    /// frame-by-frame. `-LiquidAgentFreeze <e>` instead holds it shown so the
+    /// frozen morph value renders deterministically. Off by default.
+    private func startLiquidAgentDebugIfNeeded() {
+        let defaults = UserDefaults.standard
+        // Long ASCII marker so `strings` can PROVE this shipped in the running
+        // binary (short keys inline invisibly).
+        NSLog("LiquidAgentPillHarness_v01_engaged")
+
+        // Freeze: hold the pill "present" and collapsed; NotchView renders the
+        // frozen agentT over it. The synthetic pill must be set so the goo mounts.
+        if defaults.object(forKey: "LiquidAgentFreeze") != nil {
+            state.isExpanded = false
+            state.liquidAgentDebugPill = .working(2)
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidAgentDebug") else { return }
+        // Two beats: inject the pill (reveal) → clear it (absorb). Cycle a couple
+        // of states across reveals so the tinted glyph dot is exercised too.
+        let pills: [AgentSessionsModel.CollapsedPill] = [.working(2), .waiting(1), .complete(3)]
+        var beat = 0
+        let step: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.state.isExpanded = false
+            if beat % 2 == 0 {
+                self.state.liquidAgentDebugPill = pills[(beat / 2) % pills.count]
+            } else {
+                self.state.liquidAgentDebugPill = nil
+            }
+            beat += 1
+        }
+        // Delay past view mount (toggling @Published before NotchView's onChange
+        // observers exist is silently missed — the nav harness hit this bug).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { step() }
+        // Period exceeds the slowed show (0.60·6 ≈ 3.6 s) plus a settle.
+        liquidAgentDebugTimer = Timer.scheduledTimer(withTimeInterval: 4.5,
+                                                     repeats: true) { _ in step() }
+    }
+
     /// Collapse the moment the cursor leaves the visible island bounds.
     private func startMouseWatch() {
         let check: () -> Void = { [weak self] in
@@ -883,6 +934,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Freeze mode (`-LiquidNavFreeze`) likewise holds the panel open.
             if self.liquidNavDebugTimer != nil { return }
             if self.liquidIslandDebugTimer != nil { return }
+            if self.liquidAgentDebugTimer != nil { return }
             if UserDefaults.standard.object(forKey: "LiquidNavFreeze") != nil { return }
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.

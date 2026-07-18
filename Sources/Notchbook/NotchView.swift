@@ -83,6 +83,54 @@ struct NotchView: View {
     /// `-LiquidEarPink 1`: flood the ear goo silhouette flat pink for geometry tuning.
     private var liquidEarPink: Bool { UserDefaults.standard.bool(forKey: "LiquidEarPink") }
 
+    /// Agent-pill reveal progress (0 = absorbed into the island body, 1 = the
+    /// detached pill resting). Driven off `showAgentPill` on the same
+    /// easeInOutCubic curve as the ear; drives the LiquidAgent bud-and-pinch.
+    /// State changes (waiting→working→complete) keep the label's own spring — the
+    /// liquid runs ONLY on appear/disappear.
+    @State private var agentT: Double = 0
+    /// The pill's measured resting capsule rect (island space), fed to LiquidAgent
+    /// so the morph targets the exact rest geometry. Persisted so the disappear leg
+    /// can still draw after the real label unmounts.
+    @State private var agentPillFrame: CGRect = .zero
+    /// The last non-nil pill, kept so the disappear flight renders the label/tint
+    /// that is melting away (the live `activePill` is already nil by then).
+    @State private var lastAgentPill: AgentSessionsModel.CollapsedPill?
+    /// `-LiquidAgentFreeze <e>`: pin the pill morph at a static value.
+    private var agentTFreeze: Double? {
+        UserDefaults.standard.object(forKey: "LiquidAgentFreeze") == nil
+            ? nil : UserDefaults.standard.double(forKey: "LiquidAgentFreeze")
+    }
+    private var renderAgentT: Double { agentTFreeze ?? agentT }
+    /// `-LiquidAgentPink 1`: flood the pill goo silhouette flat pink.
+    private var liquidAgentPink: Bool { UserDefaults.standard.bool(forKey: "LiquidAgentPink") }
+    /// `-LiquidAgentDebug 1`: auto-loop the pill show/hide (6× slow) with a
+    /// synthetic injected pill, so the morph can be captured frame-by-frame.
+    private var liquidAgentDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidAgentDebug") }
+    /// The pill to show. Under the debug loop OR a freeze, the harness owns it
+    /// FULLY — the synthetic pill only (nil ⇒ hidden), so a stray real session
+    /// can't keep the pill alive through the loop's hide beat. Real pill otherwise.
+    private var activePill: AgentSessionsModel.CollapsedPill? {
+        if liquidAgentDebug || agentTFreeze != nil { return state.liquidAgentDebugPill }
+        return agentSessions.collapsedPill
+    }
+    /// Whether the pill should be revealed. Excludes `isExpanded` on purpose
+    /// (mirroring `showMediaEar`): the collapsed layer's opacity hides the pill on
+    /// expand and the goo host has its own `!isExpanded` guard, so the reveal
+    /// doesn't re-fire on every expand/collapse — only on real appear/disappear
+    /// and the toast handoff (toast owns the slot, so the pill melts away for it).
+    private var showAgentPill: Bool {
+        activePill != nil && state.toast == nil
+    }
+    /// Tint for a pill state (matches AgentPillLabel).
+    private func pillTint(_ pill: AgentSessionsModel.CollapsedPill) -> Color {
+        switch pill {
+        case .waiting:  return .orange
+        case .working:  return .blue
+        case .complete: return .green
+        }
+    }
+
     /// Island close/open progress (0 = fully expanded, 1 = collapsed). Driven off
     /// `state.isExpanded` on an easeInOutCubic curve (0.85 s close / 0.70 s open);
     /// drives the LiquidClose "Surface Return" morph while the logic triggers
@@ -242,6 +290,35 @@ struct NotchView: View {
                     }
                 }
 
+                // Agent pill: horizontal bud-and-pinch off the island body (ear
+                // cap when music plays, else the notch flank). Same relay
+                // discipline as the ear — the mount branch reads mid-flight `e`, so
+                // it MUST live inside the NavTDriven. Drawn above the backing, below
+                // the HStack content, so the real label sharpens in on top at rest.
+                NavTDriven(t: renderAgentT) { e in
+                    if !state.isExpanded, e > 0.02, e < 0.999, agentPillFrame != .zero,
+                       let pill = activePill ?? lastAgentPill {
+                        LiquidAgent(t: e,
+                                    notchWidth: metrics.notchWidth,
+                                    notchHeight: metrics.notchHeight,
+                                    earWidth: metrics.mediaEarWidth,
+                                    hasEar: hasMedia,
+                                    pillRect: agentPillFrame,
+                                    glyphCenterX: nil,
+                                    countCenterX: nil,
+                                    tint: pillTint(pill),
+                                    debugPink: liquidAgentPink)
+                            .frame(width: metrics.collapsedSize(withMedia: hasMedia,
+                                                                withAgent: true).width
+                                           + LiquidAgent.rightPad,
+                                   height: metrics.notchHeight
+                                           + LiquidAgent.vPadTop + LiquidAgent.vPadBottom,
+                                   alignment: .topLeading)
+                            .offset(y: -LiquidAgent.vPadTop)
+                            .allowsHitTesting(false)
+                    }
+                }
+
                 HStack(spacing: 0) {
                     // Fixed notch-width block reserves the hardware notch; content
                     // starts exactly at the notch's right edge and a trailing
@@ -258,6 +335,9 @@ struct NotchView: View {
                 .frame(height: metrics.notchHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // The pill morph measures + draws in this space (island top-left).
+            .coordinateSpace(name: "agentIsland")
+            .onPreferenceChange(AgentPillFrameKey.self) { agentPillFrame = $0 }
             // Own its constant collapsed anchor (left edge flush at the notch).
             // Nothing here animates horizontally on expand — the bar just fades
             // IN PLACE, killing the old diagonal drag.
@@ -385,10 +465,28 @@ struct NotchView: View {
                 earT = show ? 1 : 0
             }
         }
-        // Seed the ear at rest if music is already playing at launch (onChange
+        // Drive `agentT` (LiquidAgent bud-and-pinch) on the same easeInOutCubic:
+        // 0.60 s show / 0.50 s hide, 6× under the debug harness. Keyed on
+        // `showAgentPill` (pill present, no toast), so waiting→working→complete
+        // state changes never re-run the liquid — only appear/disappear + the
+        // toast handoff (toast steals the slot → melt; toast clears → re-bud).
+        .onChange(of: showAgentPill) { show in
+            let base = show ? 0.60 : 0.50
+            let dur = base * (liquidAgentDebug ? 6 : 1)
+            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                agentT = show ? 1 : 0
+            }
+        }
+        // Remember the pill that's melting away so the disappear leg can still
+        // render its label/tint after `activePill` has already gone nil.
+        .onChange(of: activePill) { pill in
+            if let pill { lastAgentPill = pill }
+        }
+        // Seed the ear + pill at rest if already present at launch (onChange
         // never fires for the initial value, so it would otherwise never reveal).
         .onAppear {
             if showMediaEar { earT = 1 }
+            if showAgentPill { agentT = 1; lastAgentPill = activePill }
             closeT = state.isExpanded ? 0 : 1
         }
         // Drive `closeT` (C4 Surface Return) on easeInOutCubic: 0.85 s close /
@@ -674,15 +772,34 @@ struct NotchView: View {
     /// reuses the same right slot).
     private var agentPill: some View {
         Group {
-            if let pill = agentSessions.collapsedPill, !state.isExpanded, state.toast == nil {
-                Button {
-                    state.currentTab = .agents
-                    state.onExpandRequest?()
-                } label: {
-                    AgentPillLabel(pill: pill)
+            // Mounted through the whole morph — including the disappear leg, when
+            // `activePill` is already nil (we render the melting `lastAgentPill`).
+            if showAgentPill || renderAgentT > 0.001, let pill = activePill ?? lastAgentPill {
+                NavTDriven(t: renderAgentT) { e in
+                    Button {
+                        state.currentTab = .agents
+                        state.onExpandRequest?()
+                    } label: {
+                        AgentPillLabel(pill: pill)
+                    }
+                    .buttonStyle(.plain)
+                    // Invisible during flight — the LiquidAgent goo carries the
+                    // capsule + glyph; the crisp label sharpens in only at rest
+                    // (same iconIn window as the ear/nav). Rendered through the
+                    // relay so the nonlinear window draws every mid-flight value.
+                    .opacity(smoothstep(0.86, 1, e))
+                    // Measure the resting capsule (island space) for the goo target.
+                    // Layout is opacity-independent, so this stays the rest frame
+                    // throughout the flight.
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: AgentPillFrameKey.self,
+                            value: g.frame(in: .named("agentIsland")))
+                    })
+                    // Tappable only once settled — mid-flight there's no real pill.
+                    .allowsHitTesting(e > 0.98)
                 }
-                .buttonStyle(.plain)
-                .transition(.opacity.combined(with: .scale(scale: 0.8, anchor: .leading)))
+                // State changes (waiting→working→complete) keep this subtle spring;
+                // the liquid runs only on appear/disappear.
                 .animation(.spring(response: 0.3, dampingFraction: 0.78), value: pill)
             }
         }

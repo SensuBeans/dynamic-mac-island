@@ -107,6 +107,10 @@ final class NotchState: ObservableObject {
     /// player, so the auto-loop harness can exercise the LiquidEar morph. Only
     /// consulted while the debug flag is set; nil/false in normal use.
     @Published var liquidEarDebugForced = false
+    /// `-LiquidAgentDebug`: a synthetic collapsed pill injected by the auto-loop
+    /// harness so the LiquidAgent morph can be exercised without a real agent
+    /// session. Only consulted while the debug flag is set; nil in normal use.
+    @Published var liquidAgentDebugPill: AgentSessionsModel.CollapsedPill?
     /// Transient notification shown beside the notch while collapsed.
     @Published var toast: NotchToast?
     /// Live progress of a horizontal two-finger swipe over the expanded
