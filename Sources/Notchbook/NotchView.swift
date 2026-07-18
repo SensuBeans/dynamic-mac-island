@@ -809,9 +809,13 @@ struct NotchView: View {
                     // Tappable only once settled — mid-flight there's no real pill.
                     .allowsHitTesting(e > 0.98)
                 }
-                // State changes (waiting→working→complete) keep this subtle spring;
-                // the liquid runs only on appear/disappear.
-                .animation(.spring(response: 0.3, dampingFraction: 0.78), value: pill)
+                // State changes (waiting→working→complete) keep this subtle spring —
+                // but ONLY once the pill is settled. While the liquid morph runs the
+                // spring is disabled (nil), so it can't ALSO animate the label's
+                // appearance on mount: that double motion (goo bud + spring pop) was
+                // the reported "double open". The liquid owns appear/disappear alone.
+                .animation(renderAgentT > 0.99 ? .spring(response: 0.3, dampingFraction: 0.78) : nil,
+                           value: pill)
             }
         }
         .frame(height: metrics.notchHeight, alignment: .center)
