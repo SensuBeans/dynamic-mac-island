@@ -49,8 +49,11 @@ struct NotchView: View {
     /// The reveal value the visual layers actually render — the frozen value when
     /// tuning, otherwise the live animated `navT`.
     private var renderNavT: Double { navTFreeze ?? navT }
-    /// Measured intrinsic width of the nav controls, so the liquid capsule hugs
-    /// them (default until the first measurement lands).
+    /// Widest nav-control set measured this panel-session. The capsule sizes to
+    /// this running MAX and never shrinks (see the NavWidthKey handler), so when
+    /// you switch pages the capsule can only hold steady or grow to fit — it can
+    /// never contract behind the controls mid-transition and clip the trailing
+    /// power button. Starts at a sane default until the first measurement lands.
     @State private var navBarWidth: CGFloat = 220
 
     var body: some View {
@@ -169,7 +172,12 @@ struct NotchView: View {
                 expandedPanelLayer                   // content panel (shifts down)
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
             }
-            .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
+            // Monotonic: the capsule tracks the WIDEST control set seen and never
+            // shrinks. Switching to a shorter-titled page keeps the wider capsule
+            // (controls just center inside it); a wider page grows it to fit. So
+            // the capsule is always ≥ the controls and the power button can't be
+            // clipped by a lagging re-measure mid-transition.
+            .onPreferenceChange(NavWidthKey.self) { navBarWidth = max(navBarWidth, $0) }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
             // offset animate — so the panel drops dead-vertical, no diagonal.
