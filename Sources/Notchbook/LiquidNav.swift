@@ -101,23 +101,10 @@ struct LiquidNav: View {
             let neckRect = CGRect(x: cx - neckW / 2, y: centerY,
                                   width: neckW, height: max(0, panelTop + 10 - centerY))
 
-            // In flight the liquid catches light — dark glass on a dark desktop
-            // reads as nothing, so the droplet + neck are lifted toward a lit
-            // mercury tone that peaks mid-morph and fades out before the crisp
-            // glass capsule cross-fades in (so there's no brightness pop at rest).
-            let glow = (4 * e * (1 - e)) * (1 - Double(smooth(0.8, 1, e)))
-            let g = CGFloat(glow)
-            let flightFill = debugPink
-                ? Color(red: 1.0, green: 0.08, blue: 0.58)   // Phase-1 harness
-                : Color(red: 0.12 + 0.16 * g,
-                        green: 0.13 + 0.16 * g,
-                        blue: 0.155 + 0.17 * g)
-
-            // --- Body metaball: droplet + neck + panel edge, one fused blob ---
-            var bodyCtx = ctx
-            bodyCtx.addFilter(.alphaThreshold(min: Self.bodyThreshold, color: flightFill))
-            bodyCtx.addFilter(.blur(radius: Self.bodyBlur))
-            bodyCtx.drawLayer { layer in
+            // The fused metaball silhouette — droplet + neck + panel edge — drawn
+            // white for both the debug flood and (as a clip mask) the glass. The
+            // blur+threshold is what necks the overlap and rounds every corner.
+            let bodyShapes: (inout GraphicsContext) -> Void = { layer in
                 layer.fill(Path(roundedRect: panelRect, cornerRadius: panelTopRadius),
                            with: .color(.white))
                 if neckW > 0.5 && neckRect.height > 0 {
@@ -126,6 +113,94 @@ struct LiquidNav: View {
                 }
                 layer.fill(Path(roundedRect: dropRect, cornerRadius: radius),
                            with: .color(.white))
+            }
+
+            if debugPink {
+                // Phase-1 geometry harness: flood the raw silhouette flat hot pink.
+                var bodyCtx = ctx
+                bodyCtx.addFilter(.alphaThreshold(min: Self.bodyThreshold,
+                                                  color: Color(red: 1.0, green: 0.08, blue: 0.58)))
+                bodyCtx.addFilter(.blur(radius: Self.bodyBlur))
+                bodyCtx.drawLayer(content: bodyShapes)
+            } else {
+                // --- Refractive Liquid Glass -------------------------------------
+                // Styling lives STRICTLY mid-flight: `flight` is 0 at both ends and
+                // peaks at e=0.5, so near rest the glass fades to nothing and the
+                // crisp capsule cross-fade (NotchView, e∈[0.9,1]) takes over with no
+                // brightness pop. Everything below is clipped to the metaball
+                // silhouette, then lit like clear glass: a translucent body, an
+                // inner luminance gradient (light bends through — brightest at the
+                // droplet crown, darkening into the thick neck), a specular top rim,
+                // and thin glints down the neck edges.
+                let flight = 4 * e * (1 - e)
+                let full = Path(CGRect(origin: .zero, size: size))
+
+                // Clip all glass painting to the fused silhouette's alpha.
+                var glass = ctx
+                glass.clipToLayer { mask in
+                    var m = mask
+                    m.addFilter(.alphaThreshold(min: Self.bodyThreshold, color: .white))
+                    m.addFilter(.blur(radius: Self.bodyBlur))
+                    m.drawLayer(content: bodyShapes)
+                }
+
+                // 1. Base translucent glass — dark, lets a hint of desktop through.
+                glass.fill(full, with: .color(Color(red: 0.10, green: 0.11, blue: 0.14)
+                                                    .opacity(0.60)))
+                // 2. Inner luminance gradient: cool light pooling at the crown,
+                //    thinning through the middle, deepening (thickest liquid) at the
+                //    base and neck.
+                let crownLift = 0.34 + 0.34 * flight
+                let lume = Gradient(stops: [
+                    .init(color: Color(red: 0.66, green: 0.74, blue: 0.86).opacity(crownLift), location: 0.00),
+                    .init(color: Color(red: 0.30, green: 0.35, blue: 0.44).opacity(0.24), location: 0.40),
+                    .init(color: Color(red: 0.02, green: 0.03, blue: 0.05).opacity(0.40), location: 1.00),
+                ])
+                glass.fill(full, with: .linearGradient(lume,
+                        startPoint: CGPoint(x: cx, y: bulgeTop),
+                        endPoint: CGPoint(x: cx, y: bulgeBottom + 4)))
+                // 3. Crown glow: a soft additive bloom just under the top surface,
+                //    the refraction highlight where light gathers.
+                var crown = glass
+                crown.blendMode = .plusLighter
+                crown.fill(full, with: .radialGradient(
+                        Gradient(colors: [Color.white.opacity(0.22 + 0.20 * flight), .clear]),
+                        center: CGPoint(x: cx, y: bulgeTop + radius * 0.55),
+                        startRadius: 0, endRadius: max(6, bulgeW * 0.55)))
+
+                // 4. Specular top rim — a crisp ~1.3pt highlight along the crown,
+                //    fading down the shoulders. Drawn on the droplet's true top arc;
+                //    the tucked lower ring hides behind the content panel.
+                var rimCtx = ctx
+                rimCtx.blendMode = .plusLighter
+                let rimS = 0.55 + 0.35 * flight
+                let rimGrad = Gradient(stops: [
+                    .init(color: .white.opacity(rimS), location: 0.00),
+                    .init(color: .white.opacity(rimS * 0.30), location: 0.26),
+                    .init(color: .white.opacity(0.0), location: 0.60),
+                ])
+                rimCtx.stroke(Path(roundedRect: dropRect, cornerRadius: radius),
+                        with: .linearGradient(rimGrad,
+                                startPoint: CGPoint(x: cx, y: bulgeTop),
+                                endPoint: CGPoint(x: cx, y: bulgeBottom)),
+                        lineWidth: 1.3)
+
+                // 5. Secondary glints: thin bright edges down the neck, where the
+                //    curved column catches light.
+                if neckW > 0.5 && neckRect.height > 0 {
+                    var glint = ctx
+                    glint.blendMode = .plusLighter
+                    let gs = 0.30 * flight
+                    let glintGrad = Gradient(stops: [
+                        .init(color: .white.opacity(gs), location: 0.0),
+                        .init(color: .white.opacity(0.0), location: 0.85),
+                    ])
+                    glint.stroke(Path(roundedRect: neckRect, cornerRadius: neckW / 2),
+                            with: .linearGradient(glintGrad,
+                                    startPoint: CGPoint(x: cx, y: centerY),
+                                    endPoint: CGPoint(x: cx, y: neckRect.maxY)),
+                            lineWidth: 0.9)
+                }
             }
 
             // --- Icon melt: one light blob → five spreading dots → SF Symbols ---

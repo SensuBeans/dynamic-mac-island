@@ -53,12 +53,13 @@ struct NotchView: View {
     /// The reveal value the visual layers actually render — the frozen value when
     /// tuning, otherwise the live animated `navT`.
     private var renderNavT: Double { navTFreeze ?? navT }
-    /// Widest nav-control set measured this panel-session. The capsule sizes to
-    /// this running MAX and never shrinks (see the NavWidthKey handler), so when
-    /// you switch pages the capsule can only hold steady or grow to fit — it can
-    /// never contract behind the controls mid-transition and clip the trailing
-    /// power button. Starts at a sane default until the first measurement lands.
-    @State private var navBarWidth: CGFloat = 220
+    /// Fixed nav-capsule content width: the widest reachable control set (widest
+    /// -titled tab selected + trailing pin/settings/power), pre-measured once by
+    /// `navWidthProbe` and assigned verbatim (not a running max). It is therefore
+    /// identical on every page and every launch, so the capsule never resizes as
+    /// you switch pages and the power button is never clipped. Starts at a sane
+    /// default until the first probe measurement lands (within one layout pass).
+    @State private var navBarWidth: CGFloat = 300
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -176,12 +177,13 @@ struct NotchView: View {
                 expandedPanelLayer                   // content panel (shifts down)
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
             }
-            // Monotonic: the capsule tracks the WIDEST control set seen and never
-            // shrinks. Switching to a shorter-titled page keeps the wider capsule
-            // (controls just center inside it); a wider page grows it to fit. So
-            // the capsule is always ≥ the controls and the power button can't be
-            // clipped by a lagging re-measure mid-transition.
-            .onPreferenceChange(NavWidthKey.self) { navBarWidth = max(navBarWidth, $0) }
+            // Fixed width: the off-screen probe reports the widest reachable
+            // control set (widest-titled tab selected) up front, and the capsule
+            // is sized to exactly that on every page and every launch — no
+            // monotonic "grow as you visit", no per-page resize. The probe rides
+            // as a zero-footprint background so it measures even while collapsed.
+            .background(navWidthProbe)
+            .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
             // CONSTANT width (this tab's panel), centered by the container's .top
             // alignment. It never changes width on expand — only scale/opacity/
             // offset animate — so the panel drops dead-vertical, no diagonal.
@@ -550,7 +552,11 @@ struct NotchView: View {
     private var liquidNavLayer: some View {
         let navT = renderNavT
         if navT > 0.02 {
-            let navBlobW = min(expandedSize.width - 16, navBarWidth + 22)
+            // Clamp against the STANDARD panel width (a constant), not this
+            // tab's panel, so the capsule width can't vary between a wide page
+            // (terminal 620) and a standard one (460). navBarWidth is already the
+            // fixed widest-control width from the probe; +22 is breathing room.
+            let navBlobW = min(metrics.expandedSize().width - 16, navBarWidth + 22)
             // Cross-fade the flat goo out and the real glass capsule in over the
             // last of the settle (e ∈ [0.9,1]): the metaball's flat fill only
             // ever shows in flight; at rest the nav is the same VisualEffectBlur
@@ -602,7 +608,9 @@ struct NotchView: View {
     }
 
     /// Nav controls riding the liquid capsule, fading + settling in as the
-    /// droplet forms. Intrinsic width, measured into `NavWidthKey` for the blob.
+    /// droplet forms. The capsule width is measured separately by `navWidthProbe`
+    /// (the widest reachable control set), so these live controls never feed the
+    /// width — they just center inside the fixed capsule.
     private var navControlsLayer: some View {
         // The real SF Symbols are the last thing to resolve: the dot metaball
         // carries the icons until the very end, then the crisp controls cross-
@@ -612,24 +620,47 @@ struct NotchView: View {
         let raw = min(1, max(0, (navT - 0.88) / 0.12))
         let iconIn = raw * raw * (3 - 2 * raw)
         let scale = 0.7 + 0.3 * CGFloat(iconIn)
-        return navControls
+        return navControls()
             .frame(height: NotchMetrics.navIslandHeight)
             .fixedSize(horizontal: true, vertical: false)
-            .background(GeometryReader { g in
-                Color.clear.preference(key: NavWidthKey.self, value: g.size.width)
-            })
             .opacity(iconIn)
             .scaleEffect(scale, anchor: .center)
             // Hit areas live only at rest — mid-morph the buttons aren't there.
             .allowsHitTesting(navT > 0.98)
     }
 
+    /// Off-screen probe that fixes the capsule width. It lays out the FULL
+    /// control row once per visible tab as if that tab were selected (the only
+    /// thing that changes width between pages is the selected chip's title), and
+    /// reports the widest of those via `NavWidthKey`. So the capsule is sized to
+    /// the widest reachable control set from the first reveal, identical on every
+    /// page and every launch — never the monotonic "grow as you visit" width.
+    /// Zero-footprint: rendered at frame 0×0, clipped, hidden, non-interactive;
+    /// the `.background(GeometryReader)` still reads each row's natural width.
+    private var navWidthProbe: some View {
+        ZStack {
+            ForEach(state.visibleTabs, id: \.self) { sel in
+                navControls(selectedOverride: sel, measuring: true)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: NavWidthKey.self, value: g.size.width)
+                    })
+            }
+        }
+        .frame(width: 0, height: 0)
+        .clipped()
+        .opacity(0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
     /// The nav bar controls: tabs + pin + settings + quit. Just the controls —
     /// the capsule background is drawn by LiquidNav (the goo glass), so this
     /// carries no material of its own.
-    private var navControls: some View {
+    private func navControls(selectedOverride: NotchTab? = nil,
+                             measuring: Bool = false) -> some View {
         HStack(spacing: 10) {
-            tabBar
+            tabBar(selectedOverride: selectedOverride, measuring: measuring)
             Button { state.pinned.toggle() } label: {
                 Image(systemName: state.pinned ? "pin.fill" : "pin")
                     .font(.system(size: 11))
@@ -744,24 +775,35 @@ struct NotchView: View {
     /// Tabs to render — the live drag order while reordering, else the real one.
     private var displayTabs: [NotchTab] { dragOrder ?? state.visibleTabs }
 
-    private var tabBar: some View {
-        HStack(spacing: 2) {
-            ForEach(displayTabs, id: \.self) { tab in
-                tabChip(tab)
+    /// `selectedOverride`/`measuring` drive the off-screen width probe: it lays
+    /// the bar out as if `selectedOverride` were the current tab, without feeding
+    /// the reorder-width plumbing.
+    private func tabBar(selectedOverride: NotchTab? = nil,
+                        measuring: Bool = false) -> some View {
+        let tabs = measuring ? state.visibleTabs : displayTabs
+        return HStack(spacing: 2) {
+            ForEach(tabs, id: \.self) { tab in
+                tabChip(tab, selectedOverride: selectedOverride, emitWidth: !measuring)
             }
         }
         .padding(2)
         .background(Capsule().fill(.white.opacity(0.06)))
         .coordinateSpace(name: "tabbar")
-        .onPreferenceChange(TabChipWidthKey.self) { chipWidths = $0 }
-        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
-        .animation(.easeOut(duration: 0.12), value: swipeTarget)
+        .onPreferenceChange(TabChipWidthKey.self) { if !measuring { chipWidths = $0 } }
+        .animation(measuring ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
+        .animation(measuring ? nil : .easeOut(duration: 0.12), value: swipeTarget)
     }
 
-    private func tabChip(_ tab: NotchTab) -> some View {
-        let selected = state.currentTab == tab
-        let targeted = swipeTarget == tab
-        let isDragging = draggingTab == tab
+    /// `selectedOverride` forces the "selected" (title-showing) chip for the
+    /// off-screen width probe; live chips pass nil and read `state.currentTab`.
+    /// `emitWidth` is off for probe chips so they don't corrupt the reorder
+    /// widths (`chipWidths`) with their forced-selection layout.
+    private func tabChip(_ tab: NotchTab,
+                         selectedOverride: NotchTab? = nil,
+                         emitWidth: Bool = true) -> some View {
+        let selected = (selectedOverride ?? state.currentTab) == tab
+        let targeted = selectedOverride == nil && swipeTarget == tab
+        let isDragging = selectedOverride == nil && draggingTab == tab
         return HStack(spacing: 4) {
             Image(systemName: tab.icon)
                 .font(.system(size: 11, weight: .medium))
@@ -780,7 +822,8 @@ struct NotchView: View {
         )
         // Measure width (stable, position-independent) for the reorder math.
         .background(GeometryReader { geo in
-            Color.clear.preference(key: TabChipWidthKey.self, value: [tab: geo.size.width])
+            Color.clear.preference(key: TabChipWidthKey.self,
+                                   value: emitWidth ? [tab: geo.size.width] : [:])
         })
         .scaleEffect(isDragging ? 1.12 : 1)
         .offset(x: chipOffset(tab))
