@@ -397,9 +397,6 @@ struct NotchView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.05) {
                     guard !state.isExpanded else { return }
                     morphHoldExpanded = false
-                    NSLog("EarExhaleTrace: hold released, showMediaEar=%d nowPlaying=%d earHidden=%d",
-                          showMediaEar ? 1 : 0, media.nowPlaying != nil ? 1 : 0,
-                          media.earHidden ? 1 : 0)
                     // The close's final beat: the mass is absorbed, the bare
                     // notch rests a breath — then it EXHALES the media ear with
                     // the full Side Bulge + content dots. Without this replay
@@ -411,7 +408,6 @@ struct NotchView: View {
                         earT = 0
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                             guard !state.isExpanded else { return }
-                            NSLog("EarExhaleTrace: animating earT 0 -> 1")
                             let earDur = 0.70 * (liquidIslandDebug ? 6 : 1)
                             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: earDur)) {
                                 earT = 1
@@ -875,7 +871,13 @@ struct NotchView: View {
         let stack: CGFloat = metrics.notchHeight + NotchMetrics.islandGap
             + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
         let canvasH: CGFloat = stack + panel.height + LiquidClose.botPad
-        return NavTDriven(t: renderCloseT) { e in
+        // The real panel's rest position depends on the nav reveal
+        // (expandedPanelLayer shifts down by navShift·navT), and navT is
+        // ANIMATING during the close's first beat (the 0.30 s melt) — so the
+        // shift must ride its own Animatable relay, nested with the close's,
+        // for the goo to track the panel it replaces frame by frame.
+        return NavTDriven(t: renderNavT) { navE in
+            NavTDriven(t: renderCloseT) { e in
             if e > 0.02, e < 0.999 {
                 // Fade IN as the real glass fades out; then hold FULL opacity all
                 // the way into the notch — the body is geometrically fused to the
@@ -888,14 +890,15 @@ struct NotchView: View {
                             notchWidth: metrics.notchWidth,
                             notchHeight: metrics.notchHeight,
                             gap: NotchMetrics.islandGap,
-                            navHeight: NotchMetrics.navIslandHeight,
-                            navContentGap: NotchMetrics.navContentGap,
+                            navShift: (NotchMetrics.navIslandHeight
+                                       + NotchMetrics.navContentGap) * CGFloat(navE),
                             panelWidth: panel.width,
                             panelHeight: panel.height,
                             debugPink: liquidClosePink)
                     .frame(width: canvasW, height: canvasH, alignment: .top)
                     .opacity(bodyOp)
                     .allowsHitTesting(false)
+            }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)

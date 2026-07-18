@@ -27,8 +27,13 @@ struct LiquidClose: View, Animatable {
     var notchWidth: CGFloat
     var notchHeight: CGFloat
     var gap: CGFloat               // islandGap (notch → nav)
-    var navHeight: CGFloat
-    var navContentGap: CGFloat
+    /// The LIVE nav offset under the real panel: `(navIslandHeight +
+    /// navContentGap) · navT`, fed through its own Animatable relay. The panel
+    /// only rests that far down while the nav bar is revealed — assuming the
+    /// nav-shown stack unconditionally birthed the goo ~40 pt taller than the
+    /// real panel on every nav-hidden close (and every open, which always
+    /// starts nav-hidden): the user-flagged "frame way bigger than the island".
+    var navShift: CGFloat
     var panelWidth: CGFloat
     var panelHeight: CGFloat
     var debugPink: Bool = false
@@ -50,8 +55,10 @@ struct LiquidClose: View, Animatable {
             let e = t
             let cx = size.width / 2
 
-            // Rest layout (canvas space, y=0 at the notch's top edge).
-            let panelTopRest = notchHeight + gap + navHeight + navContentGap
+            // Rest layout (canvas space, y=0 at the notch's top edge). Tracks
+            // the REAL panel: navShift animates up during the close's first
+            // beat (navT→0), and is 0 for the whole open.
+            let panelTopRest = notchHeight + gap + navShift
             let panelBotRest = panelTopRest + panelHeight
 
             // --- C4 body geometry (mock: closeStudies[C4].render) ---
@@ -63,8 +70,11 @@ struct LiquidClose: View, Animatable {
             // (the user-flagged ".95 frame").
             let botY = lerp(panelBotRest, notchHeight - 2, smooth(0.4, 0.96, e))
             // Width likewise tucks INSIDE the notch by the end — wider-than-notch
-            // leaves nubs sticking out under its corners after absorption.
-            let w = lerp(panelWidth, notchWidth - 6, smooth(0.42, 0.96, e))
+            // leaves nubs sticking out under its corners after absorption. The
+            // taper starts just after the top begins climbing (0.30, was 0.42):
+            // holding full width deep into the climb read as a slab bottom
+            // (user-flagged "see the bottom width").
+            let w = lerp(panelWidth, notchWidth - 6, smooth(0.30, 0.96, e))
             let h = max(5, botY - topY)
             // Dilation compensation: the 0.42 threshold pushes the silhouette
             // ~2.5pt OUTSIDE the drawn rect, so at morph start the stand-in was
@@ -74,7 +84,9 @@ struct LiquidClose: View, Animatable {
             let inset = 2.5 * (1 - smooth(0.25, 0.5, e))
             let panelRect = CGRect(x: cx - w / 2, y: topY, width: w, height: h)
                 .insetBy(dx: inset, dy: min(inset, h / 4))
-            let panelCorner = min(22, max(2, h / 2 - inset))
+            // 26 matches the real panel's expanded clip radius, so the birth
+            // silhouette's corners coincide with the glass it replaces.
+            let panelCorner = min(26, max(2, h / 2 - inset))
             let notchFrame = CGRect(x: cx - notchWidth / 2, y: 0,
                                     width: notchWidth, height: notchHeight)
 
