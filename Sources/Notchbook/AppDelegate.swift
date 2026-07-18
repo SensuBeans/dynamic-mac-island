@@ -67,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Drives the `-LiquidNavDebug` auto-loop (nav show→hide) for goo tuning.
     private var liquidNavDebugTimer: Timer?
+    /// Drives the `-LiquidIslandDebug` auto-loop (ear show/hide + panel close/open,
+    /// alternating) for tuning the two island morphs.
+    private var liquidIslandDebugTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
@@ -166,6 +169,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and auto-loop the nav show/hide so the goo morph (slowed 8× in
         // NotchView) can be screenshotted frame-by-frame. No-op otherwise.
         startLiquidNavDebugIfNeeded()
+
+        // Liquid-island tuning harness (`-LiquidIslandDebug 1`): auto-loop the
+        // ear reveal + panel close/open (slowed 6× in NotchView). No-op otherwise.
+        startLiquidIslandDebugIfNeeded()
 
         // Esc collapses while the panel has focus — except on the Terminal
         // tab, where Esc must reach the shell (vim/less would be unusable
@@ -704,6 +711,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func expand() {
+        // Freeze harness for the ear pins the panel COLLAPSED so hover can't
+        // open it out from under a deterministic capture.
+        if UserDefaults.standard.object(forKey: "LiquidEarFreeze") != nil { return }
         guard !state.isExpanded else { return }
         state.isExpanded = true
         media.refresh()
@@ -717,6 +727,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func collapse() {
+        // Freeze harness for the close morph pins the panel EXPANDED.
+        if UserDefaults.standard.object(forKey: "LiquidCloseFreeze") != nil { return }
         guard state.isExpanded else { return }
         stopMouseWatch()
         state.isExpanded = false
@@ -769,6 +781,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                    repeats: true) { _ in toggle() }
     }
 
+    /// `-LiquidIslandDebug 1`: a self-driving harness for the two island morphs.
+    /// It cycles ear-show → ear-hide → panel-open → panel-close forever (each
+    /// slowed 6× in NotchView), forcing the panel/ear state so mouse drift can't
+    /// disturb it, so both morphs can be captured frame-by-frame. Off by default.
+    private func startLiquidIslandDebugIfNeeded() {
+        let defaults = UserDefaults.standard
+        // Long ASCII marker so `strings` can PROVE this shipped in the running
+        // binary (short keys inline invisibly) + a live Console launch signal.
+        NSLog("SurfaceReturnLiquidIslandHarness_v01_engaged")
+
+        // `-LiquidEarFreeze <e>`: hold the panel COLLAPSED so the frozen ear
+        // (rendered by NotchView) can be captured deterministically.
+        if defaults.object(forKey: "LiquidEarFreeze") != nil {
+            state.isExpanded = false
+            state.liquidEarDebugForced = true
+            return
+        }
+        // `-LiquidCloseFreeze <e>`: hold the panel EXPANDED (NotchView renders the
+        // frozen close value over it).
+        if defaults.object(forKey: "LiquidCloseFreeze") != nil {
+            state.isExpanded = true
+            panel.orderFront(nil)
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidIslandDebug") else { return }
+        // Four beats, one per timer tick. Each forces exactly the state its morph
+        // needs; the mouse-watch is suppressed while this timer lives.
+        var beat = 0
+        let step: () -> Void = { [weak self] in
+            guard let self else { return }
+            switch beat % 4 {
+            case 0:                                   // ear reveals (collapsed)
+                self.state.isExpanded = false
+                self.state.liquidEarDebugForced = true
+            case 1:                                   // ear hides
+                self.state.liquidEarDebugForced = false
+            case 2:                                   // panel opens
+                self.state.liquidEarDebugForced = false
+                self.state.isExpanded = true
+                self.panel.orderFront(nil)
+            default:                                  // panel closes
+                self.state.isExpanded = false
+            }
+            beat += 1
+        }
+        // Delay the first beat past view mount (toggling @Published before
+        // NotchView's onChange observers exist is silently missed — the nav
+        // harness hit this exact bug).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { step() }
+        // Period exceeds the slowest slowed morph (0.85·6 ≈ 5.1 s) plus a settle.
+        liquidIslandDebugTimer = Timer.scheduledTimer(withTimeInterval: 6.5,
+                                                      repeats: true) { _ in step() }
+    }
+
     /// Collapse the moment the cursor leaves the visible island bounds.
     private func startMouseWatch() {
         let check: () -> Void = { [weak self] in
@@ -777,6 +844,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // cursor override navHovered or collapse the panel out from under it.
             // Freeze mode (`-LiquidNavFreeze`) likewise holds the panel open.
             if self.liquidNavDebugTimer != nil { return }
+            if self.liquidIslandDebugTimer != nil { return }
             if UserDefaults.standard.object(forKey: "LiquidNavFreeze") != nil { return }
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.

@@ -1,0 +1,629 @@
+<title>Liquid Nav — Round 2</title>
+<style>
+  :root {
+    --ground: #0B0D11;
+    --ground-2: #101319;
+    --stage-a: #14171d;
+    --stage-b: #0c0e13;
+    --glass: #1A1D23;
+    --glass-hi: #252932;
+    --ink: #E9EBEF;
+    --muted: #8C93A0;
+    --faint: #565D69;
+    --accent: #A8C7E8;
+    --line: rgba(233, 235, 239, 0.08);
+    --card: #0E1116;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { background: var(--ground); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 50% -10%, rgba(90, 110, 150, 0.10), transparent 60%),
+      var(--ground);
+    min-height: 100vh;
+    padding-bottom: 80px;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  header {
+    display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+    padding: 34px 36px 10px;
+    max-width: 1180px; margin: 0 auto;
+  }
+  header h1 {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+    font-size: 26px; font-weight: 700; letter-spacing: -0.4px;
+    text-wrap: balance;
+  }
+  header .sub { color: var(--muted); font-size: 13.5px; }
+  .globals {
+    display: flex; gap: 10px; align-items: center; margin-left: auto;
+  }
+
+  .lede {
+    max-width: 1180px; margin: 0 auto; padding: 0 36px 26px;
+    color: var(--muted); font-size: 13.5px; line-height: 1.55; max-width: 760px;
+    margin-left: max(36px, calc((100vw - 1180px) / 2 + 36px));
+  }
+  .lede b { color: var(--ink); font-weight: 600; }
+
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+    gap: 22px; max-width: 1180px; margin: 0 auto; padding: 0 36px;
+  }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .stage-wrap { position: relative; }
+  .stage {
+    position: relative; height: 252px; overflow: hidden;
+    background:
+      radial-gradient(700px 300px at 30% 110%, rgba(70, 90, 130, 0.16), transparent 65%),
+      radial-gradient(500px 260px at 80% 90%, rgba(120, 90, 70, 0.10), transparent 60%),
+      linear-gradient(var(--stage-a), var(--stage-b));
+    cursor: pointer;
+  }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+  .meta { padding: 14px 16px 6px; display: flex; align-items: baseline; gap: 10px; }
+  .code {
+    font-size: 11px; color: var(--accent); letter-spacing: 1.5px; font-weight: 600;
+  }
+  .name { font-size: 15px; font-weight: 650; letter-spacing: -0.2px; }
+  .timing { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .desc {
+    padding: 0 16px 12px; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+  }
+
+  .controls {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px 14px; border-top: 1px solid var(--line);
+  }
+  button {
+    font: inherit; font-size: 12px; font-weight: 600;
+    color: var(--ink); background: var(--glass);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 12px; cursor: pointer;
+  }
+  button:hover { background: var(--glass-hi); }
+  button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  button.on { color: #0B0D11; background: var(--accent); border-color: var(--accent); }
+  input[type="range"] {
+    flex: 1; accent-color: var(--accent); min-width: 60px;
+  }
+  .e-read { font-size: 11px; color: var(--muted); width: 62px; text-align: right; }
+
+  footer {
+    max-width: 1180px; margin: 34px auto 0; padding: 0 36px;
+    color: var(--faint); font-size: 12px; line-height: 1.6;
+  }
+</style>
+
+<header>
+  <h1>Liquid Nav — Round 2</h1>
+  <span class="sub">nav-capsule reveal · 8 motion studies</span>
+  <div class="globals">
+    <button id="g-loop">Loop all</button>
+    <button id="g-slow">8× slow</button>
+  </div>
+</header>
+
+<p class="lede">
+  Geometry matches the app: 460pt panel (r26), 34pt capsule (r16), 9pt resting gap,
+  panel top travels down 43pt as the capsule separates. Click any stage to play it once;
+  scrub to inspect a frame. <b>Pick by code</b> — the winner's spec transfers straight
+  into the implementation prompt.
+</p>
+
+<div class="grid" id="grid"></div>
+
+<footer>
+  Goo studies use a real metaball pass (blur 6 → alpha threshold 0.42, the mockup-derived
+  value) with the crisp glass capsule cross-fading in over the last 12% of settle — flat
+  fill only ever shows mid-flight. Reduced-motion systems start paused; scrubbing always works.
+</footer>
+
+<script>
+"use strict";
+
+/* ---------- shared geometry (stage coords = app pt, stage 520×252) ---------- */
+const G = {
+  W: 520, H: 252,
+  notchW: 170, notchH: 22,
+  panelW: 460, panelR: 26, panelH: 150,
+  navW: 230, navH: 34, navR: 16,
+  gap: 9, drop: 43,          // panel-top travel while the capsule separates
+  navY: 30,                  // capsule's settled top (below the notch)
+};
+G.panelX = (G.W - G.panelW) / 2;
+G.navX = (G.W - G.navW) / 2;
+G.panelHiddenY = G.navY;             // nav absorbed: panel sits high
+G.panelShownY = G.navY + G.drop;     // separated: panel dropped 43
+
+/* ---------- easings ---------- */
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const smooth = (a, b, v) => { const t = clamp01((v - a) / (b - a)); return t * t * (3 - 2 * t); };
+const cubicInOut = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const quintOut = t => 1 - Math.pow(1 - t, 5);
+function springEase(t, zeta, cycles) {          // normalized damped settle, e(1)≈1
+  if (t >= 1) return 1;
+  const w = cycles * Math.PI * 2;
+  return 1 - Math.exp(-zeta * w * t) * Math.cos(w * Math.sqrt(1 - zeta * zeta) * t);
+}
+
+/* ---------- stage DOM builders ---------- */
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs) {
+  const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+let uid = 0;
+
+/* Build one stage svg: desktop already painted by CSS; svg holds notch, goo
+   group (optional), crisp capsule, panel, panel content rows. */
+function buildStage(useGoo, iconMelt) {
+  const id = "s" + (++uid);
+  const svg = el("svg", { viewBox: `0 0 ${G.W} ${G.H}` });
+
+  // notch
+  const notch = el("path", {
+    d: `M ${(G.W - G.notchW) / 2} 0 h ${G.notchW} v ${G.notchH - 10}
+        a 10 10 0 0 1 -10 10 h ${-(G.notchW - 20)} a 10 10 0 0 1 -10 -10 Z`,
+    fill: "#000"
+  });
+  svg.appendChild(notch);
+
+  const parts = { svg };
+
+  if (useGoo) {
+    const defs = el("defs", {});
+    const filt = el("filter", { id: id + "goo", x: "-20%", y: "-20%", width: "140%", height: "140%" });
+    filt.appendChild(el("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "6", result: "b" }));
+    filt.appendChild(el("feColorMatrix", {
+      in: "b", mode: "matrix",
+      values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -8"
+    }));
+    defs.appendChild(filt);
+    svg.appendChild(defs);
+
+    const goo = el("g", { filter: `url(#${id}goo)` });
+    parts.gooPanel = el("rect", {
+      x: G.panelX, y: G.panelShownY, width: G.panelW, height: G.panelH,
+      rx: G.panelR, fill: "#1A1D23"
+    });
+    parts.gooNav = el("rect", {
+      x: G.navX, y: G.navY, width: G.navW, height: G.navH, rx: G.navR, fill: "#1A1D23"
+    });
+    goo.appendChild(parts.gooPanel);
+    goo.appendChild(parts.gooNav);
+    svg.appendChild(goo);
+    parts.goo = goo;
+  }
+
+  // crisp panel (glass look: fill + top sheen + hairline)
+  const panelG = el("g", {});
+  parts.panel = el("rect", {
+    x: G.panelX, y: G.panelShownY, width: G.panelW, height: G.panelH,
+    rx: G.panelR, fill: "#1A1D23", stroke: "rgba(255,255,255,0.09)", "stroke-width": "1"
+  });
+  panelG.appendChild(parts.panel);
+  // faux content rows
+  parts.content = el("g", { opacity: 1 });
+  const rows = [[54, 150, 8], [76, 300, 8], [98, 240, 8], [128, 90, 26]];
+  for (const [dy, w, h] of rows) {
+    parts.content.appendChild(el("rect", {
+      x: G.panelX + 26, y: 0, width: w, height: h, rx: h / 2,
+      fill: h > 10 ? "rgba(168,199,232,0.20)" : "rgba(233,235,239,0.12)",
+      "data-dy": dy
+    }));
+  }
+  panelG.appendChild(parts.content);
+  svg.appendChild(panelG);
+
+  // crisp capsule (glass) + its tab dots
+  parts.cap = el("g", {});
+  parts.capBody = el("rect", {
+    x: G.navX, y: G.navY, width: G.navW, height: G.navH, rx: G.navR,
+    fill: "#1E222A", stroke: "rgba(255,255,255,0.12)", "stroke-width": "1"
+  });
+  parts.cap.appendChild(parts.capBody);
+  parts.capDots = el("g", {});
+  if (!iconMelt) for (let i = 0; i < 5; i++) {
+    parts.capDots.appendChild(el("circle", {
+      cx: G.navX + 45 + i * 35, cy: G.navY + G.navH / 2, r: 4.5,
+      fill: i === 0 ? "rgba(168,199,232,0.85)" : "rgba(233,235,239,0.28)"
+    }));
+  }
+  parts.cap.appendChild(parts.capDots);
+  svg.appendChild(parts.cap);
+
+  if (iconMelt) {
+    // Icon-melt layers: a gentler metaball pass for the five tab dots (they
+    // slide together and liquid-merge), plus a crisp icon set that cross-fades
+    // in only at the very end of the reveal.
+    const defs2 = el("defs", {});
+    const dg = el("filter", { id: id + "dg", x: "-50%", y: "-50%", width: "200%", height: "200%" });
+    dg.appendChild(el("feGaussianBlur", { in: "SourceGraphic", stdDeviation: "3.5", result: "b" }));
+    dg.appendChild(el("feColorMatrix", { in: "b", mode: "matrix",
+      values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -8" }));
+    defs2.appendChild(dg);
+    svg.appendChild(defs2);
+
+    parts.dotGoo = el("g", { filter: `url(#${id}dg)`, opacity: 0 });
+    parts.dots = [];
+    for (let i = 0; i < 5; i++) {
+      const c = el("circle", { cx: 0, cy: -100, r: 0, fill: "#cfd6df" });
+      parts.dots.push(c);
+      parts.dotGoo.appendChild(c);
+    }
+    svg.appendChild(parts.dotGoo);
+
+    parts.icons = el("g", { opacity: 0 });
+    const strokeBase = { fill: "none", "stroke-width": "1.6", "stroke-linecap": "round" };
+    const mk = (shapes, dx, accent) => {
+      const g = el("g", { transform: `translate(${dx}, 0)` });
+      const col = accent ? "rgba(168,199,232,0.95)" : "rgba(233,235,239,0.62)";
+      for (const s of shapes) {
+        g.appendChild(el(s[0], Object.assign({}, strokeBase, s[1], { stroke: col })));
+      }
+      parts.icons.appendChild(g);
+    };
+    mk([["circle", { r: 5 }]], -70, true);
+    mk([["rect", { x: -4.5, y: -4.5, width: 9, height: 9, rx: 2 }]], -35);
+    mk([["path", { d: "M0,-5.5 L5,4 L-5,4 Z" }]], 0);
+    mk([["line", { x1: -4, y1: 3.5, x2: -4, y2: -1 }],
+        ["line", { x1: 0, y1: 3.5, x2: 0, y2: -5 }],
+        ["line", { x1: 4, y1: 3.5, x2: 4, y2: -2.5 }]], 35);
+    mk([["circle", { r: 3.6 }],
+        ["line", { x1: 0, y1: -5.6, x2: 0, y2: -4.4 }],
+        ["line", { x1: 0, y1: 5.6, x2: 0, y2: 4.4 }],
+        ["line", { x1: -5.6, y1: 0, x2: -4.4, y2: 0 }],
+        ["line", { x1: 5.6, y1: 0, x2: 4.4, y2: 0 }]], 70);
+    svg.appendChild(parts.icons);
+  }
+
+  return parts;
+}
+
+/* helpers to write frame state */
+function setRect(r, x, y, w, h, rx) {
+  r.setAttribute("x", x); r.setAttribute("y", y);
+  r.setAttribute("width", w); r.setAttribute("height", h);
+  if (rx !== undefined) r.setAttribute("rx", Math.max(0, Math.min(rx, h / 2)));
+}
+function placePanel(parts, top, opacityContent) {
+  setRect(parts.panel, G.panelX, top, G.panelW, G.panelH, G.panelR);
+  for (const row of parts.content.children) {
+    row.setAttribute("y", top + (+row.dataset.dy || +row.getAttribute("data-dy")));
+  }
+  parts.content.setAttribute("opacity", opacityContent);
+}
+/* crisp capsule at given rect + overall opacity; dots fade with capsule */
+function placeCap(parts, x, y, w, h, rx, op, dotOp) {
+  setRect(parts.capBody, x, y, w, h, rx);
+  parts.cap.setAttribute("opacity", op);
+  parts.capDots.setAttribute("opacity", dotOp === undefined ? 1 : dotOp);
+  parts.capDots.setAttribute("transform",
+    `translate(${(x + w / 2) - (G.navX + G.navW / 2)}, ${(y + h / 2) - (G.navY + G.navH / 2)})`);
+}
+
+/* ---------- the eight studies ---------- */
+/* Each: { code, name, desc, show, hide, timing, goo, render(e, parts) }
+   e is eased reveal progress 0→1 (0 = absorbed, 1 = separate capsule). */
+
+const capCY = G.navY + G.navH / 2;
+
+const studies = [
+{
+  code: "01", name: "Goo Merge", goo: true,
+  show: 0.95, hide: 0.80, ease: cubicInOut, timing: "0.95s / 0.80s · easeInOutCubic",
+  desc: "The original pick, tuned so the neck actually lives: a sliver buds off the panel edge, a liquid bridge thins through e≈0.3–0.7 and pinches clean. Crisp glass cross-fades in over the last 12%.",
+  render(e, p) {
+    const rest = smooth(0.88, 1, e);
+    const gooOp = e <= 0.001 ? 0 : 1 - rest;
+    const h = 8 + (G.navH - 8) * smooth(0.05, 1, e);
+    const w = G.navW * (0.76 + 0.24 * e);
+    const pTop = G.panelHiddenY + G.drop * e;
+    // panel blob overreaches upward mid-flight so the bridge can form
+    const reach = 14 * Math.sin(Math.PI * clamp01(e * 1.15));
+    p.goo.setAttribute("opacity", gooOp);
+    setRect(p.gooPanel, G.panelX, pTop - reach, G.panelW, G.panelH + reach, G.panelR);
+    setRect(p.gooNav, (G.W - w) / 2, capCY - h / 2, w, h, Math.min(G.navR, h / 2));
+    placePanel(p, pTop, smooth(0.4, 1, e));
+    placeCap(p, (G.W - w) / 2, capCY - h / 2, w, h, G.navR, rest, rest);
+  }
+},
+{
+  code: "02", name: "Surface Bulge", goo: true, iconMelt: true,
+  show: 0.85, hide: 0.70, ease: cubicInOut, timing: "0.85s / 0.70s · easeInOutCubic",
+  desc: "Nothing arrives from outside — the panel's own surface swells up, rounds into a droplet, and the droplet is the capsule. The icons melt too: on hide they round into dots that slide together and merge into the liquid; on reveal the blob splits into five dots that spread and sharpen back into icons.",
+  render(e, p) {
+    const rest = smooth(0.9, 1, e);
+    const gooOp = e <= 0.001 ? 0 : 1 - rest;
+    const pTop = G.panelHiddenY + G.drop * e;
+    // bulge: a wide low ellipse-ish rect riding the panel top, migrating up
+    const rise = smooth(0, 0.85, e);
+    const bw = G.navW * (1.25 - 0.25 * rise);
+    const bh = 10 + (G.navH - 10) * rise;
+    const by = pTop - bh * rise - 2 + (1 - rise) * 4;
+    const targetY = capCY - bh / 2;
+    const y = by + (targetY - by) * smooth(0.55, 1, e);
+    p.goo.setAttribute("opacity", gooOp);
+    setRect(p.gooPanel, G.panelX, pTop, G.panelW, G.panelH, G.panelR);
+    setRect(p.gooNav, (G.W - bw) / 2, y, bw, bh, bh / 2);
+    placePanel(p, pTop, smooth(0.45, 1, e));
+    placeCap(p, (G.W - bw) / 2, y, bw, bh, G.navR, rest, rest);
+
+    // Icon melt: dots appear inside the droplet once it has a body, split
+    // from one blob to five as it rises, and sharpen into icons at the end.
+    const cx = G.W / 2, cy = y + bh / 2;
+    const appear = smooth(0.5, 0.68, e);
+    const spread = smooth(0.62, 0.9, e);
+    const iconIn = smooth(0.88, 1, e);
+    for (let i = 0; i < 5; i++) {
+      const d = p.dots[i];
+      d.setAttribute("cx", cx + (i - 2) * 35 * spread);
+      d.setAttribute("cy", cy);
+      d.setAttribute("r", (7 - 2 * spread) * Math.max(appear, 0.001));
+    }
+    p.dotGoo.setAttribute("opacity", appear * (1 - iconIn));
+    p.icons.setAttribute("transform", `translate(${cx}, ${cy}) scale(${0.7 + 0.3 * iconIn})`);
+    p.icons.setAttribute("opacity", iconIn);
+  }
+},
+{
+  code: "03", name: "Stretch Extrude", goo: true,
+  show: 0.75, hide: 0.60, ease: quintOut, timing: "0.75s / 0.60s · quintOut",
+  desc: "The capsule extrudes out of the panel still attached by a taffy tail that stretches taut and snaps at e≈0.75 — more violent than 01, one clear 'thock' of separation instead of a slow pinch.",
+  render(e, p) {
+    const rest = smooth(0.9, 1, e);
+    const gooOp = e <= 0.001 ? 0 : 1 - rest;
+    const pTop = G.panelHiddenY + G.drop * e;
+    const h = 10 + (G.navH - 10) * smooth(0, 0.8, e);
+    // width: starts wide/flat, necks IN under stretch, relaxes after snap
+    const stretch = Math.sin(Math.PI * clamp01(e / 0.75)) * (e < 0.75 ? 1 : 0);
+    const w = G.navW * (0.9 + 0.1 * e - 0.14 * stretch);
+    const y = capCY - h / 2 + (1 - e) * (G.drop * 0.55);
+    p.goo.setAttribute("opacity", gooOp);
+    // tail = the panel blob reaching up hard until the snap point
+    const reach = e < 0.75 ? 26 * Math.sin(Math.PI * (e / 0.75)) : 0;
+    setRect(p.gooPanel, G.panelX, pTop - reach, G.panelW, G.panelH + reach, G.panelR);
+    setRect(p.gooNav, (G.W - w) / 2, y, w, h, Math.min(G.navR, h / 2));
+    placePanel(p, pTop, smooth(0.4, 1, e));
+    placeCap(p, (G.W - w) / 2, y, w, h, G.navR, rest, rest);
+  }
+},
+{
+  code: "04", name: "Crisp Slide", goo: false,
+  show: 0.50, hide: 0.40, ease: cubicInOut, timing: "0.50s / 0.40s · easeInOutCubic",
+  desc: "The control study: no liquid at all. The capsule slides up from behind the panel's top edge while the panel makes room — glass stays crisp every frame. If goo never earns its keep, this is the honest fallback.",
+  render(e, p) {
+    const pTop = G.panelHiddenY + G.drop * e;
+    const y = pTop - (G.navH + G.gap) * e + (1 - e) * 6;
+    const op = smooth(0.15, 0.6, e);
+    placePanel(p, pTop, 1);
+    placeCap(p, G.navX, Math.max(G.navY, y), G.navW, G.navH, G.navR, op, op);
+  }
+},
+{
+  code: "05", name: "Elastic Peel", goo: true,
+  show: 0.9, hide: 0.7, ease: t => springEase(t, 0.62, 1.15), timing: "0.90s / 0.70s · spring ζ0.62",
+  desc: "Goo choreography of 01 but on an underdamped spring: the capsule overshoots its slot by a few points and wobbles once as the neck snaps back into the panel. Playful — the wobble IS the personality.",
+  render(e, p) {
+    const ec = clamp01(e);
+    const rest = smooth(0.93, 1, ec);
+    const gooOp = ec <= 0.001 ? 0 : 1 - rest;
+    const h = 8 + (G.navH - 8) * smooth(0.05, 1, ec);
+    const w = G.navW * (0.76 + 0.24 * ec);
+    // overshoot: raw e may exceed 1 → let the capsule ride above its slot
+    const over = (e - ec) * 30;
+    const pTop = G.panelHiddenY + G.drop * ec;
+    const reach = 14 * Math.sin(Math.PI * clamp01(ec * 1.15));
+    p.goo.setAttribute("opacity", gooOp);
+    setRect(p.gooPanel, G.panelX, pTop - reach, G.panelW, G.panelH + reach, G.panelR);
+    setRect(p.gooNav, (G.W - w) / 2, capCY - h / 2 - over, w, h, Math.min(G.navR, h / 2));
+    placePanel(p, pTop, smooth(0.4, 1, ec));
+    placeCap(p, (G.W - w) / 2, capCY - h / 2 - over, w, h, G.navR, rest, rest);
+  },
+  rawEase: true   // pass unclamped eased value so overshoot survives
+},
+{
+  code: "06", name: "Seam Split", goo: false,
+  show: 0.70, hide: 0.55, ease: cubicInOut, timing: "0.70s / 0.55s · easeInOutCubic",
+  desc: "The panel's top edge opens like a seam: its corner radius flattens where the capsule emerges, the capsule rises out of the opening, and the seam re-rounds behind it. Crisp, architectural, no goo filter needed.",
+  render(e, p) {
+    const pTop = G.panelHiddenY + G.drop * e;
+    const open = Math.sin(Math.PI * clamp01(e * 1.2));           // seam opens then closes
+    const seamR = G.panelR * (1 - 0.8 * open);
+    setRect(p.panel, G.panelX, pTop, G.panelW, G.panelH, seamR);
+    for (const row of p.content.children)
+      row.setAttribute("y", pTop + +row.getAttribute("data-dy"));
+    p.content.setAttribute("opacity", smooth(0.35, 1, e));
+    const emerge = smooth(0.1, 0.9, e);
+    const y = pTop - (G.navH + G.gap) * emerge;
+    const h = G.navH * (0.4 + 0.6 * emerge);
+    placeCap(p, G.navX, Math.max(G.navY, y), G.navW, h, G.navR, smooth(0.08, 0.4, e), smooth(0.5, 0.95, e));
+  }
+},
+{
+  code: "07", name: "Material Morph", goo: false,
+  show: 0.55, hide: 0.45, ease: t => springEase(t, 0.86, 0.9), timing: "0.55s / 0.45s · spring ζ0.86 (no visible overshoot)",
+  desc: "What Apple would ship: the capsule blooms from a pill-sliver at the panel edge — scale + blur-in cross-dissolve, panel content dips to 70% and returns. Quiet, fast, zero liquid metaphor.",
+  render(e, p) {
+    const ec = clamp01(e);
+    const pTop = G.panelHiddenY + G.drop * ec;
+    const s = 0.35 + 0.65 * ec;
+    const w = G.navW * s, h = G.navH * s;
+    const yy = pTop - G.gap - h + (1 - ec) * 10;
+    placePanel(p, pTop, 0.7 + 0.3 * Math.abs(1 - 2 * Math.min(ec, 0.999)) ** 1.5);
+    p.capBody.setAttribute("filter", "");
+    placeCap(p, (G.W - w) / 2, Math.max(G.navY, yy), w, h, G.navR * s, smooth(0.05, 0.5, ec), smooth(0.4, 1, ec));
+    p.cap.style.filter = ec < 0.999 ? `blur(${(1 - ec) * 5}px)` : "";
+  }
+},
+{
+  code: "08", name: "Magnet Snap", goo: false,
+  show: 0.60, hide: 0.50, ease: t => springEase(t, 0.55, 1.0), timing: "0.60s / 0.50s · spring ζ0.55 + anticipation dip",
+  desc: "Anticipation then release: the panel top dips down 4pt as if resisting, the capsule tears free, accelerates to its slot and lands with one tight squash-and-stretch. The most game-feel of the eight.",
+  render(e, p) {
+    const ec = clamp01(e);
+    // anticipation: panel dips extra early on
+    const dip = 4 * Math.sin(Math.PI * clamp01(ec / 0.3)) * (ec < 0.3 ? 1 : 0);
+    const pTop = G.panelHiddenY + G.drop * ec + dip;
+    const travel = smooth(0.15, 1, ec);
+    const y = pTop - (G.navH + G.gap) * travel;
+    // squash on arrival: raw overshoot compresses height
+    const over = Math.max(0, e - 1);
+    const h = G.navH * (1 - over * 2.2);
+    const w = G.navW * (1 + over * 1.4);
+    placePanel(p, pTop, smooth(0.3, 1, ec));
+    placeCap(p, (G.W - w) / 2, Math.max(G.navY, y) + (G.navH - h) / 2, w, h, G.navR, smooth(0.1, 0.45, ec), smooth(0.5, 1, ec));
+  },
+  rawEase: true
+}
+];
+
+/* ---------- cards + engine ---------- */
+const grid = document.getElementById("grid");
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let slowAll = false;
+
+const players = [];
+
+for (const st of studies) {
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const parts = buildStage(st.goo, st.iconMelt);
+  const stageDiv = document.createElement("div");
+  stageDiv.className = "stage";
+  stageDiv.appendChild(parts.svg);
+  card.appendChild(stageDiv);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.innerHTML = `<span class="code mono">${st.code}</span>
+    <span class="name">${st.name}</span>
+    <span class="timing mono">${st.timing}</span>`;
+  card.appendChild(meta);
+
+  const desc = document.createElement("p");
+  desc.className = "desc";
+  desc.textContent = st.desc;
+  card.appendChild(desc);
+
+  const ctr = document.createElement("div");
+  ctr.className = "controls";
+  ctr.innerHTML = `
+    <button class="play">Play</button>
+    <button class="loop">Loop</button>
+    <input type="range" min="0" max="1000" value="1000" aria-label="Scrub ${st.name}">
+    <span class="e-read mono">e 1.00</span>`;
+  card.appendChild(ctr);
+  grid.appendChild(card);
+
+  const playBtn = ctr.querySelector(".play");
+  const loopBtn = ctr.querySelector(".loop");
+  const slider = ctr.querySelector("input");
+  const eRead = ctr.querySelector(".e-read");
+
+  const P = {
+    st, parts,
+    t: 1,                // timeline position 0..1 within current leg
+    dir: 1,              // 1 = showing, -1 = hiding
+    playing: false, looping: false,
+    holdUntil: 0,
+    draw(eRaw) {
+      const e = st.rawEase ? eRaw : clamp01(eRaw);
+      st.render(e, parts);
+      eRead.textContent = "e " + clamp01(e).toFixed(2);
+      slider.value = Math.round(clamp01(e) * 1000);
+    },
+    startLeg(dir) {
+      this.dir = dir; this.t = 0; this.playing = true;
+    },
+  };
+  // initial frame: settled shown state
+  P.draw(1);
+
+  playBtn.addEventListener("click", () => {
+    P.looping = false; loopBtn.classList.remove("on");
+    P.startLeg(-1);            // play = hide → (hold) → show, one full cycle
+    P.cycleOnce = true;
+  });
+  loopBtn.addEventListener("click", () => {
+    P.looping = !P.looping;
+    loopBtn.classList.toggle("on", P.looping);
+    if (P.looping && !P.playing) P.startLeg(-1);
+  });
+  slider.addEventListener("input", () => {
+    P.playing = false; P.looping = false; loopBtn.classList.remove("on");
+    P.draw(slider.value / 1000);
+  });
+  stageDiv.addEventListener("click", () => playBtn.click());
+
+  players.push(P);
+}
+
+/* global controls */
+const gLoop = document.getElementById("g-loop");
+const gSlow = document.getElementById("g-slow");
+gLoop.addEventListener("click", () => {
+  const anyOff = players.some(p => !p.looping);
+  gLoop.classList.toggle("on", anyOff);
+  for (const p of players) {
+    p.looping = anyOff;
+    const btn = grid.querySelectorAll(".loop")[players.indexOf(p)];
+    btn.classList.toggle("on", anyOff);
+    if (anyOff && !p.playing) p.startLeg(-1);
+  }
+});
+gSlow.addEventListener("click", () => {
+  slowAll = !slowAll;
+  gSlow.classList.toggle("on", slowAll);
+});
+
+/* engine */
+let last = performance.now();
+function frame(now) {
+  const dt = (now - last) / 1000; last = now;
+  for (const p of players) {
+    if (!p.playing) continue;
+    if (now < p.holdUntil) continue;
+    const dur = (p.dir === 1 ? p.st.show : p.st.hide) * (slowAll ? 8 : 1);
+    p.t += dt / dur;
+    const done = p.t >= 1;
+    const tt = Math.min(1, p.t);
+    const eased = p.st.ease(tt);
+    const e = p.dir === 1 ? eased : 1 - clamp01(eased) - (p.st.rawEase ? (eased - clamp01(eased)) : 0);
+    p.draw(e);
+    if (done) {
+      p.draw(p.dir === 1 ? 1 : 0);
+      if (p.dir === -1) {                       // finished hiding → show next
+        p.startLeg(1);
+        p.holdUntil = now + 420;
+      } else {                                  // finished showing
+        if (p.looping) { p.startLeg(-1); p.holdUntil = now + 900; }
+        else p.playing = false;
+      }
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* autoplay one welcome cycle unless reduced motion */
+if (!reduced) {
+  setTimeout(() => { for (const p of players) { p.startLeg(-1); } }, 500);
+}
+</script>

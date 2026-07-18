@@ -1,0 +1,506 @@
+<title>Island Liquid — Close & Ears</title>
+<style>
+  :root {
+    --ground: #0B0D11;
+    --stage-a: #171a21;
+    --stage-b: #0d0f14;
+    --glass: #1A1D23;
+    --glass-hi: #252932;
+    --ink: #E9EBEF;
+    --muted: #8C93A0;
+    --faint: #565D69;
+    --accent: #A8C7E8;
+    --line: rgba(233, 235, 239, 0.08);
+    --card: #0E1116;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { background: var(--ground); }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 50% -10%, rgba(90, 110, 150, 0.10), transparent 60%),
+      var(--ground);
+    min-height: 100vh;
+    padding-bottom: 80px;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  header {
+    display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+    padding: 34px 36px 8px; max-width: 1180px; margin: 0 auto;
+  }
+  header h1 {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+    font-size: 26px; font-weight: 700; letter-spacing: -0.4px; text-wrap: balance;
+  }
+  header .sub { color: var(--muted); font-size: 13.5px; }
+  .globals { display: flex; gap: 10px; margin-left: auto; }
+  .lede {
+    margin: 0 auto; padding: 0 36px 10px; color: var(--muted);
+    font-size: 13.5px; line-height: 1.55; max-width: 1180px;
+  }
+  h2.section {
+    max-width: 1180px; margin: 26px auto 14px; padding: 0 36px;
+    font-size: 15px; font-weight: 700; letter-spacing: 0.2px;
+  }
+  h2.section span { color: var(--faint); font-weight: 500; font-size: 12.5px; margin-left: 10px; }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+    gap: 22px; max-width: 1180px; margin: 0 auto; padding: 0 36px;
+  }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .stage {
+    position: relative; height: 240px; overflow: hidden; cursor: pointer;
+    background:
+      radial-gradient(700px 300px at 30% 115%, rgba(70, 90, 130, 0.18), transparent 65%),
+      radial-gradient(500px 260px at 80% 95%, rgba(130, 95, 70, 0.12), transparent 60%),
+      linear-gradient(var(--stage-a), var(--stage-b));
+  }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .meta { padding: 14px 16px 6px; display: flex; align-items: baseline; gap: 10px; }
+  .code { font-size: 11px; color: var(--accent); letter-spacing: 1.5px; font-weight: 600; }
+  .name { font-size: 15px; font-weight: 650; letter-spacing: -0.2px; }
+  .timing { margin-left: auto; font-size: 11px; color: var(--faint); }
+  .desc { padding: 0 16px 12px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  .controls { display: flex; align-items: center; gap: 10px; padding: 10px 14px 14px; border-top: 1px solid var(--line); }
+  button {
+    font: inherit; font-size: 12px; font-weight: 600; color: var(--ink);
+    background: var(--glass); border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 12px; cursor: pointer;
+  }
+  button:hover { background: var(--glass-hi); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button.on { color: #0B0D11; background: var(--accent); border-color: var(--accent); }
+  input[type="range"] { flex: 1; accent-color: var(--accent); min-width: 60px; }
+  .e-read { font-size: 11px; color: var(--muted); width: 62px; text-align: right; }
+</style>
+
+<header>
+  <h1>Island Liquid — Close &amp; Ears</h1>
+  <span class="sub">Surface Bulge language, applied island-wide</span>
+  <div class="globals">
+    <button id="g-loop">Loop all</button>
+    <button id="g-slow">6× slow</button>
+  </div>
+</header>
+<p class="lede">
+  Two families. <b>Ear reveal</b>: the album thumb + equalizer bud out of the notch's black
+  body when music starts. <b>Island close</b>: the whole expanded panel melts back into the
+  notch. Both reuse the shipped nav language — metaball goo, dot-melt content, crisp at rest.
+  Click a stage to play; scrub any frame. Pick by code, one from each family.
+</p>
+
+<h2 class="section">Ear reveal <span>e: 0 = bare notch · 1 = ear resting</span></h2>
+<div class="grid" id="grid-ear"></div>
+
+<h2 class="section">Island close <span>e: 0 = fully expanded · 1 = bare notch (open plays in reverse)</span></h2>
+<div class="grid" id="grid-close"></div>
+
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const smooth = (a, b, v) => { const t = clamp01((v - a) / (b - a)); return t * t * (3 - 2 * t); };
+const cubicInOut = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const lerp = (a, b, t) => a + (b - a) * t;
+function el(tag, attrs) {
+  const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+function setR(r, x, y, w, h, rx) {
+  r.setAttribute("x", x); r.setAttribute("y", y);
+  r.setAttribute("width", Math.max(0, w)); r.setAttribute("height", Math.max(0, h));
+  if (rx !== undefined) r.setAttribute("rx", Math.max(0, Math.min(rx, h / 2)));
+}
+let uid = 0;
+function gooFilter(defs, id, blur) {
+  const f = el("filter", { id, x: "-30%", y: "-30%", width: "160%", height: "160%" });
+  f.appendChild(el("feGaussianBlur", { in: "SourceGraphic", stdDeviation: blur, result: "b" }));
+  f.appendChild(el("feColorMatrix", { in: "b", mode: "matrix",
+    values: "1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -8" }));
+  defs.appendChild(f);
+}
+
+/* Shared geometry: 520×240 stage, notch centered. */
+const G = { W: 520, H: 240, nW: 170, nH: 22 };
+G.nX = (G.W - G.nW) / 2;               // 175
+G.nR = G.nX + G.nW;                    // 345
+// Ear rest geometry: flush black extension right of the notch.
+G.earW = 66; G.earX = G.nR; G.earH = G.nH;
+
+/* ============================ EAR STAGES ============================ */
+function buildEarStage() {
+  const id = "e" + (++uid);
+  const svg = el("svg", { viewBox: `0 0 ${G.W} ${G.H}` });
+  const defs = el("defs", {});
+  gooFilter(defs, id + "g", 5);
+  gooFilter(defs, id + "d", 3);
+  // Album art stand-in: warm little cover.
+  const grad = el("linearGradient", { id: id + "art", x1: 0, y1: 0, x2: 1, y2: 1 });
+  grad.appendChild(el("stop", { offset: "0", "stop-color": "#e0763d" }));
+  grad.appendChild(el("stop", { offset: "1", "stop-color": "#7a3f8f" }));
+  defs.appendChild(grad);
+  svg.appendChild(defs);
+
+  const parts = { svg };
+  // Goo body: notch + ear blob, one liquid silhouette.
+  const goo = el("g", { filter: `url(#${id}g)` });
+  parts.notch = el("path", {
+    d: `M ${G.nX} 0 h ${G.nW} v ${G.nH - 10} a 10 10 0 0 1 -10 10 h ${-(G.nW - 20)} a 10 10 0 0 1 -10 -10 Z`,
+    fill: "#000"
+  });
+  parts.earBlob = el("rect", { x: G.earX, y: 0, width: 0, height: G.nH, rx: 10, fill: "#000" });
+  goo.appendChild(parts.notch);
+  goo.appendChild(parts.earBlob);
+  svg.appendChild(goo);
+
+  // Content dot-melt layer (own gentler goo).
+  parts.dotGoo = el("g", { filter: `url(#${id}d)`, opacity: 0 });
+  parts.dotA = el("circle", { cx: 0, cy: 0, r: 0, fill: "#cfd6df" });
+  parts.dotB = el("circle", { cx: 0, cy: 0, r: 0, fill: "#cfd6df" });
+  parts.dotGoo.appendChild(parts.dotA);
+  parts.dotGoo.appendChild(parts.dotB);
+  svg.appendChild(parts.dotGoo);
+
+  // Crisp content: art thumb + 4 eq bars.
+  parts.content = el("g", { opacity: 0 });
+  parts.art = el("rect", { x: 0, y: 0, width: 13, height: 13, rx: 3.5, fill: `url(#${id}art)` });
+  parts.content.appendChild(parts.art);
+  parts.bars = [];
+  for (let i = 0; i < 4; i++) {
+    const b = el("rect", { x: 0, y: 0, width: 2.6, height: 6, rx: 1.3, fill: "#A8C7E8" });
+    parts.bars.push(b);
+    parts.content.appendChild(b);
+  }
+  svg.appendChild(parts.content);
+  return parts;
+}
+
+/* Common ear content placement: art center + bars, then the dot handoff. */
+function earContent(p, e, earRight, appearA, appearB) {
+  const artCX = G.earX + 14, cy = G.nH / 2;
+  const barX0 = G.earX + 30, barGap = 6.5;
+  const iconIn = smooth(0.84, 1, e);
+  // dots: born at the notch seam, sliding to their content positions
+  const seamX = G.earX + 2;
+  const da = smooth(appearA, appearA + 0.14, e), db = smooth(appearB, appearB + 0.14, e);
+  const spread = smooth(appearA + 0.08, 0.9, e);
+  p.dotA.setAttribute("cx", lerp(seamX, artCX, spread));
+  p.dotA.setAttribute("cy", cy); p.dotA.setAttribute("r", 6.5 * da * (1 - 0.2 * spread));
+  p.dotB.setAttribute("cx", lerp(seamX, barX0 + 1.5 * barGap, spread));
+  p.dotB.setAttribute("cy", cy); p.dotB.setAttribute("r", 5.5 * db * (1 - 0.2 * spread));
+  p.dotGoo.setAttribute("opacity", Math.max(da, db) * (1 - iconIn));
+  // crisp content sharpens out of the dots
+  setR(p.art, artCX - 6.5, cy - 6.5, 13, 13, 3.5);
+  const hts = [9, 14, 7, 11];
+  p.bars.forEach((b, i) => {
+    const h = hts[i];
+    setR(b, barX0 + i * barGap - 1.3, cy - h / 2, 2.6, h, 1.3);
+  });
+  p.content.setAttribute("opacity", iconIn);
+  p.content.setAttribute("transform",
+    `translate(${(1 - iconIn) * 1.5}, 0) scale(${0.9 + 0.1 * iconIn})`);
+  p.content.style.transformOrigin = `${artCX}px ${cy}px`;
+}
+
+const earStudies = [
+{
+  code: "E1", name: "Side Bulge — ✓ PICKED", show: 0.7, hide: 0.55, ease: cubicInOut,
+  timing: "0.70s / 0.55s · easeInOutCubic",
+  desc: "The notch's right flank swells sideways under surface tension — a low horizontal bulge that rounds into the ear pill, still one continuous black body. Content buds at the seam as dots and slides into place. The straight adaptation of the nav's Surface Bulge, rotated 90°.",
+  build: buildEarStage,
+  render(e, p) {
+    const rise = smooth(0, 0.75, e);
+    const w = G.earW * rise;
+    const h = lerp(9, G.earH, smooth(0.1, 0.8, e));
+    setR(p.earBlob, G.earX - 6, (G.nH - h) / 2, w + 6, h, h / 2);
+    earContent(p, e, G.earX + w, 0.45, 0.55);
+  }
+},
+{
+  code: "E2", name: "Underside Drip", show: 0.75, hide: 0.6, ease: cubicInOut,
+  timing: "0.75s / 0.60s · easeInOutCubic",
+  desc: "A droplet swells from the notch's bottom-right underside, hangs for a beat, then slides up and sideways to fuse into the ear slot — like a drop rejoining a pane of glass. The most liquid read; slightly showier than E1.",
+  build: buildEarStage,
+  render(e, p) {
+    const grow = smooth(0, 0.4, e);
+    const travel = smooth(0.3, 0.8, e);
+    const w = lerp(18, G.earW, travel);
+    const h = lerp(14, G.earH, travel);
+    const x = lerp(G.nR - 34, G.earX, travel);
+    const y = lerp(G.nH - 4, 0, travel);
+    setR(p.earBlob, x, y, w * grow, h, h / 2);
+    earContent(p, e, x + w, 0.55, 0.63);
+  }
+},
+{
+  code: "E3", name: "Stretch Widen", show: 0.6, hide: 0.5, ease: cubicInOut,
+  timing: "0.60s / 0.50s · easeInOutCubic",
+  desc: "The island itself stretches wider — the whole black bar extends right with a hint of vertical squash mid-pull, and the ear area is simply new island. Content dot-melts in once the surface settles. Closest to how iOS's Dynamic Island grows; the quietest option.",
+  build: buildEarStage,
+  render(e, p) {
+    const pull = smooth(0, 0.8, e);
+    const squash = Math.sin(Math.PI * clamp01(e / 0.8)) * 2.2;
+    const w = G.earW * pull;
+    setR(p.earBlob, G.earX - 8, squash / 2, w + 8, G.nH - squash, 10);
+    earContent(p, e, G.earX + w, 0.5, 0.58);
+  }
+}
+];
+
+/* ============================ CLOSE STAGES ============================ */
+const C = { pW: 380, pH: 128, capW: 190, capH: 26 };
+C.pX = (G.W - C.pW) / 2;
+C.capX = (G.W - C.capW) / 2;
+C.capY = G.nH + 8;                       // capsule slot under the notch
+C.pY = C.capY + C.capH + 8;              // panel under the capsule
+
+function buildCloseStage() {
+  const id = "c" + (++uid);
+  const svg = el("svg", { viewBox: `0 0 ${G.W} ${G.H}` });
+  const defs = el("defs", {});
+  gooFilter(defs, id + "g", 7);
+  gooFilter(defs, id + "d", 3.5);
+  svg.appendChild(defs);
+  const parts = { svg };
+
+  const goo = el("g", { filter: `url(#${id}g)` });
+  parts.notch = el("path", {
+    d: `M ${G.nX} 0 h ${G.nW} v ${G.nH - 10} a 10 10 0 0 1 -10 10 h ${-(G.nW - 20)} a 10 10 0 0 1 -10 -10 Z`,
+    fill: "#101216"
+  });
+  parts.cap = el("rect", { x: C.capX, y: C.capY, width: C.capW, height: C.capH, rx: 13, fill: "#181b20" });
+  parts.panel = el("rect", { x: C.pX, y: C.pY, width: C.pW, height: C.pH, rx: 22, fill: "#181b20" });
+  goo.appendChild(parts.notch);
+  goo.appendChild(parts.cap);
+  goo.appendChild(parts.panel);
+  svg.appendChild(goo);
+
+  // faux content rows (crisp, on the panel)
+  parts.rows = el("g", {});
+  const rows = [[26, 120, 7], [46, 250, 7], [66, 200, 7], [96, 70, 20]];
+  for (const [dy, w, h] of rows) {
+    parts.rows.appendChild(el("rect", {
+      x: C.pX + 22, y: C.pY + dy, width: w, height: h, rx: h / 2,
+      fill: h > 10 ? "rgba(168,199,232,0.20)" : "rgba(233,235,239,0.13)",
+      "data-dy": dy, "data-w": w, "data-h": h
+    }));
+  }
+  svg.appendChild(parts.rows);
+
+  // content dots (the rows' liquid remnant riding into the notch)
+  parts.dotGoo = el("g", { filter: `url(#${id}d)`, opacity: 0 });
+  parts.dots = [];
+  for (let i = 0; i < 4; i++) {
+    const c = el("circle", { cx: 0, cy: 0, r: 0, fill: "#cfd6df" });
+    parts.dots.push(c);
+    parts.dotGoo.appendChild(c);
+  }
+  svg.appendChild(parts.dotGoo);
+  return parts;
+}
+
+/* rows melt → dots → converge into the rising mass. Staggered per row, dots
+   accelerate upward (ease-in on y) so they read as drawn into the liquid. */
+function rowsMelt(p, e, targetX, targetY, meltAt) {
+  const gone = smooth(0.8, 0.93, e);
+  let anyMelt = 0;
+  p.dots.forEach((d, i) => {
+    const stag = i * 0.045;
+    const melt = smooth(meltAt + stag, meltAt + stag + 0.14, e);
+    const ride = smooth(meltAt + stag + 0.08, 0.8, e);
+    anyMelt = Math.max(anyMelt, melt);
+    const row = p.rows.children[i];
+    if (row) {
+      const w0 = +row.getAttribute("data-w");
+      row.setAttribute("width", Math.max(6, w0 * (1 - melt)));
+      row.setAttribute("opacity", 1 - melt);
+    }
+    const sx = C.pX + 26, sy = C.pY + (+((row || {getAttribute:()=>30}).getAttribute("data-dy")) || 30) + 4;
+    d.setAttribute("cx", lerp(sx, targetX, ride));
+    d.setAttribute("cy", lerp(sy, targetY, ride * ride));   // pulled upward
+    d.setAttribute("r", 5.5 * melt * (1 - 0.55 * ride));
+  });
+  p.dotGoo.setAttribute("opacity", anyMelt * (1 - gone));
+}
+
+const closeStudies = [
+{
+  code: "C4", name: "Surface Return", show: 0.85, hide: 0.7, ease: cubicInOut,
+  timing: "0.85s close / 0.70s open · easeInOutCubic",
+  desc: "The faithful reverse of what ships on the nav: the capsule melts into the panel's surface first, then the panel's TOP edge climbs toward the notch while the body narrows behind it — mass arriving before the bottom lets go — and the goo necks it into the notch's underside. One body, surface tension leading, nothing thrown.",
+  build: buildCloseStage,
+  render(e, p) {
+    const capMelt = smooth(0, 0.26, e);
+    const capH = Math.max(2, C.capH * (1 - capMelt));
+    setR(p.cap, C.capX + (C.capW * capMelt * 0.06) / 2,
+         lerp(C.capY, C.pY - capH * 0.35, capMelt),
+         C.capW * (1 - 0.06 * capMelt), capH, 13);
+    const topY = lerp(C.pY, G.nH - 5, smooth(0.24, 0.72, e));
+    const botY = lerp(C.pY + C.pH, G.nH + 9, smooth(0.4, 0.94, e));
+    const w = lerp(C.pW, G.nW + 26, smooth(0.42, 0.92, e));
+    const h = Math.max(5, botY - topY);
+    setR(p.panel, (G.W - w) / 2, topY, w, h, Math.min(22, h / 2));
+    rowsMelt(p, e, G.W / 2, G.nH + 2, 0.1);
+  }
+},
+{
+  code: "C5", name: "Iris Draw", show: 0.75, hide: 0.62, ease: cubicInOut,
+  timing: "0.75s close / 0.62s open · easeInOutCubic",
+  desc: "One continuous contraction: width and height draw inward together — the slab rounding ever more as it condenses — while the whole body glides up beneath the notch and is taken in one motion. No stages, no pause; the calmest and most Apple of the four.",
+  build: buildCloseStage,
+  render(e, p) {
+    const capMelt = smooth(0, 0.22, e);
+    setR(p.cap, C.capX, lerp(C.capY, C.pY - 4, capMelt),
+         C.capW, Math.max(2, C.capH * (1 - capMelt)), 13);
+    const draw = smooth(0.15, 0.9, e);
+    const absorb = smooth(0.88, 1, e);
+    const w = lerp(C.pW, 54, draw) * (1 - absorb);
+    const h = lerp(C.pH, 20, draw) * (1 - absorb);
+    const cy = lerp(C.pY + C.pH / 2, G.nH + 2, smooth(0.2, 0.93, e));
+    setR(p.panel, (G.W - w) / 2, cy - h / 2, w, h, h / 2);
+    rowsMelt(p, e, G.W / 2, G.nH + 2, 0.08);
+  }
+},
+{
+  code: "C6", name: "Wick Up", show: 0.8, hide: 0.65, ease: cubicInOut,
+  timing: "0.80s close / 0.65s open · easeInOutCubic",
+  desc: "Contact first, then drain: the panel's top sheet rises quickly to touch the notch and fuse, then the notch wicks the body up in place — the bottom edge rising through the emptying frame while the width stays put until the very end. Reads as absorption, not travel.",
+  build: buildCloseStage,
+  render(e, p) {
+    const capMelt = smooth(0, 0.2, e);
+    setR(p.cap, C.capX, lerp(C.capY, C.pY - 3, capMelt),
+         C.capW, Math.max(2, C.capH * (1 - capMelt)), 13);
+    const topY = lerp(C.pY, G.nH - 4, smooth(0.16, 0.44, e));
+    const botY = lerp(C.pY + C.pH, G.nH + 8, smooth(0.34, 0.92, e));
+    const w = lerp(C.pW, G.nW + 40, smooth(0.55, 0.96, e));
+    const h = Math.max(4, botY - topY);
+    setR(p.panel, (G.W - w) / 2, topY, w, h, Math.min(22, h / 2));
+    rowsMelt(p, e, G.W / 2, G.nH + 2, 0.12);
+  }
+},
+{
+  code: "C7", name: "Drop Merge", show: 0.8, hide: 0.68, ease: cubicInOut,
+  timing: "0.80s close / 0.68s open · easeInOutCubic",
+  desc: "The most literal 'morphing into the notch': the whole island condenses into a wide droplet hanging just beneath the notch, holds a breath, then rises the last few points and goo-fuses into the black bar — the classic two-body metaball merge, scaled up.",
+  build: buildCloseStage,
+  render(e, p) {
+    const ball = smooth(0, 0.42, e);
+    const fuse = smooth(0.58, 0.96, e);
+    setR(p.cap, C.capX, lerp(C.capY, C.pY + 8, ball),
+         C.capW * (1 - ball), Math.max(2, C.capH * (1 - ball)), 13);
+    const w = lerp(C.pW, 150, ball) * (1 - 0.8 * fuse);
+    const h = lerp(C.pH, 42, ball) * (1 - 0.8 * fuse);
+    const cy = lerp(C.pY + C.pH / 2, G.nH + 24, ball) - lerp(0, 22, fuse);
+    setR(p.panel, (G.W - w) / 2, cy - h / 2, w, h, h / 2);
+    rowsMelt(p, e, G.W / 2, G.nH + 4, 0.1);
+  }
+}
+];
+
+/* ============================ ENGINE ============================ */
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let slowAll = false;
+const players = [];
+
+function makeCard(st, gridEl, restAtOne) {
+  const card = document.createElement("div");
+  card.className = "card";
+  const parts = st.build();
+  const stageDiv = document.createElement("div");
+  stageDiv.className = "stage";
+  stageDiv.appendChild(parts.svg);
+  card.appendChild(stageDiv);
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.innerHTML = `<span class="code mono">${st.code}</span>
+    <span class="name">${st.name}</span><span class="timing mono">${st.timing}</span>`;
+  card.appendChild(meta);
+  const desc = document.createElement("p");
+  desc.className = "desc";
+  desc.textContent = st.desc;
+  card.appendChild(desc);
+  const ctr = document.createElement("div");
+  ctr.className = "controls";
+  ctr.innerHTML = `<button class="play">Play</button><button class="loop">Loop</button>
+    <input type="range" min="0" max="1000" value="${restAtOne ? 1000 : 0}" aria-label="Scrub ${st.name}">
+    <span class="e-read mono">e ${restAtOne ? "1.00" : "0.00"}</span>`;
+  card.appendChild(ctr);
+  gridEl.appendChild(card);
+
+  const playBtn = ctr.querySelector(".play");
+  const loopBtn = ctr.querySelector(".loop");
+  const slider = ctr.querySelector("input");
+  const eRead = ctr.querySelector(".e-read");
+  const P = {
+    st, parts, t: 1, dir: 1, playing: false, looping: false, holdUntil: 0,
+    loopBtn,
+    draw(e) {
+      const ec = clamp01(e);
+      st.render(ec, parts);
+      eRead.textContent = "e " + ec.toFixed(2);
+      slider.value = Math.round(ec * 1000);
+    },
+    startLeg(dir) { this.dir = dir; this.t = 0; this.playing = true; },
+  };
+  P.draw(restAtOne ? 1 : 0);
+  if (restAtOne) { /* ears rest revealed */ } else { /* close stages rest expanded */ }
+  playBtn.addEventListener("click", () => {
+    P.looping = false; loopBtn.classList.remove("on");
+    P.startLeg(restAtOne ? -1 : 1);   // ears: hide→show; close: close→open
+    P.cycleOnce = true;
+  });
+  loopBtn.addEventListener("click", () => {
+    P.looping = !P.looping;
+    loopBtn.classList.toggle("on", P.looping);
+    if (P.looping && !P.playing) P.startLeg(restAtOne ? -1 : 1);
+  });
+  slider.addEventListener("input", () => {
+    P.playing = false; P.looping = false; loopBtn.classList.remove("on");
+    P.draw(slider.value / 1000);
+  });
+  stageDiv.addEventListener("click", () => playBtn.click());
+  players.push(P);
+}
+
+for (const st of earStudies) makeCard(st, document.getElementById("grid-ear"), true);
+for (const st of closeStudies) makeCard(st, document.getElementById("grid-close"), false);
+
+document.getElementById("g-loop").addEventListener("click", function () {
+  const anyOff = players.some(p => !p.looping);
+  this.classList.toggle("on", anyOff);
+  for (const p of players) {
+    p.looping = anyOff;
+    p.loopBtn.classList.toggle("on", anyOff);
+    if (anyOff && !p.playing) p.startLeg(-1);
+  }
+});
+document.getElementById("g-slow").addEventListener("click", function () {
+  slowAll = !slowAll;
+  this.classList.toggle("on", slowAll);
+});
+
+let last = performance.now();
+function frame(now) {
+  const dt = (now - last) / 1000; last = now;
+  for (const p of players) {
+    if (!p.playing || now < p.holdUntil) continue;
+    const dur = (p.dir === 1 ? p.st.show : p.st.hide) * (slowAll ? 6 : 1);
+    p.t += dt / dur;
+    const tt = Math.min(1, p.t);
+    const eased = p.st.ease(tt);
+    p.draw(p.dir === 1 ? eased : 1 - eased);
+    if (p.t >= 1) {
+      p.draw(p.dir === 1 ? 1 : 0);
+      if (p.dir === -1) { p.startLeg(1); p.holdUntil = now + 500; }
+      else if (p.looping) { p.startLeg(-1); p.holdUntil = now + 900; }
+      else p.playing = false;
+    }
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+if (!reduced) setTimeout(() => { for (const p of players) p.startLeg(-1); }, 500);
+</script>

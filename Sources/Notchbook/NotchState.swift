@@ -103,6 +103,10 @@ final class NotchState: ObservableObject {
     /// Cursor is over the collapsed island's sound-wave ear — it morphs
     /// into mini transport controls.
     @Published var earHovered = false
+    /// `-LiquidIslandDebug`: forces the media-ear reveal on/off without a real
+    /// player, so the auto-loop harness can exercise the LiquidEar morph. Only
+    /// consulted while the debug flag is set; nil/false in normal use.
+    @Published var liquidEarDebugForced = false
     /// Transient notification shown beside the notch while collapsed.
     @Published var toast: NotchToast?
     /// Live progress of a horizontal two-finger swipe over the expanded

@@ -60,10 +60,57 @@ struct NotchView: View {
     /// you switch pages and the power button is never clipped. Starts at a sane
     /// default until the first probe measurement lands (within one layout pass).
     @State private var navBarWidth: CGFloat = 300
-    /// Live glyph centers of the nav controls (in navRow space) + row width,
-    /// fed to LiquidNav so each icon-melt dot lands exactly on its real icon.
-    @State private var navIconCenters: [CGFloat] = []
-    @State private var navRowWidth: CGFloat = 0
+
+    /// Media-ear reveal progress (0 = bare notch, 1 = ear resting). Driven off
+    /// `showMediaEar` on an easeInOutCubic curve; drives the LiquidEar "Side
+    /// Bulge" morph (E1). Its rest window hands off to the crisp backing + real
+    /// ear content, so the goo is gone once settled.
+    @State private var earT: Double = 0
+    /// Measured album-thumb + equalizer-cluster centers (in "earIsland" space) so
+    /// the content dots melt to exactly the real views — the ear's `NavIconCenters`.
+    @State private var earArtCenterX: CGFloat = 0
+    @State private var earEqCenterX: CGFloat = 0
+    /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
+    /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
+    private var earTFreeze: Double? {
+        UserDefaults.standard.object(forKey: "LiquidEarFreeze") == nil
+            ? nil : UserDefaults.standard.double(forKey: "LiquidEarFreeze")
+    }
+    private var renderEarT: Double { earTFreeze ?? earT }
+    /// `-LiquidEarPink 1`: flood the ear goo silhouette flat pink for geometry tuning.
+    private var liquidEarPink: Bool { UserDefaults.standard.bool(forKey: "LiquidEarPink") }
+
+    /// Island close/open progress (0 = fully expanded, 1 = collapsed). Driven off
+    /// `state.isExpanded` on an easeInOutCubic curve (0.85 s close / 0.70 s open);
+    /// drives the LiquidClose "Surface Return" morph while the logic triggers
+    /// (expand/collapse) stay untouched.
+    @State private var closeT: Double = 1
+    /// `-LiquidCloseFreeze <e>`: pin the close morph at a static value.
+    private var closeTFreeze: Double? {
+        UserDefaults.standard.object(forKey: "LiquidCloseFreeze") == nil
+            ? nil : UserDefaults.standard.double(forKey: "LiquidCloseFreeze")
+    }
+    private var renderCloseT: Double { closeTFreeze ?? closeT }
+    /// `-LiquidClosePink 1`: flood the close goo silhouette flat pink.
+    private var liquidClosePink: Bool { UserDefaults.standard.bool(forKey: "LiquidClosePink") }
+    /// `-LiquidIslandDebug 1`: slow BOTH island morphs 6× (paired with the
+    /// AppDelegate auto-loop) so ear + close can be captured frame-by-frame.
+    private var liquidIslandDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidIslandDebug") }
+    /// The media ear the liquid owns — album now-playing, ignoring the pomodoro
+    /// countdown ear (which keeps its plain fade). Independent of `isExpanded`:
+    /// the collapsed container's own opacity hides it on expand. Under
+    /// `-LiquidIslandDebug` the auto-loop drives it via a forced flag (no player).
+    private var showMediaEar: Bool {
+        if liquidIslandDebug { return state.liquidEarDebugForced }
+        return media.nowPlaying != nil && !media.earHidden
+    }
+
+    /// Smoothstep a→b at x, clamped (the mock's `smooth`, for view-level windows).
+    private func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+        guard b != a else { return x < a ? 0 : 1 }
+        let t = min(1, max(0, (x - a) / (b - a)))
+        return t * t * (3 - 2 * t)
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -143,6 +190,32 @@ struct NotchView: View {
                        height: metrics.notchHeight)
                 .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                       bottomRadius: 10))
+                // The crisp backing owns the RESTING look. For the media ear the
+                // LiquidEar goo owns the flight and the backing only fades in over
+                // the last 10% (its full width is invisible until then, so there's
+                // no width-spring). Non-media cases (pomodoro countdown) are shown
+                // as before.
+                .opacity(showMediaEar ? smoothstep(0.9, 1, renderEarT) : 1)
+
+                // E1 "Side Bulge": the notch's right flank swells into the ear.
+                // Present only in flight (goo gone at rest); the container's own
+                // opacity hides it on expand.
+                if !state.isExpanded, renderEarT > 0.02, renderEarT < 0.999 {
+                    LiquidEar(t: renderEarT,
+                              notchWidth: metrics.notchWidth,
+                              notchHeight: metrics.notchHeight,
+                              earWidth: metrics.mediaEarWidth,
+                              artCenterX: earArtCenterX > 0 ? earArtCenterX : nil,
+                              eqCenterX: earEqCenterX > 0 ? earEqCenterX : nil,
+                              debugPink: liquidEarPink)
+                        .frame(width: metrics.notchWidth + metrics.mediaEarWidth
+                                       + LiquidEar.rightPad,
+                               height: metrics.notchHeight
+                                       + LiquidEar.vPadTop + LiquidEar.vPadBottom,
+                               alignment: .topLeading)
+                        .offset(y: -LiquidEar.vPadTop)
+                        .allowsHitTesting(false)
+                }
 
                 HStack(spacing: 0) {
                     // Fixed notch-width block reserves the hardware notch; content
@@ -160,6 +233,12 @@ struct NotchView: View {
                 .frame(height: metrics.notchHeight)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // Anchor for measuring the ear-content dot targets: x=0 is the notch's
+            // left edge, matching LiquidEar's canvas space.
+            .coordinateSpace(name: "earIsland")
+            .onPreferenceChange(EarContentCentersKey.self) { centers in
+                if centers.count >= 2 { earArtCenterX = centers[0]; earEqCenterX = centers[1] }
+            }
             // Own its constant collapsed anchor (left edge flush at the notch).
             // Nothing here animates horizontally on expand — the bar just fades
             // IN PLACE, killing the old diagonal drag.
@@ -176,9 +255,21 @@ struct NotchView: View {
             // `navT` (0…1, spring-driven) drives the whole morph: the panel
             // shifts down to open the gap, the metaball forms the capsule, and
             // the controls fade in on top of it.
+            // C4 "Surface Return": the liquid panel body that climbs into the
+            // notch during close. Behind the real panel (which cross-fades out
+            // early), it carries the travel; the nav capsule melt is LiquidNav.
+            liquidCloseLayer
+
             ZStack(alignment: .top) {
                 liquidNavLayer                       // goo capsule + neck (behind)
-                expandedPanelLayer                   // content panel (shifts down)
+                // Real glass panel: cross-fades OUT early on close (the liquid
+                // stand-in takes over) and IN over the last stretch on open. The
+                // nonlinear window must live in an Animatable relay so it renders
+                // every mid-flight value (rule: withAnimation snaps @State).
+                NavTDriven(t: renderCloseT) { e in
+                    expandedPanelLayer
+                        .opacity(1 - smoothstep(0.10, 0.26, e))
+                }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
             }
             // Fixed width: the off-screen probe reports the widest reachable
@@ -189,17 +280,12 @@ struct NotchView: View {
             .background(navWidthProbe)
             .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
             // CONSTANT width (this tab's panel), centered by the container's .top
-            // alignment. It never changes width on expand — only scale/opacity/
-            // offset animate — so the panel drops dead-vertical, no diagonal.
+            // alignment. It never changes width on expand — the Surface Return
+            // choreography (LiquidClose) carries all vertical motion.
             .frame(width: expandedSize.width)
             .padding(.top, metrics.notchHeight + gap)
-            // Bubble pop: start ~82% from the top-center, spring past 100%, settle.
-            .scaleEffect(state.isExpanded ? 1 : 0.82, anchor: .top)
-            .opacity(state.isExpanded ? 1 : 0)
-            // Constant hidden travel (NOT the tab-dependent full height) so every
-            // tab drops the same distance at the same perceived speed.
-            .offset(y: state.isExpanded ? 0 : -(metrics.notchHeight + NotchMetrics.islandGap + 60))
-            .allowsHitTesting(state.isExpanded)
+            // Interactivity gated to rest — mid-morph the controls aren't there.
+            .allowsHitTesting(state.isExpanded && renderCloseT < 0.05)
         }
         // Full-window width, non-animating horizontally — each layer owns its own
         // constant anchor, so expand/collapse has zero sideways drift.
@@ -233,8 +319,37 @@ struct NotchView: View {
                 navT = show ? 1 : 0
             }
         }
+        // Drive `earT` (E1 Side Bulge) on easeInOutCubic: 0.70 s show / 0.55 s
+        // hide, per the motion contract. `-LiquidIslandDebug` stretches both 6×.
+        .onChange(of: showMediaEar) { show in
+            let base = show ? 0.70 : 0.55
+            let dur = base * (liquidIslandDebug ? 6 : 1)
+            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                earT = show ? 1 : 0
+            }
+        }
+        // Seed the ear at rest if music is already playing at launch (onChange
+        // never fires for the initial value, so it would otherwise never reveal).
+        .onAppear {
+            if showMediaEar { earT = 1 }
+            closeT = state.isExpanded ? 0 : 1
+        }
+        // Drive `closeT` (C4 Surface Return) on easeInOutCubic: 0.85 s close /
+        // 0.70 s open. The nav capsule's melt (navT→0, animated below) is chained
+        // as the opening beat, not duplicated here. 6× under LiquidIslandDebug.
         .onChange(of: state.isExpanded) { expanded in
-            if !expanded { navT = 0 }
+            let base = expanded ? 0.70 : 0.85
+            let dur = base * (liquidIslandDebug ? 6 : 1)
+            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                closeT = expanded ? 0 : 1
+            }
+            // Animate the nav melt (was a hard snap) so it reads as the capsule-
+            // melt beat of the close, then rests flat for the next expand.
+            if !expanded {
+                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: 0.30 * (liquidIslandDebug ? 6 : 1))) {
+                    navT = 0
+                }
+            }
         }
         .onChange(of: media.nowPlaying?.isPlaying) { playing in
             // The tap only listens while the player itself is playing —
@@ -376,6 +491,7 @@ struct NotchView: View {
                         } else {
                             HStack(spacing: 6) {
                                 artworkThumb(side: metrics.notchHeight - 10)
+                                    .background(earDotAnchor)
                                 Group {
                                     if np.isPlaying {
                                         EqualizerBars(barCount: 4, maxHeight: 14,
@@ -389,6 +505,7 @@ struct NotchView: View {
                                     }
                                 }
                                 .frame(width: 30)
+                                .background(earDotAnchor)
                             }
                             .transition(.opacity.combined(with: .scale(scale: 0.85)))
                         }
@@ -396,6 +513,10 @@ struct NotchView: View {
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
                 }
                 .frame(height: metrics.notchHeight)
+                // The dots carry the content through flight; the real views sharpen
+                // in only over the last 16% (the goo's `iconIn` window). At rest
+                // this is 1, so the hover→transport morph works normally.
+                .opacity(smoothstep(0.84, 1, renderEarT))
                 .transition(.opacity)
             }
         }
@@ -527,6 +648,15 @@ struct NotchView: View {
         }
     }
 
+    /// Reports a media-ear element's center-x in "earIsland" space as a LiquidEar
+    /// dot target. Emitted in tree order: album thumb first, then equalizer.
+    private var earDotAnchor: some View {
+        GeometryReader { g in
+            Color.clear.preference(key: EarContentCentersKey.self,
+                                   value: [g.frame(in: .named("earIsland")).midX])
+        }
+    }
+
     private func artworkThumb(side: CGFloat) -> some View {
         Group {
             if let art = media.artwork {
@@ -569,31 +699,6 @@ struct NotchView: View {
         var body: some View { content(t) }
     }
 
-    /// Each nav control's glyph center-x within the control row ("navRow"
-    /// space). The icon-melt dots spread to EXACTLY these positions, so every
-    /// icon sharpens out of its own dot — without this the dots landed on an
-    /// even grid that matched nothing and the handoff read as two separate
-    /// animations.
-    private struct NavIconCentersKey: PreferenceKey {
-        static var defaultValue: [CGFloat] = []
-        static func reduce(value: inout [CGFloat], nextValue: () -> [CGFloat]) {
-            value.append(contentsOf: nextValue())
-        }
-    }
-    private struct NavRowWidthKey: PreferenceKey {
-        static var defaultValue: CGFloat = 0
-        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-            value = max(value, nextValue())
-        }
-    }
-    /// Anchor a control's dot target: reports its center-x in navRow space.
-    private func dotAnchor<V: View>(_ view: V) -> some View {
-        view.background(GeometryReader { g in
-            Color.clear.preference(key: NavIconCentersKey.self,
-                                   value: [g.frame(in: .named("navRow")).midX])
-        })
-    }
-
     /// Surface-bulge droplet + liquid neck (metaball), behind the panel so the
     /// neck tucks in seamlessly. Only drawn while there's something to reveal.
     /// The blob hugs the measured control width.
@@ -619,18 +724,6 @@ struct NotchView: View {
                           navHeight: NotchMetrics.navIslandHeight,
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
-                          // One dot per real control: every visible page tab
-                          // plus the pin, settings, and power buttons — the
-                          // dots sharpen into exactly the icons that exist.
-                          iconCount: state.visibleTabs.count + 3,
-                          iconSpacing: (navBlobW - 70)
-                              / CGFloat(max(1, state.visibleTabs.count + 2)),
-                          // Measured glyph centers → each dot IS its icon's
-                          // position; empty until the first layout lands, then
-                          // the uniform fallback above never shows again.
-                          iconOffsets: navRowWidth > 0
-                              ? navIconCenters.map { $0 - navRowWidth / 2 }
-                              : [],
                           debugPink: liquidNavPink)
                     // 18pt taller + shifted up to match LiquidNav's topPad —
                     // gives the droplet overshoot room instead of a flat clip.
@@ -656,6 +749,43 @@ struct NotchView: View {
         }
     }
 
+    /// C4 Surface Return stand-in: spans the notch down to the panel bottom, one
+    /// window-centered canvas so its center aligns with the notch. Wrapped in the
+    /// Animatable relay so its close-progress branch + opacity window render every
+    /// mid-flight frame. Fades in as the real glass fades out, and fades out at the
+    /// very end as the collapsed island (bare notch) takes over.
+    private var liquidCloseLayer: some View {
+        let panel = expandedSize
+        let canvasW: CGFloat = panel.width + 2 * LiquidClose.hPad
+        let stack: CGFloat = metrics.notchHeight + NotchMetrics.islandGap
+            + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
+        let canvasH: CGFloat = stack + panel.height + LiquidClose.botPad
+        return NavTDriven(t: renderCloseT) { e in
+            if e > 0.02, e < 0.999 {
+                // Fade IN as the real glass fades out; then hold FULL opacity all
+                // the way into the notch — the body is geometrically fused to the
+                // notch from e≈0.72 (topY reaches the underside), so any earlier
+                // fade turns the already-merged mass into a ghost (user-flagged).
+                // The only fade is the final 0.97→1 swap to the real black notch,
+                // which the body has already coincided with — imperceptible.
+                let bodyOp = smoothstep(0.06, 0.20, e) * (1 - smoothstep(0.97, 1.0, e))
+                LiquidClose(t: e,
+                            notchWidth: metrics.notchWidth,
+                            notchHeight: metrics.notchHeight,
+                            gap: NotchMetrics.islandGap,
+                            navHeight: NotchMetrics.navIslandHeight,
+                            navContentGap: NotchMetrics.navContentGap,
+                            panelWidth: panel.width,
+                            panelHeight: panel.height,
+                            debugPink: liquidClosePink)
+                    .frame(width: canvasW, height: canvasH, alignment: .top)
+                    .opacity(bodyOp)
+                    .allowsHitTesting(false)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
     /// The content panel, shifted down as the nav emerges and up as it melts.
     private var expandedPanelLayer: some View {
         let shift = (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
@@ -679,17 +809,14 @@ struct NotchView: View {
         // fade in over iconIn = smooth(0.88, 1) with a slight scale-up, so the
         // dots sharpen INTO the real icons rather than popping over them.
         NavTDriven(t: renderNavT) { navT in
-            // Wider handoff window (0.84→1, was 0.88) and a gentler scale ramp:
-            // the icons emerge WHILE the dots dissolve at the same positions —
-            // one continuous act, not "dots show, then nav bar appears".
+            // The crisp SF Symbols cross-fade straight onto the formed goo capsule
+            // over iconIn = smooth(0.84, 1) with a gentle scale-up — no dot-melt.
             let raw = min(1, max(0, (navT - 0.84) / 0.16))
             let iconIn = raw * raw * (3 - 2 * raw)
             let scale = 0.85 + 0.15 * CGFloat(iconIn)
             navControls()
                 .frame(height: NotchMetrics.navIslandHeight)
                 .fixedSize(horizontal: true, vertical: false)
-                .onPreferenceChange(NavIconCentersKey.self) { navIconCenters = $0 }
-                .onPreferenceChange(NavRowWidthKey.self) { navRowWidth = $0 }
                 .opacity(iconIn)
                 .scaleEffect(scale, anchor: .center)
                 // Hit areas live only at rest — mid-morph the buttons aren't there.
@@ -729,40 +856,36 @@ struct NotchView: View {
                              measuring: Bool = false) -> some View {
         HStack(spacing: 10) {
             tabBar(selectedOverride: selectedOverride, measuring: measuring)
-            dotAnchor(Button { state.pinned.toggle() } label: {
+            Button { state.pinned.toggle() } label: {
                 Image(systemName: state.pinned ? "pin.fill" : "pin")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
                     .rotationEffect(.degrees(state.pinned ? 0 : 45))
-            })
+            }
             .buttonStyle(.plain)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
             .help(state.pinned ? "Unpin — collapse when the mouse leaves"
                                : "Pin the panel open")
-            dotAnchor(Button {
+            Button {
                 // Gear toggles the whole section: open at the root list, or close.
                 state.settingsRoute = state.settingsRoute == nil ? .root : nil
             } label: {
                 Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.showingSettings ? 0.9 : 0.4))
-            })
+            }
             .buttonStyle(.plain)
             .help("Settings")
-            dotAnchor(Button { state.onQuit?() } label: {
+            Button { state.onQuit?() } label: {
                 Image(systemName: "power")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.4))
-            })
+            }
             .buttonStyle(.plain)
             .help("Quit Notchbook")
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
-        .coordinateSpace(name: "navRow")
-        .background(GeometryReader { g in
-            Color.clear.preference(key: NavRowWidthKey.self, value: g.size.width)
-        })
     }
 
     /// The content panel island: frosted glass, ambient album glow, the tab.
@@ -877,8 +1000,8 @@ struct NotchView: View {
         let targeted = selectedOverride == nil && swipeTarget == tab
         let isDragging = selectedOverride == nil && draggingTab == tab
         return HStack(spacing: 4) {
-            dotAnchor(Image(systemName: tab.icon)
-                .font(.system(size: 11, weight: .medium)))
+            Image(systemName: tab.icon)
+                .font(.system(size: 11, weight: .medium))
             if selected {
                 Text(tab.title)
                     .font(.system(size: 11, weight: .semibold))
