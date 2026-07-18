@@ -181,6 +181,14 @@ private struct ServerRow: View {
         .onTapGesture { server.running ? servers.open(server) : servers.start(server.name) }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(server.path)
+        // Removes from the list only — never stops a running process (parity
+        // with the web UI; the row's ■ button is how you stop). Custom entries
+        // are deleted; discovered ones get hidden — both re-addable via ＋.
+        .contextMenu {
+            Button(role: .destructive) { servers.remove(server.name) } label: {
+                Label("Remove from list", systemImage: "trash")
+            }
+        }
     }
 
     private var actions: some View {

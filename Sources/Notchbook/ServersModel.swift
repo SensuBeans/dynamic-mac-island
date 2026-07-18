@@ -147,6 +147,7 @@ final class ServersModel: ObservableObject {
     func start(_ name: String)    { post("api/start", name: name) }
     func stop(_ name: String)     { post("api/stop", name: name) }
     func favorite(_ name: String) { post("api/favorite", name: name) }
+    func remove(_ name: String)   { post("api/remove", name: name) }
 
     func startFavorites() {
         for s in servers where s.favorite && !s.running { start(s.name) }
