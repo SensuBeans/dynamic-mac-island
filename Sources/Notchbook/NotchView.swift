@@ -39,6 +39,10 @@ struct NotchView: View {
     /// auto-loop) so the neck can be tuned frame-by-frame with `screencapture`.
     /// Off in normal use.
     private var liquidNavDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidNavDebug") }
+    /// `-LiquidNavPink 1`: fill the goo body opaque hot pink and disable the crisp
+    /// cross-fade so the raw metaball silhouette is fully visible for geometry
+    /// tuning (Phase 1). Off in normal use.
+    private var liquidNavPink: Bool { UserDefaults.standard.bool(forKey: "LiquidNavPink") }
     /// `-LiquidNavFreeze <e>`: pin the morph at a STATIC reveal value (0…1) with
     /// no animation, so each beat-sheet frame can be captured deterministically
     /// instead of chasing a slowed loop. Absent in normal use.
@@ -552,7 +556,8 @@ struct NotchView: View {
             // ever shows in flight; at rest the nav is the same VisualEffectBlur
             // glass as the panel, so materials + shadows match the pre-goo look.
             let s = min(1, max(0, (navT - 0.9) / 0.1))
-            let rest = s * s * (3 - 2 * s)          // 0 mid-flight → 1 settled
+            // Pink harness: no cross-fade, no dimming — show the raw silhouette.
+            let rest = liquidNavPink ? 0 : s * s * (3 - 2 * s)  // 0 mid-flight → 1 settled
             ZStack(alignment: .top) {
                 LiquidNav(t: navT,
                           panelWidth: expandedSize.width,
@@ -561,7 +566,8 @@ struct NotchView: View {
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
                           iconCount: 5,
-                          iconSpacing: navBlobW * 0.17)
+                          iconSpacing: navBlobW * 0.17,
+                          debugPink: liquidNavPink)
                     .frame(width: expandedSize.width,
                            height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)

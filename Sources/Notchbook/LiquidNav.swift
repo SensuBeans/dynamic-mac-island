@@ -28,6 +28,10 @@ struct LiquidNav: View {
     var panelTopRadius: CGFloat
     var iconCount: Int = 5
     var iconSpacing: CGFloat = 40 // dot spread between adjacent icons at full spread
+    /// `-LiquidNavPink 1`: fill the metaball body fully-opaque hot pink (no glow
+    /// tint, no fade) so the raw silhouette can be judged frame-by-frame. Phase-1
+    /// geometry harness only; off in normal use.
+    var debugPink: Bool = false
 
     // --- Tuning knobs (eyeball against the real notch) ---
     /// Body blur before thresholding. Bigger = fatter, lazier neck that bridges
@@ -56,30 +60,46 @@ struct LiquidNav: View {
             let cx = size.width / 2
 
             // --- Choreography timings (all in eased e) ---
-            let rise = smooth(0, 0.85, e)     // surface swells & rounds up
-            let lift = smooth(0.55, 1, e)     // body migrates off the surface
-            let panelTop = navSlot * CGFloat(e)   // real panel-top tracks 43·e
+            // The panel's top edge tracks 43·e and COVERS everything at/below it,
+            // so only liquid rising ABOVE this line is ever seen.
+            let panelTop = navSlot * CGFloat(e)
+            // Shape rounds up over the first ~72% of travel (flat swell → droplet).
+            let rise = smooth(0, 0.72, e)
+            // The body DETACHES from the surface over the middle-to-late travel:
+            // 0 = tucked into the panel (a merged swell), 1 = lifted clear at the
+            // capsule slot. This is what makes a neck appear and then pinch.
+            let detach = smooth(0.35, 0.92, e)
 
             // --- Droplet geometry ---
-            // Born 25% WIDER than the capsule and flat; narrows as it rounds up.
-            let bulgeW = navWidth * (1.25 - 0.25 * rise)
-            // 10pt swell → full capsule height.
-            let bulgeH = 10 + (navHeight - 10) * rise
-            // The droplet's TOP. On the surface it protrudes above the panel edge
-            // by bulgeH·rise (rise 0 = flush/flat, rise 1 = fully out); then it
-            // migrates up to the capsule slot (top = 0) over lift.
-            let surfaceTop = panelTop - bulgeH * rise
-            let bulgeTop = surfaceTop * (1 - lift)   // slotTop = 0
-            let centerY = bulgeTop + bulgeH / 2
+            // Born 28% WIDER than the capsule and flat; narrows as it rounds up.
+            let bulgeW = navWidth * (1.28 - 0.28 * rise)
+            // A 9pt swell grows to the full capsule height.
+            let bulgeH = 9 + (navHeight - 9) * rise
             let radius = bulgeH / 2                    // droplet is a pill/circle
+            // Droplet BOTTOM relative to the panel edge: tucked 12pt INTO the
+            // surface while merged (only a low cap shows), lifting to 9pt CLEAR of
+            // it (= navContentGap) once separated. The goo bridges the small
+            // in-between gap into a neck; beyond the blur's reach it pinches off.
+            let bottomRel = 12 - 21 * detach
+            let bulgeBottom = panelTop + bottomRel
+            let bulgeTop = bulgeBottom - bulgeH
+            let centerY = bulgeBottom - bulgeH / 2
 
             let dropRect = CGRect(x: cx - bulgeW / 2, y: bulgeTop,
                                   width: bulgeW, height: bulgeH)
-            // The parent drop's top edge. Lives behind the real panel; only its
-            // neck rising toward the droplet ever shows. Tall enough to read as a
-            // solid mass at every frame.
+            // The panel's top mass. Lives behind the real panel; gives the swell
+            // something to be part of at rest and the neck something to merge into.
             let panelRect = CGRect(x: cx - panelWidth / 2, y: panelTop,
                                    width: panelWidth, height: 60)
+
+            // Neck: a narrow liquid column tying the lifting droplet back into the
+            // surface. Grows in as the body clears the edge, thins to nothing at
+            // pinch — a LOCALIZED neck instead of a full-width web.
+            let neckIn = smooth(0.42, 0.7, e)
+            let pinch = smooth(0.72, 0.95, e)
+            let neckW = bulgeW * 0.5 * neckIn * (1 - pinch)
+            let neckRect = CGRect(x: cx - neckW / 2, y: centerY,
+                                  width: neckW, height: max(0, panelTop + 10 - centerY))
 
             // In flight the liquid catches light — dark glass on a dark desktop
             // reads as nothing, so the droplet + neck are lifted toward a lit
@@ -87,9 +107,11 @@ struct LiquidNav: View {
             // glass capsule cross-fades in (so there's no brightness pop at rest).
             let glow = (4 * e * (1 - e)) * (1 - Double(smooth(0.8, 1, e)))
             let g = CGFloat(glow)
-            let flightFill = Color(red: 0.12 + 0.16 * g,
-                                   green: 0.13 + 0.16 * g,
-                                   blue: 0.155 + 0.17 * g)
+            let flightFill = debugPink
+                ? Color(red: 1.0, green: 0.08, blue: 0.58)   // Phase-1 harness
+                : Color(red: 0.12 + 0.16 * g,
+                        green: 0.13 + 0.16 * g,
+                        blue: 0.155 + 0.17 * g)
 
             // --- Body metaball: droplet + neck + panel edge, one fused blob ---
             var bodyCtx = ctx
@@ -98,6 +120,10 @@ struct LiquidNav: View {
             bodyCtx.drawLayer { layer in
                 layer.fill(Path(roundedRect: panelRect, cornerRadius: panelTopRadius),
                            with: .color(.white))
+                if neckW > 0.5 && neckRect.height > 0 {
+                    layer.fill(Path(roundedRect: neckRect, cornerRadius: neckW / 2),
+                               with: .color(.white))
+                }
                 layer.fill(Path(roundedRect: dropRect, cornerRadius: radius),
                            with: .color(.white))
             }
@@ -127,7 +153,7 @@ struct LiquidNav: View {
                 }
             }
         }
-        .opacity(0.95)
+        .opacity(debugPink ? 1 : 0.95)
     }
 
     /// Smoothstep from e0→e1, clamped, returned as CGFloat.
