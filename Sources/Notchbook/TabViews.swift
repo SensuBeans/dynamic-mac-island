@@ -1346,12 +1346,10 @@ struct MirrorTab: View {
     @EnvironmentObject var state: NotchState
 
     var body: some View {
+        // No onAppear auto-start: the tab DEFAULTS to the Show Mirror
+        // placeholder at standard size — clicking the button is the only
+        // intent that starts the camera (and expands the panel).
         content
-            .onAppear {
-                // Once permission is granted, opening the tab IS the intent —
-                // no extra click needed each time.
-                mirror.resumeIfAuthorized()
-            }
     }
 
     @ViewBuilder
