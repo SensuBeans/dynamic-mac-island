@@ -19,8 +19,18 @@ import SwiftUI
 /// `t` is eased reveal progress (`navT`): 0 = flat panel surface (nav absorbed),
 /// 1 = a separate capsule. The panel-top blob sits BEHIND the real content
 /// panel, so only the neck rising off it ever shows.
-struct LiquidNav: View {
+struct LiquidNav: View, Animatable {
     var t: Double
+
+    /// Interpolate `t` through animation transactions. Without this, SwiftUI
+    /// hands the Canvas only the END value of a withAnimation change — the
+    /// morph never draws a single mid-flight frame live (freeze-flag renders
+    /// looked perfect while the real animation showed nothing).
+    var animatableData: Double {
+        get { t }
+        set { t = newValue }
+    }
+
     var panelWidth: CGFloat
     var navWidth: CGFloat         // target capsule width (hugs the controls)
     var navHeight: CGFloat        // 34
@@ -28,6 +38,10 @@ struct LiquidNav: View {
     var panelTopRadius: CGFloat
     var iconCount: Int = 5
     var iconSpacing: CGFloat = 40 // dot spread between adjacent icons at full spread
+    /// Measured per-icon center offsets from the capsule's center. When set,
+    /// dots spread from the cluster to EXACTLY these positions so every real
+    /// icon sharpens out of its own dot; overrides iconCount/iconSpacing.
+    var iconOffsets: [CGFloat] = []
     /// `-LiquidNavPink 1`: fill the metaball body fully-opaque hot pink (no glow
     /// tint, no fade) so the raw silhouette can be judged frame-by-frame. Phase-1
     /// geometry harness only; off in normal use.
@@ -60,9 +74,14 @@ struct LiquidNav: View {
             let cx = size.width / 2
 
             // --- Choreography timings (all in eased e) ---
+            // Headroom so the droplet can ride ABOVE its rest slot mid-flight
+            // without the canvas top edge guillotining it flat (bulgeTop goes a
+            // few pt negative around e≈0.5–0.85 — the reported top "cut off").
+            // The hosting frame is taller + offset up by the same amount.
+            let topPad: CGFloat = 18
             // The panel's top edge tracks 43·e and COVERS everything at/below it,
             // so only liquid rising ABOVE this line is ever seen.
-            let panelTop = navSlot * CGFloat(e)
+            let panelTop = topPad + navSlot * CGFloat(e)
             // Shape rounds up over the first ~72% of travel (flat swell → droplet).
             let rise = smooth(0, 0.72, e)
             // The body DETACHES from the surface over the middle-to-late travel:
@@ -71,8 +90,13 @@ struct LiquidNav: View {
             let detach = smooth(0.35, 0.92, e)
 
             // --- Droplet geometry ---
-            // Born 28% WIDER than the capsule and flat; narrows as it rounds up.
-            let bulgeW = navWidth * (1.28 - 0.28 * rise)
+            // Born wider than the capsule and flat; narrows as it rounds up.
+            // CLAMPED inside the canvas with blur headroom: an overwide pill is
+            // guillotined by the canvas edge into flat vertical cuts with square
+            // top corners (the reported "cut off") — the blur+threshold can only
+            // round corners that actually fit in the layer.
+            let bulgeW = min(navWidth * (1.28 - 0.28 * rise),
+                             size.width - 2 * Self.bodyBlur - 16)
             // A 9pt swell grows to the full capsule height.
             let bulgeH = 9 + (navHeight - 9) * rise
             let radius = bulgeH / 2                    // droplet is a pill/circle
@@ -208,7 +232,7 @@ struct LiquidNav: View {
             // has formed (appear) and dissolve as the real icons cross-fade in
             // (iconIn); the real icons themselves are drawn by NotchView.
             let appear = smooth(0.5, 0.68, e)
-            let iconIn = smooth(0.88, 1, e)
+            let iconIn = smooth(0.84, 1, e)   // matches NotchView's icon fade-in window
             let dotsOpacity = appear * (1 - iconIn)
             if dotsOpacity > 0.001 {
                 let spread = smooth(0.62, 0.9, e)  // clustered → spread apart
@@ -218,9 +242,14 @@ struct LiquidNav: View {
                 dotCtx.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))
                 dotCtx.addFilter(.blur(radius: Self.dotBlur))
                 dotCtx.drawLayer { layer in
-                    let mid = iconCount / 2
-                    for i in 0..<iconCount {
-                        let off = CGFloat(i - mid) * iconSpacing * spread
+                    // Cluster → each icon's REAL measured position (fallback:
+                    // symmetric uniform spread until the first layout lands).
+                    let mid = CGFloat(iconCount - 1) / 2
+                    let offsets = !iconOffsets.isEmpty
+                        ? iconOffsets
+                        : (0..<iconCount).map { (CGFloat($0) - mid) * iconSpacing }
+                    for off0 in offsets {
+                        let off = off0 * spread
                         let d = CGRect(x: cx + off - dotR, y: centerY - dotR,
                                        width: dotR * 2, height: dotR * 2)
                         layer.fill(Path(ellipseIn: d), with: .color(.white))

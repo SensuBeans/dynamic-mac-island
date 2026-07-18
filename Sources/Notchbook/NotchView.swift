@@ -60,6 +60,10 @@ struct NotchView: View {
     /// you switch pages and the power button is never clipped. Starts at a sane
     /// default until the first probe measurement lands (within one layout pass).
     @State private var navBarWidth: CGFloat = 300
+    /// Live glyph centers of the nav controls (in navRow space) + row width,
+    /// fed to LiquidNav so each icon-melt dot lands exactly on its real icon.
+    @State private var navIconCenters: [CGFloat] = []
+    @State private var navRowWidth: CGFloat = 0
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -545,13 +549,57 @@ struct NotchView: View {
 
     // MARK: - Expanded panel
 
+    /// Animatable relay: SwiftUI interpolates `t` through the transaction and
+    /// re-evaluates `content` at every intermediate value. Any layer that
+    /// BRANCHES on navT (the goo gate, the staged cross-fades) must render
+    /// through this — reading the raw @State inside withAnimation snaps
+    /// straight to the end value, so the branch logic never sees mid-flight
+    /// t's and the liquid never draws a live frame.
+    private struct NavTDriven<Content: View>: View, Animatable {
+        var t: Double
+        private let content: (Double) -> Content
+        init(t: Double, @ViewBuilder content: @escaping (Double) -> Content) {
+            self.t = t
+            self.content = content
+        }
+        var animatableData: Double {
+            get { t }
+            set { t = newValue }
+        }
+        var body: some View { content(t) }
+    }
+
+    /// Each nav control's glyph center-x within the control row ("navRow"
+    /// space). The icon-melt dots spread to EXACTLY these positions, so every
+    /// icon sharpens out of its own dot — without this the dots landed on an
+    /// even grid that matched nothing and the handoff read as two separate
+    /// animations.
+    private struct NavIconCentersKey: PreferenceKey {
+        static var defaultValue: [CGFloat] = []
+        static func reduce(value: inout [CGFloat], nextValue: () -> [CGFloat]) {
+            value.append(contentsOf: nextValue())
+        }
+    }
+    private struct NavRowWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+    /// Anchor a control's dot target: reports its center-x in navRow space.
+    private func dotAnchor<V: View>(_ view: V) -> some View {
+        view.background(GeometryReader { g in
+            Color.clear.preference(key: NavIconCentersKey.self,
+                                   value: [g.frame(in: .named("navRow")).midX])
+        })
+    }
+
     /// Surface-bulge droplet + liquid neck (metaball), behind the panel so the
     /// neck tucks in seamlessly. Only drawn while there's something to reveal.
     /// The blob hugs the measured control width.
-    @ViewBuilder
     private var liquidNavLayer: some View {
-        let navT = renderNavT
-        if navT > 0.02 {
+        NavTDriven(t: renderNavT) { navT in
+            if navT > 0.02 {
             // Clamp against the STANDARD panel width (a constant), not this
             // tab's panel, so the capsule width can't vary between a wide page
             // (terminal 620) and a standard one (460). navBarWidth is already the
@@ -571,11 +619,24 @@ struct NotchView: View {
                           navHeight: NotchMetrics.navIslandHeight,
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
-                          iconCount: 5,
-                          iconSpacing: navBlobW * 0.17,
+                          // One dot per real control: every visible page tab
+                          // plus the pin, settings, and power buttons — the
+                          // dots sharpen into exactly the icons that exist.
+                          iconCount: state.visibleTabs.count + 3,
+                          iconSpacing: (navBlobW - 70)
+                              / CGFloat(max(1, state.visibleTabs.count + 2)),
+                          // Measured glyph centers → each dot IS its icon's
+                          // position; empty until the first layout lands, then
+                          // the uniform fallback above never shows again.
+                          iconOffsets: navRowWidth > 0
+                              ? navIconCenters.map { $0 - navRowWidth / 2 }
+                              : [],
                           debugPink: liquidNavPink)
+                    // 18pt taller + shifted up to match LiquidNav's topPad —
+                    // gives the droplet overshoot room instead of a flat clip.
                     .frame(width: expandedSize.width,
-                           height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
+                           height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46 + 18)
+                    .offset(y: -18)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(1 - rest)
                 // Real crisp capsule, same footprint as the settled goo capsule.
@@ -591,6 +652,7 @@ struct NotchView: View {
                    height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46,
                    alignment: .top)
             .allowsHitTesting(false)
+            }
         }
     }
 
@@ -616,17 +678,23 @@ struct NotchView: View {
         // carries the icons until the very end, then the crisp controls cross-
         // fade in over iconIn = smooth(0.88, 1) with a slight scale-up, so the
         // dots sharpen INTO the real icons rather than popping over them.
-        let navT = renderNavT
-        let raw = min(1, max(0, (navT - 0.88) / 0.12))
-        let iconIn = raw * raw * (3 - 2 * raw)
-        let scale = 0.7 + 0.3 * CGFloat(iconIn)
-        return navControls()
-            .frame(height: NotchMetrics.navIslandHeight)
-            .fixedSize(horizontal: true, vertical: false)
-            .opacity(iconIn)
-            .scaleEffect(scale, anchor: .center)
-            // Hit areas live only at rest — mid-morph the buttons aren't there.
-            .allowsHitTesting(navT > 0.98)
+        NavTDriven(t: renderNavT) { navT in
+            // Wider handoff window (0.84→1, was 0.88) and a gentler scale ramp:
+            // the icons emerge WHILE the dots dissolve at the same positions —
+            // one continuous act, not "dots show, then nav bar appears".
+            let raw = min(1, max(0, (navT - 0.84) / 0.16))
+            let iconIn = raw * raw * (3 - 2 * raw)
+            let scale = 0.85 + 0.15 * CGFloat(iconIn)
+            navControls()
+                .frame(height: NotchMetrics.navIslandHeight)
+                .fixedSize(horizontal: true, vertical: false)
+                .onPreferenceChange(NavIconCentersKey.self) { navIconCenters = $0 }
+                .onPreferenceChange(NavRowWidthKey.self) { navRowWidth = $0 }
+                .opacity(iconIn)
+                .scaleEffect(scale, anchor: .center)
+                // Hit areas live only at rest — mid-morph the buttons aren't there.
+                .allowsHitTesting(navT > 0.98)
+        }
     }
 
     /// Off-screen probe that fixes the capsule width. It lays out the FULL
@@ -661,36 +729,40 @@ struct NotchView: View {
                              measuring: Bool = false) -> some View {
         HStack(spacing: 10) {
             tabBar(selectedOverride: selectedOverride, measuring: measuring)
-            Button { state.pinned.toggle() } label: {
+            dotAnchor(Button { state.pinned.toggle() } label: {
                 Image(systemName: state.pinned ? "pin.fill" : "pin")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.pinned ? 0.9 : 0.4))
                     .rotationEffect(.degrees(state.pinned ? 0 : 45))
-            }
+            })
             .buttonStyle(.plain)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
             .help(state.pinned ? "Unpin — collapse when the mouse leaves"
                                : "Pin the panel open")
-            Button {
+            dotAnchor(Button {
                 // Gear toggles the whole section: open at the root list, or close.
                 state.settingsRoute = state.settingsRoute == nil ? .root : nil
             } label: {
                 Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(state.showingSettings ? 0.9 : 0.4))
-            }
+            })
             .buttonStyle(.plain)
             .help("Settings")
-            Button { state.onQuit?() } label: {
+            dotAnchor(Button { state.onQuit?() } label: {
                 Image(systemName: "power")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.4))
-            }
+            })
             .buttonStyle(.plain)
             .help("Quit Notchbook")
         }
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)
+        .coordinateSpace(name: "navRow")
+        .background(GeometryReader { g in
+            Color.clear.preference(key: NavRowWidthKey.self, value: g.size.width)
+        })
     }
 
     /// The content panel island: frosted glass, ambient album glow, the tab.
@@ -805,8 +877,8 @@ struct NotchView: View {
         let targeted = selectedOverride == nil && swipeTarget == tab
         let isDragging = selectedOverride == nil && draggingTab == tab
         return HStack(spacing: 4) {
-            Image(systemName: tab.icon)
-                .font(.system(size: 11, weight: .medium))
+            dotAnchor(Image(systemName: tab.icon)
+                .font(.system(size: 11, weight: .medium)))
             if selected {
                 Text(tab.title)
                     .font(.system(size: 11, weight: .semibold))

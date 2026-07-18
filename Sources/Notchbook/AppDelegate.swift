@@ -761,7 +761,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             shown.toggle()
             self.state.navHovered = shown     // drives navShown → the navT morph
         }
-        toggle()                              // begin with a reveal
+        // First reveal is DELAYED past view mount: toggling navHovered before
+        // NotchView's onChange observers exist is silently missed, and the loop
+        // then looks dead for a full period (18 s) — the first cycle never ran.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { toggle() }
         // Period exceeds the slowed morph (0.85·8 ≈ 6.8 s show / 0.70·8 ≈ 5.6 s
         // hide) plus a settle hold, so each direction finishes before reversing.
         liquidNavDebugTimer = Timer.scheduledTimer(withTimeInterval: 9.0,
@@ -792,11 +795,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let navZoneHeight = self.metrics.notchHeight
                 + NotchMetrics.islandGap
                 + NotchMetrics.navIslandHeight + 28
-            let navZone = NSRect(x: visible.minX,
-                                 y: visible.maxY - navZoneHeight,
-                                 width: visible.width,
-                                 height: navZoneHeight)
-            let inNav = navZone.contains(mouse)
+            let stayZone = NSRect(x: visible.minX,
+                                  y: visible.maxY - navZoneHeight,
+                                  width: visible.width,
+                                  height: navZoneHeight)
+            // Hysteresis (user-tuned): REVEALING demands the cursor actually
+            // reach the island's top border strip — the old single zone fired
+            // a good 60pt early, while still over content. Once revealed, the
+            // generous zone keeps it out so using the nav buttons never
+            // retracts the bar mid-reach.
+            let enterH = self.metrics.notchHeight + NotchMetrics.islandGap + 10
+            let enterZone = NSRect(x: visible.minX,
+                                   y: visible.maxY - enterH,
+                                   width: visible.width,
+                                   height: enterH)
+            let inNav = self.state.navHovered
+                ? stayZone.contains(mouse)
+                : enterZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
             // While the user is actively typing in a terminal (the panel is
             // key and a terminal view holds focus), the cursor drifting off
