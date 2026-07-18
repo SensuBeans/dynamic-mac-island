@@ -8,3 +8,4 @@ Dynamic Island.app/
 
 # Internal planning docs — never publish
 opus-*.md
+.foglamp/

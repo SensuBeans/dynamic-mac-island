@@ -188,37 +188,44 @@ struct NotchView: View {
             // not derived from an animating bar width, so it cannot drift left
             // under the notch or be truncated by the silhouette.
             ZStack(alignment: .topLeading) {
-                ZStack {
-                    if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
-                    Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
-                }
-                .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
-                       height: metrics.notchHeight)
-                .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
-                                      bottomRadius: 10))
                 // The crisp backing owns the RESTING look. For the media ear the
                 // LiquidEar goo owns the flight and the backing only fades in over
                 // the last 10% (its full width is invisible until then, so there's
-                // no width-spring). Non-media cases (pomodoro countdown) are shown
-                // as before.
-                .opacity(showMediaEar ? smoothstep(0.9, 1, renderEarT) : 1)
+                // no width-spring). The opacity window is NONLINEAR, so it MUST
+                // render through an Animatable relay — a plain `.opacity(f(earT))`
+                // interpolates linearly and fades the bar in from the very start.
+                NavTDriven(t: renderEarT) { e in
+                    ZStack {
+                        if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                        Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                    }
+                    .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
+                           height: metrics.notchHeight)
+                    .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
+                                          bottomRadius: 10))
+                    .opacity(showMediaEar ? smoothstep(0.9, 1, e) : 1)
+                }
 
                 // E1 "Side Bulge": the notch's right flank swells into the ear.
-                // Present only in flight (goo gone at rest); the container's own
-                // opacity hides it on expand.
-                if !state.isExpanded, renderEarT > 0.02, renderEarT < 0.999 {
-                    LiquidEar(t: renderEarT,
-                              notchWidth: metrics.notchWidth,
-                              notchHeight: metrics.notchHeight,
-                              earWidth: metrics.mediaEarWidth,
-                              debugPink: liquidEarPink)
-                        .frame(width: metrics.notchWidth + metrics.mediaEarWidth
-                                       + LiquidEar.rightPad,
-                               height: metrics.notchHeight
-                                       + LiquidEar.vPadTop + LiquidEar.vPadBottom,
-                               alignment: .topLeading)
-                        .offset(y: -LiquidEar.vPadTop)
-                        .allowsHitTesting(false)
+                // The mount branch is a STRUCTURAL decision on progress, so it
+                // MUST live inside the relay — evaluated in NotchView's body it
+                // sees only earT's END value (1), which fails `< 0.999`, and the
+                // morph never mounts during a real animation (the dead-ear bug).
+                NavTDriven(t: renderEarT) { e in
+                    if !state.isExpanded, e > 0.02, e < 0.999 {
+                        LiquidEar(t: e,
+                                  notchWidth: metrics.notchWidth,
+                                  notchHeight: metrics.notchHeight,
+                                  earWidth: metrics.mediaEarWidth,
+                                  debugPink: liquidEarPink)
+                            .frame(width: metrics.notchWidth + metrics.mediaEarWidth
+                                           + LiquidEar.rightPad,
+                                   height: metrics.notchHeight
+                                           + LiquidEar.vPadTop + LiquidEar.vPadBottom,
+                                   alignment: .topLeading)
+                            .offset(y: -LiquidEar.vPadTop)
+                            .allowsHitTesting(false)
+                    }
                 }
 
                 HStack(spacing: 0) {
@@ -354,7 +361,29 @@ struct NotchView: View {
             } else {
                 morphHoldExpanded = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.05) {
-                    if !state.isExpanded { morphHoldExpanded = false }
+                    guard !state.isExpanded else { return }
+                    morphHoldExpanded = false
+                    NSLog("EarExhaleTrace: hold released, showMediaEar=%d nowPlaying=%d earHidden=%d",
+                          showMediaEar ? 1 : 0, media.nowPlaying != nil ? 1 : 0,
+                          media.earHidden ? 1 : 0)
+                    // The close's final beat: the mass is absorbed, the bare
+                    // notch rests a breath — then it EXHALES the media ear with
+                    // the full Side Bulge + content dots. Without this replay
+                    // the ear just pops back with the bar's fade (earT never
+                    // left 1 while the panel was open).
+                    if showMediaEar {
+                        // Reset must RENDER before the animated set — both writes
+                        // in one tick coalesce to 1→1 and SwiftUI animates nothing.
+                        earT = 0
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            guard !state.isExpanded else { return }
+                            NSLog("EarExhaleTrace: animating earT 0 -> 1")
+                            let earDur = 0.70 * (liquidIslandDebug ? 6 : 1)
+                            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: earDur)) {
+                                earT = 1
+                            }
+                        }
+                    }
                 }
             }
             // Animate the nav melt (was a hard snap) so it reads as the capsule-
@@ -480,7 +509,12 @@ struct NotchView: View {
                 .transition(.opacity)
             } else if let np = media.nowPlaying, !media.earHidden, !state.isExpanded {
                 // Right ear only: never cover the frontmost app's menu items.
-                HStack(spacing: 6) {
+                // Wrapped in the Animatable relay so the crisp content fade-in
+                // (nonlinear iconIn window) renders every mid-flight value —
+                // otherwise it ghosts in linearly over the whole reveal, on top
+                // of the goo, instead of sharpening in only at the end.
+                NavTDriven(t: renderEarT) { earE in
+                 HStack(spacing: 6) {
                     // The ear: art + waves normally; hovering morphs it into
                     // mini transport controls without opening the panel.
                     Group {
@@ -523,12 +557,13 @@ struct NotchView: View {
                         }
                     }
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
+                 }
+                 .frame(height: metrics.notchHeight)
+                 // The dots carry the content through flight; the real views
+                 // sharpen in only over the last 16% (the goo's `iconIn` window).
+                 // At rest this is 1, so the hover→transport morph works normally.
+                 .opacity(smoothstep(0.84, 1, earE))
                 }
-                .frame(height: metrics.notchHeight)
-                // The dots carry the content through flight; the real views sharpen
-                // in only over the last 16% (the goo's `iconIn` window). At rest
-                // this is 1, so the hover→transport morph works normally.
-                .opacity(smoothstep(0.84, 1, renderEarT))
                 .transition(.opacity)
             }
         }
