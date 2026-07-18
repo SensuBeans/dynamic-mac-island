@@ -374,6 +374,10 @@ struct NotchView: View {
                         .opacity(1 - smoothstep(0.10, 0.26, e))
                 }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
+                    // Parked: the capsule rides the phantom-notch strip above
+                    // the stationary panel (there's no hardware notch under a
+                    // dragged island, so that strip is free real estate).
+                    .offset(y: state.pinned ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
             }
             // Fixed width: the off-screen probe reports the widest reachable
             // control set (widest-titled tab selected) up front, and the capsule
@@ -439,7 +443,10 @@ struct NotchView: View {
                 // gets a quick pop-in instead of an 0.85s goo cycle.
                 let swipeDriven = abs(state.tabSwipeProgress) > 0.01
                 navShowWasSwipe = swipeDriven
-                let dur = swipeDriven ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
+                // Parked islands get the quick pop too — no bulge choreography
+                // (and no panel shift) away from the dock.
+                let dur = (swipeDriven || state.pinned)
+                    ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
                 withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                     navT = 1
                 }
@@ -452,7 +459,9 @@ struct NotchView: View {
                 // cancels it and the capsule stays put under the gesture.
                 let work = DispatchWorkItem {
                     withAnimation(.timingCurve(0.65, 0, 0.35, 1,
-                                               duration: 0.70 * (liquidNavDebug ? 8 : 1))) {
+                                               duration: state.pinned
+                                                   ? 0.15
+                                                   : 0.70 * (liquidNavDebug ? 8 : 1))) {
                         navT = 0
                     }
                 }
@@ -956,7 +965,10 @@ struct NotchView: View {
     /// The blob hugs the measured control width.
     private var liquidNavLayer: some View {
         NavTDriven(t: renderNavT) { navT in
-            if navT > 0.02 {
+            // Parked (pinned) mode uses the quick pop, not the surface bulge —
+            // the goo's geometry assumes the docked panel-shift choreography,
+            // which parked mode deliberately doesn't perform.
+            if navT > 0.02, !state.pinned {
             // Clamp against the STANDARD panel width (a constant), not this
             // tab's panel, so the capsule width can't vary between a wide page
             // (terminal 620) and a standard one (460). navBarWidth is already the
@@ -1064,8 +1076,12 @@ struct NotchView: View {
     }
 
     /// The content panel, shifted down as the nav emerges and up as it melts.
+    /// PARKED (pinned + dragged) the panel never shifts — the nav pops into
+    /// the phantom-notch strip above it instead (user: an out-of-position
+    /// island must not move when the bar comes and goes).
     private var expandedPanelLayer: some View {
-        let shift = (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
+        let shift = state.pinned ? 0
+            : (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
         return contentIsland(size: expandedSize)
             .frame(width: expandedSize.width, height: expandedSize.height)
             // Corner radius relaxes slightly in flight (34 hidden → 26 open) for
