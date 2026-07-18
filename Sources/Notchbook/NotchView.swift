@@ -337,7 +337,11 @@ struct NotchView: View {
             }
             // The pill morph measures + draws in this space (island top-left).
             .coordinateSpace(name: "agentIsland")
-            .onPreferenceChange(AgentPillFrameKey.self) { agentPillFrame = $0 }
+            // Keep the LAST good measurement — when the pill fully hides the
+            // GeometryReader unmounts and the preference reverts to .zero, which
+            // would wipe the rect and leave the NEXT open with no rest target
+            // until it re-measures (a late/again goo mount — the double-open).
+            .onPreferenceChange(AgentPillFrameKey.self) { if $0 != .zero { agentPillFrame = $0 } }
             // Own its constant collapsed anchor (left edge flush at the notch).
             // Nothing here animates horizontally on expand — the bar just fades
             // IN PLACE, killing the old diagonal drag.
@@ -374,10 +378,6 @@ struct NotchView: View {
                         .opacity(1 - smoothstep(0.10, 0.26, e))
                 }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
-                    // Parked: the capsule rides the phantom-notch strip above
-                    // the stationary panel (there's no hardware notch under a
-                    // dragged island, so that strip is free real estate).
-                    .offset(y: state.pinned ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
             }
             // Fixed width: the off-screen probe reports the widest reachable
             // control set (widest-titled tab selected) up front, and the capsule
@@ -443,10 +443,7 @@ struct NotchView: View {
                 // gets a quick pop-in instead of an 0.85s goo cycle.
                 let swipeDriven = abs(state.tabSwipeProgress) > 0.01
                 navShowWasSwipe = swipeDriven
-                // Parked islands get the quick pop too — no bulge choreography
-                // (and no panel shift) away from the dock.
-                let dur = (swipeDriven || state.pinned)
-                    ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
+                let dur = swipeDriven ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
                 withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                     navT = 1
                 }
@@ -459,9 +456,7 @@ struct NotchView: View {
                 // cancels it and the capsule stays put under the gesture.
                 let work = DispatchWorkItem {
                     withAnimation(.timingCurve(0.65, 0, 0.35, 1,
-                                               duration: state.pinned
-                                                   ? 0.15
-                                                   : 0.70 * (liquidNavDebug ? 8 : 1))) {
+                                               duration: 0.70 * (liquidNavDebug ? 8 : 1))) {
                         navT = 0
                     }
                 }
@@ -965,10 +960,7 @@ struct NotchView: View {
     /// The blob hugs the measured control width.
     private var liquidNavLayer: some View {
         NavTDriven(t: renderNavT) { navT in
-            // Parked (pinned) mode uses the quick pop, not the surface bulge —
-            // the goo's geometry assumes the docked panel-shift choreography,
-            // which parked mode deliberately doesn't perform.
-            if navT > 0.02, !state.pinned {
+            if navT > 0.02 {
             // Clamp against the STANDARD panel width (a constant), not this
             // tab's panel, so the capsule width can't vary between a wide page
             // (terminal 620) and a standard one (460). navBarWidth is already the
@@ -1076,9 +1068,10 @@ struct NotchView: View {
     }
 
     /// The content panel, shifted down as the nav emerges and up as it melts.
-    /// PARKED (pinned + dragged) the panel never shifts — the nav pops into
-    /// the phantom-notch strip above it instead (user: an out-of-position
-    /// island must not move when the bar comes and goes).
+    /// PINNED the panel never shifts (user: an out-of-position island must not
+    /// move when the bar comes and goes) — the capsule keeps its full bulge
+    /// choreography and simply rests OVER the panel's top edge, a transient
+    /// floating toolbar instead of a space-maker.
     private var expandedPanelLayer: some View {
         let shift = state.pinned ? 0
             : (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
