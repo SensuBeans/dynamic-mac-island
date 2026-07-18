@@ -256,9 +256,9 @@ private struct AgentRow: View {
     // Working-state pulse target (animates between 0.35 and 1).
     @State private var pulse: Double = 1
 
-    /// The session's terminal identity — a small mono tty tag (`⌗ ttys003`) or
-    /// `notch` for a session hosted in the island's own Terminal tab. Nothing for
-    /// a headless / unknown host (`.none`).
+    /// The session's terminal identity — only `notch` for a session hosted in the
+    /// island's own Terminal tab. The raw `ttys###` tags were dropped as noise;
+    /// external and headless hosts now show nothing here.
     @ViewBuilder
     private var terminalTag: some View {
         if let tag = terminalTagText {
@@ -297,7 +297,9 @@ private struct AgentRow: View {
     private var terminalTagText: (symbol: String, text: String)? {
         switch session.host {
         case .notch:                       return ("sparkle", "notch")
-        case .terminalApp, .other:         return session.tty.map { ("terminal", $0) }
+        // ttys### tags removed as visual noise — a Terminal.app/other host now
+        // carries no tag (Open still works off the resolved tty under the hood).
+        case .terminalApp, .other:         return nil
         case .none:                        return nil
         }
     }
@@ -394,12 +396,15 @@ private struct AgentRow: View {
                       ? "Auto-resume cancelled — click to undo"
                       : "Auto-resumes at \(Self.clock.string(from: fireAt)) — click to cancel")
                 .transition(.scale.combined(with: .opacity))
-            } else if hovered {
+            } else if hovered, agents.isCapped {
+                // Only surface the affordance when the account is actually at its
+                // ceiling (auto-resume can arm) — otherwise a normal hover shows
+                // no bolt at all.
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.35))
                     .frame(width: 20, height: 22)
-                    .help("Auto-resume — arms if this session is cut off by the usage limit")
+                    .help("Auto-resume — this session limit is hit; it will arm to continue when the window resets")
             }
         }
     }

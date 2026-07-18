@@ -173,6 +173,19 @@ final class AgentSessionsModel: ObservableObject {
     /// island's width + visibility, mirroring `mediaEarWidth`'s role.
     var hasActivePill: Bool { collapsedPill != nil }
 
+    /// True only while the account's 5-hour window is actually at its ceiling —
+    /// the sole condition under which auto-resume can arm. Single source for the
+    /// AgentsTab hover bolt so the affordance shows only when it means something
+    /// (a capped account about to cut a session off). Reads the published
+    /// `usage`, so any view observing the model re-renders when the cap flips;
+    /// the `resetsAt > now` half is re-evaluated by the tab's 1 s clock. Mirrors
+    /// `evaluateArming`'s own cap test (pct ≥ 99, reset still ahead).
+    var isCapped: Bool {
+        guard let u = usage, let pct = u.sessionPct, let reset = u.sessionResetsAt
+        else { return false }
+        return pct >= 99 && reset > Date()
+    }
+
     /// Fired on the MAIN queue on debounced per-session state changes.
     /// Arguments: (session carrying the NEW state, the OLD state).
     var onTransition: ((AgentSession, AgentState) -> Void)?
@@ -307,6 +320,7 @@ final class AgentSessionsModel: ObservableObject {
         let tty: String?
         let newestEntryTs: Date?
         let midTurn: Bool     // assistant last, stop_reason != end_turn (raw parser)
+        let lastMsgIsAssistant: Bool  // for the skip log's lastMsg=user|end_turn detail
         let status: String?   // process status from the session meta
     }
 
@@ -323,6 +337,26 @@ final class AgentSessionsModel: ObservableObject {
     /// actually clear server-side before we type `continue`.
     private let resumeGrace: TimeInterval = 5
 
+    /// Support dir for the two auto-resume sidecars (always the real Application
+    /// Support path — never the `NOTCHBOOK_USAGE_OVERRIDE` redirect, which only
+    /// moves the usage spool). `autoresume-state.json` survives a relaunch;
+    /// `autoresume.log` is the decision trail that makes "it didn't fire"
+    /// answerable after the fact.
+    private let autoResumeSupportDir = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Notchbook", isDirectory: true)
+    private var resumeStateURL: URL { autoResumeSupportDir.appendingPathComponent("autoresume-state.json") }
+    private var resumeLogURL: URL { autoResumeSupportDir.appendingPathComponent("autoresume.log") }
+    /// Last bytes written to the state file — dedups persist calls so an unchanged
+    /// arm set (every quiet tick calls the persister) never rewrites the file.
+    private var lastPersistedResumeData: Data?
+    /// Per-session last-logged decision KEY (not the full line) — the decision log
+    /// records only CHANGES, so a session skipped for the same reason every tick
+    /// logs once. Pruned to live sessions each tick.
+    private var lastResumeDecision: [String: String] = [:]
+    /// Whether the last logged global state was "settings-off" — so the on/off
+    /// transition logs once rather than every tick.
+    private var lastLoggedSettingsOff: Bool?
+
     private var stream: FSEventStreamRef?
     private var timer: DispatchSourceTimer?
 
@@ -338,7 +372,13 @@ final class AgentSessionsModel: ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
-        ioQueue.async { [weak self] in self?.scan() }   // immediate initial scan
+        // Restore persisted auto-resume arms BEFORE the first scan/rebuild so an
+        // arm that outlived an app relaunch is live again before any tick could
+        // treat its session as "never armed" (see restoreResumeState).
+        ioQueue.async { [weak self] in
+            self?.restoreResumeState()
+            self?.scan()
+        }
         startFSEvents()
         startTimer()
     }
@@ -567,7 +607,8 @@ final class AgentSessionsModel: ObservableObject {
             let midTurn = (p?.lastMsgIsAssistant ?? false) && (p?.lastMsgStopReason != "end_turn")
             resumeCandidates.append(ResumeCandidate(
                 id: id, pid: meta.pid, host: identity.host, tty: identity.tty,
-                newestEntryTs: lastActivity, midTurn: midTurn, status: meta.status))
+                newestEntryTs: lastActivity, midTurn: midTurn,
+                lastMsgIsAssistant: p?.lastMsgIsAssistant ?? false, status: meta.status))
         }
         // Forget state for sessions that closed.
         sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
@@ -632,17 +673,34 @@ final class AgentSessionsModel: ObservableObject {
     }
 
     /// Arm/disarm sessions for auto-resume from this tick's candidates + cap state.
-    /// Called inside `rebuild()` after `readUsage()`; spawns nothing.
+    /// Called inside `rebuild()` after `readUsage()`; spawns nothing. Also emits
+    /// the per-session decision trail (Fix 2) and persists the arm set (Fix 1).
     private func evaluateArming(_ candidates: [ResumeCandidate], now: Date) {
+        let liveIDs = Set(candidates.map(\.id))
+        // Forget decision history for sessions that closed (bounds the map).
+        lastResumeDecision = lastResumeDecision.filter { liveIDs.contains($0.key) }
+
         // Settings OFF ⇒ detector inert: drop live arms (do NOT consume epochs, so
         // toggling back ON re-arms), keep the timer honest, done.
         guard autoResumeEnabled() else {
-            if !armedResumes.isEmpty { armedResumes.removeAll(); rescheduleResumeTimer() }
+            if lastLoggedSettingsOff != true {
+                lastLoggedSettingsOff = true
+                logDecision("settings-off armed-dropped=\(armedResumes.count)")
+            }
+            if !armedResumes.isEmpty {
+                armedResumes.removeAll()
+                lastResumeDecision.removeAll()
+                rescheduleResumeTimer()
+            }
+            persistResumeStateIfChanged()
             return
+        }
+        if lastLoggedSettingsOff == true {
+            lastLoggedSettingsOff = false
+            logDecision("settings-on")
         }
 
         // Drop arms for sessions that vanished this tick.
-        let liveIDs = Set(candidates.map(\.id))
         for id in armedResumes.keys where !liveIDs.contains(id) {
             armedResumes.removeValue(forKey: id)
         }
@@ -651,25 +709,54 @@ final class AgentSessionsModel: ObservableObject {
         // A stale spool whose reset already passed must never arm (a past reset is
         // indistinguishable from old data — the file only refreshes while sessions
         // run). No cap ⇒ nothing new arms; existing arms keep their own resetAt.
-        if let usage = lastUsage, let resetAt = usage.sessionResetsAt,
-           (usage.sessionPct ?? 0) >= 99, resetAt > now {
-            for c in candidates {
-                // Already armed for THIS epoch — leave it. Armed for an older epoch
-                // (reset window changed) — fall through to re-arm on the new one.
-                if let existing = armedResumes[c.id], existing.resetAt == resetAt { continue }
-                if consumedEpochs.contains(epochKey(c.id, resetAt)) { continue }
-                guard let pid = c.pid, c.midTurn else { continue }
-                let mode: ResumeMode
-                switch c.host {
-                case .terminalApp, .notch: mode = .inject
-                case .other, .none:        mode = .notifyOnly
-                }
-                armedResumes[c.id] = ArmedResume(
-                    sessionId: c.id, pid: pid, resetAt: resetAt,
-                    armedEntryTs: c.newestEntryTs, tty: c.tty, host: c.host, mode: mode)
+        let cappedResetAt: Date? = {
+            guard let usage = lastUsage, let resetAt = usage.sessionResetsAt,
+                  (usage.sessionPct ?? 0) >= 99, resetAt > now else { return nil }
+            return resetAt
+        }()
+
+        for c in candidates {
+            guard let resetAt = cappedResetAt else {
+                // Not capped — nothing arms. Log the pct once per entry into this
+                // state (the pct lives in the LINE, not the dedup KEY, so normal
+                // pct drift doesn't re-log).
+                noteDecision(c.id, key: "not-capped",
+                             line: "skip not-capped(pct=\(lastUsage?.sessionPct ?? 0))")
+                continue
             }
+            // Already armed for THIS epoch — leave it. Armed for an older epoch
+            // (reset window changed) — fall through to re-arm on the new one.
+            if let existing = armedResumes[c.id], existing.resetAt == resetAt {
+                noteDecision(c.id, key: "armed",
+                             line: "armed resetAt=\(Self.logStamp.string(from: resetAt))")
+                continue
+            }
+            if consumedEpochs.contains(epochKey(c.id, resetAt)) {
+                noteDecision(c.id, key: "epoch-consumed", line: "skip epoch-consumed")
+                continue
+            }
+            guard let pid = c.pid else {
+                noteDecision(c.id, key: "no-pid", line: "skip no-pid"); continue
+            }
+            guard c.midTurn else {
+                let last = c.lastMsgIsAssistant ? "end_turn" : "user"
+                noteDecision(c.id, key: "not-midTurn", line: "skip not-midTurn(lastMsg=\(last))")
+                continue
+            }
+            let mode: ResumeMode
+            switch c.host {
+            case .terminalApp, .notch: mode = .inject
+            case .other, .none:        mode = .notifyOnly
+            }
+            armedResumes[c.id] = ArmedResume(
+                sessionId: c.id, pid: pid, resetAt: resetAt,
+                armedEntryTs: c.newestEntryTs, tty: c.tty, host: c.host, mode: mode)
+            noteDecision(c.id, key: "armed",
+                         line: "arm mode=\(mode == .inject ? "inject" : "notify") "
+                             + "resetAt=\(Self.logStamp.string(from: resetAt))")
         }
         rescheduleResumeTimer()
+        persistResumeStateIfChanged()
     }
 
     /// Cancel from the UI, called only after the chip's undo grace lapses (undo
@@ -681,7 +768,11 @@ final class AgentSessionsModel: ObservableObject {
             guard let self, let a = self.armedResumes[sessionId] else { return }
             self.armedResumes.removeValue(forKey: sessionId)
             self.consumedEpochs.insert(self.epochKey(sessionId, a.resetAt))
+            self.lastResumeDecision[sessionId] = nil
+            self.logDecision("cancel session=\(sessionId.prefix(8)) "
+                           + "resetAt=\(Self.logStamp.string(from: a.resetAt))")
             self.rescheduleResumeTimer()
+            self.persistResumeStateIfChanged()
             self.rebuild()   // reflect the dropped chip promptly
         }
     }
@@ -717,33 +808,51 @@ final class AgentSessionsModel: ObservableObject {
         for a in due {
             armedResumes.removeValue(forKey: a.sessionId)
             consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))   // never re-fire this epoch
+            lastResumeDecision[a.sessionId] = nil
             fireOne(a)
         }
         rescheduleResumeTimer()
+        if !due.isEmpty { persistResumeStateIfChanged() }
     }
 
     /// Re-check ALL guards at fire time; any failure ⇒ silent cancel (no toast, no
     /// injection). Guards pass ⇒ inject (or notify) + toast. Runs on `ioQueue`;
     /// injection hops to `controlQueue`/main like focus/approve.
     private func fireOne(_ a: ArmedResume) {
+        let sid = a.sessionId.prefix(8)
         // Guard 1: session file still present, same pid, alive.
         guard let meta = readSessionMetas()[a.sessionId], meta.pid == a.pid,
-              kill(Int32(a.pid), 0) == 0 else { return }
+              kill(Int32(a.pid), 0) == 0 else {
+            logDecision("fire-cancel guard-pid session=\(sid)"); return
+        }
         // Guard 3: not busy (a just-started manual resume would be busy).
-        guard meta.status != "busy" else { return }
+        guard meta.status != "busy" else {
+            logDecision("fire-cancel guard-busy session=\(sid)"); return
+        }
         // Guard 2: transcript untouched since arming AND still mid-turn (a manual
         // resume writes a user entry — advances newestEntryTs and clears mid-turn).
+        // Tolerance compare, not `==`: `armedEntryTs` round-tripped through the
+        // state file (Date→epoch→Date) can differ from the freshly re-parsed
+        // transcript Date by sub-microseconds; any REAL new entry moves the clock
+        // by seconds, so 0.5 s cleanly separates "untouched" from "moved".
         guard let p = parser(forID: a.sessionId),
-              p.newestEntryTs == a.armedEntryTs,
-              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else { return }
+              sameInstant(p.newestEntryTs, a.armedEntryTs),
+              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else {
+            logDecision("fire-cancel guard-transcript session=\(sid)"); return
+        }
         // Guard 4: terminal identity re-resolves to the same tty + host.
         let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
-        guard identity.tty == a.tty, identity.host == a.host else { return }
+        guard identity.tty == a.tty, identity.host == a.host else {
+            logDecision("fire-cancel guard-identity session=\(sid)"); return
+        }
 
         let project = meta.cwd.isEmpty
             ? (meta.name ?? String(a.sessionId.prefix(8)))
             : URL(fileURLWithPath: meta.cwd).lastPathComponent
         let name = meta.name
+
+        logDecision("fire mode=\(a.mode == .inject ? "inject" : "notify") "
+                  + "host=\(Self.hostLabel(a.host)) session=\(sid)")
 
         switch a.mode {
         case .notifyOnly:
@@ -772,6 +881,190 @@ final class AgentSessionsModel: ObservableObject {
             }
         }
     }
+
+    /// Two `Date?`s that mean the same instant. Used only for the fire-time
+    /// transcript guard — see `fireOne` for why exact `==` is wrong post-restore.
+    private func sameInstant(_ a: Date?, _ b: Date?) -> Bool {
+        switch (a, b) {
+        case (nil, nil):         return true
+        case let (x?, y?):       return abs(x.timeIntervalSince(y)) < 0.5
+        default:                 return false
+        }
+    }
+
+    // MARK: - Auto-resume: persistence + decision log (ioQueue only)
+
+    /// Restore the persisted arm set at launch, BEFORE the first `rebuild()`.
+    /// Drops arms whose fire moment already passed while we were down, or whose
+    /// pid is dead; keeps consumed epochs only for reset windows still in the
+    /// future (a past epoch can never recur). Re-arms the timer and re-writes the
+    /// pruned state so the file never hoards dead entries.
+    private func restoreResumeState() {
+        guard let data = try? Data(contentsOf: resumeStateURL),
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { logDecision("restore none"); return }
+        let now = Date()
+        var restored = 0, droppedStale = 0, droppedDead = 0
+        if let arms = root["armed"] as? [[String: Any]] {
+            for d in arms {
+                guard let a = armFromDict(d) else { continue }
+                if a.resetAt.addingTimeInterval(resumeGrace) < now { droppedStale += 1; continue }
+                if kill(Int32(a.pid), 0) != 0 { droppedDead += 1; continue }
+                armedResumes[a.sessionId] = a
+                restored += 1
+            }
+        }
+        var consumedKept = 0
+        if let consumed = root["consumed"] as? [String] {
+            for key in consumed {
+                // key = "sid|<epochSeconds>": keep only if that reset is still ahead.
+                if let epoch = key.split(separator: "|").last.flatMap({ Double($0) }),
+                   epoch > now.timeIntervalSince1970 {
+                    consumedEpochs.insert(key); consumedKept += 1
+                }
+            }
+        }
+        logDecision("restore armed=\(restored) droppedStale=\(droppedStale) "
+                  + "droppedDead=\(droppedDead) consumed=\(consumedKept)")
+        rescheduleResumeTimer()
+        persistResumeStateIfChanged()   // rewrite pruned set; seeds the dedup cache
+    }
+
+    /// Serialize + atomically write the arm set, but only when it actually
+    /// changed since the last write (the persister is called from every tick's
+    /// `evaluateArming`; most ticks are no-ops). Runs on `ioQueue`; the file is
+    /// tiny, so the write never meaningfully stalls the 1.5 s tick.
+    private func persistResumeStateIfChanged() {
+        guard let data = serializeResumeState() else { return }
+        if data == lastPersistedResumeData { return }
+        lastPersistedResumeData = data
+        do {
+            try FileManager.default.createDirectory(
+                at: autoResumeSupportDir, withIntermediateDirectories: true)
+            try data.write(to: resumeStateURL, options: .atomic)
+            logDecision("persist armed=\(armedResumes.count) consumed=\(consumedEpochs.count)")
+        } catch {
+            // Best-effort: a failed write just means this arm won't survive a
+            // relaunch — the in-memory arm still fires normally this run.
+        }
+    }
+
+    private func serializeResumeState() -> Data? {
+        // Sorted so an unchanged arm set serializes byte-identically → the persist
+        // dedup holds.
+        let arms = armedResumes.values
+            .sorted { $0.sessionId < $1.sessionId }
+            .map { armToDict($0) }
+        let consumed = consumedEpochs.sorted()
+        let root: [String: Any] = ["armed": arms, "consumed": consumed]
+        return try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+    }
+
+    private func armToDict(_ a: ArmedResume) -> [String: Any] {
+        var d: [String: Any] = [
+            "sessionId": a.sessionId,
+            "pid": a.pid,
+            "resetAt": a.resetAt.timeIntervalSince1970,
+            "host": hostToDict(a.host),
+            "mode": a.mode == .inject ? "inject" : "notifyOnly",
+        ]
+        if let ts = a.armedEntryTs { d["armedEntryTs"] = ts.timeIntervalSince1970 }
+        if let tty = a.tty { d["tty"] = tty }
+        return d
+    }
+
+    private func armFromDict(_ d: [String: Any]) -> ArmedResume? {
+        guard let sid = d["sessionId"] as? String,
+              let pid = (d["pid"] as? NSNumber)?.intValue,
+              let reset = (d["resetAt"] as? NSNumber)?.doubleValue,
+              let hostD = d["host"] as? [String: Any],
+              let host = hostFromDict(hostD),
+              let modeS = d["mode"] as? String else { return nil }
+        let mode: ResumeMode = (modeS == "inject") ? .inject : .notifyOnly
+        let entry = (d["armedEntryTs"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+        return ArmedResume(sessionId: sid, pid: pid,
+                           resetAt: Date(timeIntervalSince1970: reset),
+                           armedEntryTs: entry, tty: d["tty"] as? String,
+                           host: host, mode: mode)
+    }
+
+    /// `TerminalHost` ↔ JSON (kept local so persistence doesn't force Codable onto
+    /// the shared TerminalHost type in TerminalIdentity.swift).
+    private func hostToDict(_ h: TerminalHost) -> [String: Any] {
+        switch h {
+        case .terminalApp:    return ["kind": "terminalApp"]
+        case .notch(let sid): return ["kind": "notch", "sid": sid.uuidString]
+        case .other(let app): return ["kind": "other", "app": app]
+        case .none:           return ["kind": "none"]
+        }
+    }
+    private func hostFromDict(_ d: [String: Any]) -> TerminalHost? {
+        switch d["kind"] as? String {
+        case "terminalApp": return .terminalApp
+        case "notch":
+            guard let s = d["sid"] as? String, let u = UUID(uuidString: s) else { return nil }
+            return .notch(sessionID: u)
+        case "other":       return .other((d["app"] as? String) ?? "")
+        case "none":        return TerminalHost.none
+        default:            return nil
+        }
+    }
+
+    private static func hostLabel(_ h: TerminalHost) -> String {
+        switch h {
+        case .terminalApp: return "terminalApp"
+        case .notch:       return "notch"
+        case .other:       return "other"
+        case .none:        return "none"
+        }
+    }
+
+    /// Log a per-session decision only when it CHANGES (dedup on `key`, not the
+    /// full line — so pct/time detail in the line can vary without re-logging).
+    private func noteDecision(_ id: String, key: String, line: String) {
+        if lastResumeDecision[id] == key { return }
+        lastResumeDecision[id] = key
+        logDecision("\(line) session=\(id.prefix(8))")
+    }
+
+    /// Append one timestamped line to the decision log. Session content NEVER
+    /// reaches here — only ids (8-char prefix), reasons, modes and times. Caps the
+    /// file at ~200 KB (truncate-head) so it can't grow unbounded.
+    private func logDecision(_ line: String) {
+        let entry = "\(Self.logStamp.string(from: Date())) \(line)\n"
+        guard let data = entry.data(using: .utf8) else { return }
+        try? FileManager.default.createDirectory(
+            at: autoResumeSupportDir, withIntermediateDirectories: true)
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: resumeLogURL.path),
+           let size = (attrs[.size] as? NSNumber)?.uint64Value, size > 200_000 {
+            truncateLogHead()
+        }
+        if let fh = try? FileHandle(forWritingTo: resumeLogURL) {
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: data)
+        } else {
+            try? data.write(to: resumeLogURL, options: .atomic)   // create if missing
+        }
+    }
+
+    /// Keep the newest ~150 KB of the log, dropping whole oldest lines.
+    private func truncateLogHead() {
+        guard let data = try? Data(contentsOf: resumeLogURL), data.count > 150_000 else { return }
+        var slice = data.suffix(150_000)
+        if let nl = slice.firstIndex(of: 0x0A) {   // drop the partial leading line
+            slice = slice[slice.index(after: nl)...]
+        }
+        try? Data(slice).write(to: resumeLogURL, options: .atomic)
+    }
+
+    /// Timestamp for the decision log (also formats reset times in log lines).
+    private static let logStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 
     /// The freshest live parser for a sessionId (mirrors the rebuild index).
     private func parser(forID id: String) -> FileParser? {
