@@ -69,7 +69,11 @@ final class MirrorController: NSObject, ObservableObject {
     /// async permission/session work, stop() flips it off — so a stop can
     /// cancel a start that hasn't finished yet (the old isRunning guard let
     /// an in-flight start leave the camera on after the island closed).
-    private var wantsRunning = false
+    /// Published (main-thread writes only) because the island's panel SIZE
+    /// keys off it: the mirror tab rests at the standard panel until the user
+    /// clicks Show Mirror, then expands the moment intent flips — not on the
+    /// slower isRunning, so the growth starts with the click.
+    @Published private(set) var wantsRunning = false
     /// Serial queue so start/stop can never interleave — a stop racing a
     /// start on a concurrent queue left the session in a broken state.
     private let sessionQueue = DispatchQueue(label: "notchbook.mirror.session")

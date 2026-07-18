@@ -7,6 +7,9 @@ struct NotchView: View {
     @EnvironmentObject var tray: FilesTray
     @EnvironmentObject var calendarModel: CalendarModel
     @EnvironmentObject var mirror: MirrorController
+    /// Camera was live when the settings overlay opened — the only case where
+    /// closing settings may restart it (the placeholder default is opt-in).
+    @State private var mirrorPausedForSettings = false
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var stats: StatsModel
     @EnvironmentObject var pomodoro: PomodoroModel
@@ -137,11 +140,10 @@ struct NotchView: View {
     /// both `island` and the expanded-panel layer helpers can read it. Must stay
     /// in lockstep with AppDelegate.islandRect.
     private var expandedSize: CGSize {
-        // Settings pages use the roomy zoomed panel (620-wide), whatever tab
-        // they were opened from — one constant size for every route, already
-        // inside the fixed window (it's the mirror-zoom footprint).
+        // Settings pages match the Agents page footprint (470×300), whatever
+        // tab they were opened from — one constant size for every route.
         if state.showingSettings {
-            return metrics.expandedSize(zoomed: true)
+            return NotchMetrics.agentsIslandSize
         }
         if state.currentTab == .tray {
             return metrics.trayExpandedSize(itemCount: tray.items.count,
@@ -155,8 +157,11 @@ struct NotchView: View {
         } else if state.currentTab == .calendar {
             return metrics.calendarExpandedSize(monthMode: state.calendarMonthMode)
         }
-        let onMirror = state.currentTab == .mirror
-        return metrics.expandedSize(zoomed: onMirror, large: onMirror && state.mirrorBig)
+        // Mirror rests at the STANDARD (media-sized) panel showing the
+        // "Show Mirror" placeholder; only once the user opts in (wantsRunning)
+        // does it expand to the zoomed footprint — and shrinks back on stop.
+        let mirrorLive = state.currentTab == .mirror && mirror.wantsRunning
+        return metrics.expandedSize(zoomed: mirrorLive, large: mirrorLive && state.mirrorBig)
     }
 
     private var island: some View {
@@ -179,10 +184,12 @@ struct NotchView: View {
         // floating glass capsule beside the notch (like the agent pill), so it
         // no longer fills / widens the bar.
         let collapsedVisible = hasMedia
-        // The nav dock appears on hover over its top strip (flush under the
-        // notch) or mid tab-swipe; otherwise it retracts and the content panel
-        // slides up to fill its height.
-        let navShown = state.navHovered || abs(state.tabSwipeProgress) > 0.01
+        // The nav dock appears ONLY on hover over its top strip (flush under
+        // the notch); otherwise it retracts and the content panel slides up to
+        // fill its height. Tab-swipes deliberately do NOT reveal it (user:
+        // gesturing between pages needs no bar unless hovered) — the content
+        // nudge + step haptics are the swipe feedback.
+        let navShown = state.navHovered
         let gap = NotchMetrics.islandGap
         let totalExpandedHeight = metrics.notchHeight + gap
             + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + expandedSize.height
@@ -324,6 +331,9 @@ struct NotchView: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.showingSettings)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
+        // The placeholder→live mirror growth (standard → zoomed panel) rides
+        // the click, keyed on intent so it starts before the camera does.
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: mirror.wantsRunning)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
         // Drive `navT` on a plain easeInOutCubic timing curve — NO spring or
@@ -459,18 +469,25 @@ struct NotchView: View {
             stats.setPolling(expanded && state.currentTab == .stats)
             servers.setPolling(expanded && state.currentTab == .servers)
             spectrum.setActive(spectrumShouldBeActive)
-            // MirrorTab stays mounted while hidden (the panel is opacity-0,
-            // not removed), so its onAppear never re-fires — restart here.
-            if expanded && state.currentTab == .mirror {
-                mirror.resumeIfAuthorized()
-            }
+            // No mirror auto-restart on expand: the tab DEFAULTS to the
+            // "Show Mirror" placeholder at standard size — the camera runs
+            // only after the user's click (collapse stops it and clears the
+            // intent, so every fresh open is opt-in again).
         }
         .onChange(of: state.showingSettings) { showing in
             // The overlay replaces the tab's content — pause the camera under
-            // it and hand focus/polling back when it closes.
+            // it and hand focus/polling back when it closes. Resume ONLY a
+            // camera that was live before the overlay: the opt-in placeholder
+            // must never auto-start on settings close.
             editorFocused = state.isExpanded && !showing && state.currentTab == .notes
             if state.currentTab == .mirror {
-                showing ? mirror.stop() : mirror.resumeIfAuthorized()
+                if showing {
+                    mirrorPausedForSettings = mirror.wantsRunning
+                    mirror.stop()
+                } else if mirrorPausedForSettings {
+                    mirrorPausedForSettings = false
+                    mirror.resumeIfAuthorized()
+                }
             }
         }
         .onChange(of: state.currentTab) { tab in
