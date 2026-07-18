@@ -507,6 +507,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
+    /// True while a swipe that BEGAN over an open settings page is in flight:
+    /// the whole gesture then belongs to settings back-navigation (page → root
+    /// → closed), never to the tab ratchet underneath the overlay.
+    private var settingsSwipe = false
     /// Live volume swipe: the player volume captured (asynchronously) when
     /// the gesture began, offset by the fingers as they move.
     private var volumeBase: Double?
@@ -546,6 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeY = 0
             tabSwipeActive = false
             tabSteps = 0
+            settingsSwipe = state.isExpanded && state.showingSettings
             volumeBase = nil
             volumeSwipeEnded = false
             lastSentVolume = nil
@@ -564,6 +569,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
             if state.isExpanded {
+                // Settings owns the gesture: each span of horizontal travel
+                // (either direction) steps back one level — sub-page → root →
+                // closed — the swipe-out the user asked for.
+                if settingsSwipe {
+                    if !tabSwipeActive, abs(swipeX) > 8,
+                       abs(swipeX) > abs(swipeY) * 1.5 {
+                        tabSwipeActive = true
+                    }
+                    guard tabSwipeActive else { return }
+                    let steps = Int((abs(swipeX) / Self.tabSwipeSpan).rounded(.towardZero))
+                    if steps != tabSteps {
+                        for _ in 0..<max(0, steps - tabSteps) { settingsBack() }
+                        tabSteps = steps
+                    }
+                    return
+                }
                 if !tabSwipeActive, abs(swipeX) > 8,
                    abs(swipeX) > abs(swipeY) * 1.5 {
                     tabSwipeActive = true
@@ -589,6 +610,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     state.tabSwipeProgress = 0
                     tabSwipeActive = false
                     tabSteps = 0
+                    settingsSwipe = false
+                }
+                if settingsSwipe {
+                    // Lifting past half a span commits one more back-step.
+                    guard tabSwipeActive else { return }
+                    let residual = abs(swipeX) / Self.tabSwipeSpan - CGFloat(tabSteps)
+                    if residual > 0.5 { settingsBack() }
+                    return
                 }
                 guard tabSwipeActive else { return }
                 // Lifting past half a span commits one more step.
@@ -615,10 +644,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.tabSwipeProgress = 0
             tabSwipeActive = false
             tabSteps = 0
+            settingsSwipe = false
             volumeReadToken += 1
         default:
             break
         }
+    }
+
+    /// One settings back-step with a haptic tick: sub-page → root → closed.
+    /// No-ops once settings is already closed (a long swipe just exits).
+    private func settingsBack() {
+        guard let route = state.settingsRoute else { return }
+        state.settingsRoute = route == .root ? nil : .root
+        haptic()
     }
 
     /// Moves the current tab by `delta`, wrapping at the ends, with a

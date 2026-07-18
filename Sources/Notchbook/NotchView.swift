@@ -137,10 +137,11 @@ struct NotchView: View {
     /// both `island` and the expanded-panel layer helpers can read it. Must stay
     /// in lockstep with AppDelegate.islandRect.
     private var expandedSize: CGSize {
-        // Settings pages always use the standard panel size, whatever tab they
-        // were opened from (so settings on mirror/tray/terminal isn't oversized).
+        // Settings pages use the roomy zoomed panel (620-wide), whatever tab
+        // they were opened from — one constant size for every route, already
+        // inside the fixed window (it's the mirror-zoom footprint).
         if state.showingSettings {
-            return metrics.expandedSize()
+            return metrics.expandedSize(zoomed: true)
         }
         if state.currentTab == .tray {
             return metrics.trayExpandedSize(itemCount: tray.items.count,
@@ -318,6 +319,9 @@ struct NotchView: View {
                    : .spring(response: 0.28, dampingFraction: 0.90),
                    value: state.isExpanded)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.currentTab)
+        // Settings now swaps to the roomier zoomed panel — spring the resize
+        // (there was no size change here before, so no key existed).
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.showingSettings)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
