@@ -32,6 +32,11 @@ struct LiquidEar: View, Animatable {
     var notchWidth: CGFloat
     var notchHeight: CGFloat
     var earWidth: CGFloat          // resting ear extension (mediaEarWidth)
+    /// Measured glyph centers (album-thumb center, equalizer-cluster center) in
+    /// this Canvas's coordinate space. The dots slide to EXACTLY these so each
+    /// real view sharpens out of its own dot. `nil` → geometric fallback.
+    var artCenterX: CGFloat?
+    var eqCenterX: CGFloat?
     /// `-LiquidEarPink 1`: flood the raw fused silhouette flat hot pink so the
     /// geometry can be judged frame-by-frame. Off in normal use.
     var debugPink: Bool = false
@@ -44,6 +49,9 @@ struct LiquidEar: View, Animatable {
     // --- Tuning knobs (mirror LiquidNav's 8/19 metaball family) ---
     static let bodyBlur: CGFloat = 5
     static let bodyThreshold: Double = 0.42
+    static let dotBlur: CGFloat = 3
+    static let dotThreshold: Double = 0.42
+    static let dotFill = Color(white: 0.83)   // ≈ #cfd6df; becomes the light views
 
     var body: some View {
         Canvas { ctx, size in
@@ -86,9 +94,42 @@ struct LiquidEar: View, Animatable {
             bodyCtx.addFilter(.alphaThreshold(min: Self.bodyThreshold, color: bodyColor))
             bodyCtx.addFilter(.blur(radius: Self.bodyBlur))
             bodyCtx.drawLayer(content: bodyShapes)
-            // No content dot-melt in the ear (per review): the black body swells
-            // into the ear pill and the real album/EQ views simply cross-fade in
-            // at rest (NotchView's ear-content `iconIn` window).
+
+            if debugPink { return }
+
+            // --- Content dot-melt: two light dots born at the seam → slide to the
+            // art thumb + equalizer positions → dissolve as the real views fade in.
+            // Sizes scale off the notch height (mock is tuned at nH = 22).
+            let s = notchHeight / 22
+            let seamX = notchRight + 2 * s
+            let appearA = 0.45, appearB = 0.55
+            let da = smooth(appearA, appearA + 0.14, e)
+            let db = smooth(appearB, appearB + 0.14, e)
+            let spread = smooth(appearA + 0.08, 0.9, e)   // clustered → apart
+            let iconIn = smooth(0.84, 1, e)               // real views take over
+            let dotsOpacity = Double(max(da, db)) * (1 - Double(iconIn))
+            if dotsOpacity > 0.001 {
+                // Fallbacks track the real ear layout (art thumb then EQ cluster).
+                let artSide = notchHeight - 10
+                let artX = artCenterX ?? (notchRight + 6 + artSide / 2)
+                let eqX = eqCenterX ?? (notchRight + 6 + artSide + 6 + 15)
+                let ax = lerp(seamX, artX, spread)
+                let bx = lerp(seamX, eqX, spread)
+                let ar = 6.5 * s * da * (1 - 0.2 * spread)
+                let br = 5.5 * s * db * (1 - 0.2 * spread)
+                var dotCtx = ctx
+                dotCtx.opacity = dotsOpacity
+                dotCtx.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))
+                dotCtx.addFilter(.blur(radius: Self.dotBlur))
+                dotCtx.drawLayer { layer in
+                    layer.fill(Path(ellipseIn: CGRect(x: ax - ar, y: cy - ar,
+                                                      width: ar * 2, height: ar * 2)),
+                               with: .color(.white))
+                    layer.fill(Path(ellipseIn: CGRect(x: bx - br, y: cy - br,
+                                                      width: br * 2, height: br * 2)),
+                               with: .color(.white))
+                }
+            }
         }
     }
 
@@ -100,5 +141,15 @@ struct LiquidEar: View, Animatable {
         guard d != 0 else { return x < e0 ? 0 : 1 }
         let tt = min(1, max(0, (x - e0) / d))
         return CGFloat(tt * tt * (3 - 2 * tt))
+    }
+}
+
+/// Measured ear-content centers (album-thumb midX, equalizer-cluster midX) in the
+/// collapsed island's "earIsland" coordinate space — the dot-melt targets, the
+/// ear's analogue of `NavIconCentersKey`.
+struct EarContentCentersKey: PreferenceKey {
+    static var defaultValue: [CGFloat] = []
+    static func reduce(value: inout [CGFloat], nextValue: () -> [CGFloat]) {
+        value.append(contentsOf: nextValue())
     }
 }

@@ -56,8 +56,15 @@ struct LiquidClose: View, Animatable {
 
             // --- C4 body geometry (mock: closeStudies[C4].render) ---
             let topY = lerp(panelTopRest, notchHeight - 5, smooth(0.24, 0.72, e))
-            let botY = lerp(panelBotRest, notchHeight + 9, smooth(0.4, 0.94, e))
-            let w = lerp(panelWidth, notchWidth + 26, smooth(0.42, 0.92, e))
+            // The bottom edge ends fully INSIDE the notch (−2, not +9): the mass
+            // must geometrically disappear into the silhouette by e≈0.96 so the
+            // final opacity swap has nothing visible left to fade — a bottom that
+            // floors below the notch leaves a black lip that can only ghost out
+            // (the user-flagged ".95 frame").
+            let botY = lerp(panelBotRest, notchHeight - 2, smooth(0.4, 0.96, e))
+            // Width likewise tucks INSIDE the notch by the end — wider-than-notch
+            // leaves nubs sticking out under its corners after absorption.
+            let w = lerp(panelWidth, notchWidth - 6, smooth(0.42, 0.96, e))
             let h = max(5, botY - topY)
             let panelRect = CGRect(x: cx - w / 2, y: topY, width: w, height: h)
             let panelCorner = min(22, h / 2)
@@ -69,8 +76,17 @@ struct LiquidClose: View, Animatable {
                 // underside; it never deforms — the liquid meets it.
                 layer.fill(NotchShape(topRadius: NotchMetrics.topFlare, bottomRadius: 10)
                             .path(in: notchFrame), with: .color(.white))
-                layer.fill(Path(roundedRect: panelRect, cornerRadius: panelCorner),
-                           with: .color(.white))
+                // Once the mass is fully absorbed (a sliver hidden inside the
+                // notch), its blur still bleeds around the notch and DILATES the
+                // fused silhouette — a fat halo-notch that can only fade out
+                // (the "slowly fading instead of morphing" ending). Drop the blob
+                // from the body at that point: the silhouette becomes the notch
+                // alone, pixel-matching the real one, so the final swap is
+                // invisible and the ending reads as pure absorption.
+                if h > 6 || w > notchWidth {
+                    layer.fill(Path(roundedRect: panelRect, cornerRadius: panelCorner),
+                               with: .color(.white))
+                }
             }
 
             if debugPink {
@@ -98,7 +114,7 @@ struct LiquidClose: View, Animatable {
             // notch (mock's panel-tone → black), so by contact the liquid and the
             // notch are one material and the merge reads as a single body, never a
             // separately-tinted slab fading in.
-            let darken = Double(smooth(0.55, 0.95, e))  // panel-tone → black
+            let darken = Double(smooth(0.5, 0.9, e))    // panel-tone → black, done BEFORE the tuck
             let k = 1 - darken
             let bottomTone = Color(red: 0.11 * k, green: 0.12 * k, blue: 0.15 * k)
             let tone = Gradient(stops: [
@@ -110,40 +126,9 @@ struct LiquidClose: View, Animatable {
                           startPoint: CGPoint(x: cx, y: notchHeight),
                           endPoint: CGPoint(x: cx, y: panelBotRest)))
 
-            // --- rows melt → dots → converge up into the notch (mock: rowsMelt) ---
-            let gone = smooth(0.8, 0.93, e)
-            let targetX = cx, targetY = notchHeight + 2
-            let meltAt = 0.1
-            // Four faux rows tracking the panel's content band (mock dy 26/46/66/96).
-            let rowDY: [CGFloat] = [26, 46, 66, 96]
-            let sx = cx - panelWidth / 2 + 30
-            var anyMelt = 0.0
-            var dots: [(CGFloat, CGFloat, CGFloat)] = []
-            for (i, dy) in rowDY.enumerated() {
-                let stag = Double(i) * 0.045
-                let melt = smooth(meltAt + stag, meltAt + stag + 0.14, e)
-                let ride = smooth(meltAt + stag + 0.08, 0.8, e)
-                anyMelt = max(anyMelt, Double(melt))
-                let sy = panelTopRest + dy
-                let dx = lerp(sx, targetX, ride)
-                let dyy = lerp(sy, targetY, ride * ride)   // pulled upward, accelerating
-                let r = 5.5 * melt * (1 - 0.55 * ride)
-                if r > 0.3 { dots.append((dx, dyy, r)) }
-            }
-            let dotOpacity = anyMelt * Double(1 - gone)
-            if dotOpacity > 0.001, !dots.isEmpty {
-                var d = ctx
-                d.opacity = dotOpacity
-                d.addFilter(.alphaThreshold(min: Self.dotThreshold, color: Self.dotFill))
-                d.addFilter(.blur(radius: Self.dotBlur))
-                d.drawLayer { layer in
-                    for (dx, dy, r) in dots {
-                        layer.fill(Path(ellipseIn: CGRect(x: dx - r, y: dy - r,
-                                                          width: r * 2, height: r * 2)),
-                                   with: .color(.white))
-                    }
-                }
-            }
+            // No content-row dot-melt on the expanded island (per review): the
+            // panel content cross-fades out and the liquid body carries the whole
+            // collapse into the notch — no dots ride up.
         }
     }
 
