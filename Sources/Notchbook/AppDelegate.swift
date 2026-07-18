@@ -153,9 +153,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.panel.isMovable = pinned
                 if !pinned, let m = self.metrics {
                     self.panel.setFrame(m.windowFrame, display: true)
+                    self.state.parked = false
                 }
             }
             .store(in: &cancellables)
+        // Parked = pinned + genuinely away from home. Window moves flip it;
+        // the unpin snap-home above clears it. 2pt tolerance so AppKit frame
+        // rounding can't strand a docked island in parked layout.
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            guard let self, let m = self.metrics else { return }
+            let d = hypot(self.panel.frame.origin.x - m.windowFrame.origin.x,
+                          self.panel.frame.origin.y - m.windowFrame.origin.y)
+            let parked = self.state.pinned && d > 2
+            if self.state.parked != parked { self.state.parked = parked }
+        })
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
         // With hover-to-expand off, a click in the notch opens the panel.
         host.onZoneClick = { [weak self] in

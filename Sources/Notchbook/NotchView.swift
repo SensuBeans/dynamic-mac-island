@@ -377,7 +377,7 @@ struct NotchView: View {
                     // 4–9pt float gap (notch-dependent), matching the docked
                     // read; the droplet overshoot may kiss the window's top
                     // edge mid-flight, which beats a merged rest state.
-                    .offset(y: state.pinned ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
+                    .offset(y: state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
                 // Real glass panel: cross-fades OUT early on close (the liquid
                 // stand-in takes over) and IN over the last stretch on open. The
                 // nonlinear window must live in an Animatable relay so it renders
@@ -387,7 +387,7 @@ struct NotchView: View {
                         .opacity(1 - smoothstep(0.10, 0.26, e))
                 }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
-                    .offset(y: state.pinned ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
+                    .offset(y: state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
             }
             // Fixed width: the off-screen probe reports the widest reachable
             // control set (widest-titled tab selected) up front, and the capsule
@@ -430,6 +430,9 @@ struct NotchView: View {
         // Settings now swaps to the roomier zoomed panel — spring the resize
         // (there was no size change here before, so no key existed).
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.showingSettings)
+        // Docked↔parked layout swap (nav strip placement, panel shift) springs
+        // instead of snapping when the drag crosses the home threshold.
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: state.parked)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: tray.items.count)
         .animation(.spring(response: 0.32, dampingFraction: 0.85), value: state.mirrorBig)
         // The placeholder→live mirror growth (standard → zoomed panel) rides
@@ -1094,7 +1097,7 @@ struct NotchView: View {
     /// choreography and simply rests OVER the panel's top edge, a transient
     /// floating toolbar instead of a space-maker.
     private var expandedPanelLayer: some View {
-        let shift = state.pinned ? 0
+        let shift = state.parked ? 0
             : (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
         return contentIsland(size: expandedSize)
             .frame(width: expandedSize.width, height: expandedSize.height)

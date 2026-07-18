@@ -64,6 +64,12 @@ final class NotchState: ObservableObject {
     /// Pinned: the panel ignores mouse-leave and stays expanded until the
     /// user unpins it (or presses Esc).
     @Published var pinned = false
+    /// Parked: pinned AND actually dragged away from the notch-home frame
+    /// (AppDelegate sets it from window moves). Pinned-at-home keeps the full
+    /// docked layout — the parked nav placement/no-shift rules apply only
+    /// once the island really left the notch, otherwise pinning visibly
+    /// shoved the capsule up into the hardware notch (user-flagged).
+    @Published var parked = false
     /// Cursor is over the nav dock's strip below the panel (drives its
     /// show/hide — the dock stays hidden until summoned).
     @Published var navHovered = false
