@@ -369,6 +369,13 @@ struct NotchView: View {
 
             ZStack(alignment: .top) {
                 liquidNavLayer                       // goo capsule + neck (behind)
+                    // Parked (pinned): the whole liquid nav — goo AND controls,
+                    // same offset — rides up into the strip above the panel
+                    // (free space: a parked island has no hardware notch).
+                    // Docked it overlapped the panel top glass-on-glass, which
+                    // read as loose icons scattered over the media header.
+                    // islandGap is kept as droplet-overshoot headroom above.
+                    .offset(y: state.pinned ? -metrics.notchHeight : 0)
                 // Real glass panel: cross-fades OUT early on close (the liquid
                 // stand-in takes over) and IN over the last stretch on open. The
                 // nonlinear window must live in an Animatable relay so it renders
@@ -378,6 +385,7 @@ struct NotchView: View {
                         .opacity(1 - smoothstep(0.10, 0.26, e))
                 }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
+                    .offset(y: state.pinned ? -metrics.notchHeight : 0)
             }
             // Fixed width: the off-screen probe reports the widest reachable
             // control set (widest-titled tab selected) up front, and the capsule
