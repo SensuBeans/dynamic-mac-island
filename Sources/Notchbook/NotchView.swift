@@ -73,6 +73,13 @@ struct NotchView: View {
     /// Bulge" morph (E1). Its rest window hands off to the crisp backing + real
     /// ear content, so the goo is gone once settled.
     @State private var earT: Double = 0
+    /// Debounced ear-reveal trigger. On music start the media state arrives in
+    /// separate ticks (nowPlaying nil→"Unknown"→track, artwork decodes later,
+    /// isPlaying flips late, a now-playing toast fires, the island width springs).
+    /// Kicking off `earT` on the FIRST tick animated the goo while all of that
+    /// churned underneath it — the reported open stutter. This work item defers
+    /// the reveal until the state settles, so the ear opens ONCE, cleanly.
+    @State private var earRevealWork: DispatchWorkItem?
     /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
     /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
     private var earTFreeze: Double? {
@@ -482,11 +489,28 @@ struct NotchView: View {
         }
         // Drive `earT` (E1 Side Bulge) on easeInOutCubic: 0.70 s show / 0.55 s
         // hide, per the motion contract. `-LiquidIslandDebug` stretches both 6×.
+        // The SHOW leg is debounced so it fires once from a settled media state
+        // (see `earRevealWork`) — that is the "reset the open" fix for the stutter.
         .onChange(of: showMediaEar) { show in
-            let base = show ? 0.70 : 0.55
-            let dur = base * (liquidIslandDebug ? 6 : 1)
-            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
-                earT = show ? 1 : 0
+            earRevealWork?.cancel()
+            let dur = (show ? 0.70 : 0.55) * (liquidIslandDebug ? 6 : 1)
+            let animateEar: (Double) -> Void = { target in
+                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) { earT = target }
+            }
+            if show {
+                // Let the media state land first (metadata, artwork, isPlaying, the
+                // now-playing toast, the width spring), THEN open in one clean pass.
+                // No wait under the debug harness — it forces a synthetic ear with
+                // no real player, so there is nothing to settle.
+                let settle = liquidIslandDebug ? 0 : 0.32
+                let work = DispatchWorkItem {
+                    guard showMediaEar else { return }   // still wanted after settling
+                    animateEar(1)
+                }
+                earRevealWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + settle, execute: work)
+            } else {
+                animateEar(0)
             }
         }
         // Drive `agentT` (LiquidAgent bud-and-pinch) on the same easeInOutCubic:
