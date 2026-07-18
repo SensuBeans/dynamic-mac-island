@@ -39,6 +39,16 @@ struct NotchView: View {
     /// auto-loop) so the neck can be tuned frame-by-frame with `screencapture`.
     /// Off in normal use.
     private var liquidNavDebug: Bool { UserDefaults.standard.bool(forKey: "LiquidNavDebug") }
+    /// `-LiquidNavFreeze <e>`: pin the morph at a STATIC reveal value (0…1) with
+    /// no animation, so each beat-sheet frame can be captured deterministically
+    /// instead of chasing a slowed loop. Absent in normal use.
+    private var navTFreeze: Double? {
+        UserDefaults.standard.object(forKey: "LiquidNavFreeze") == nil
+            ? nil : UserDefaults.standard.double(forKey: "LiquidNavFreeze")
+    }
+    /// The reveal value the visual layers actually render — the frozen value when
+    /// tuning, otherwise the live animated `navT`.
+    private var renderNavT: Double { navTFreeze ?? navT }
     /// Measured intrinsic width of the nav controls, so the liquid capsule hugs
     /// them (default until the first measurement lands).
     @State private var navBarWidth: CGFloat = 220
@@ -194,11 +204,12 @@ struct NotchView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.82), value: hasMedia)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: hasToast)
         // Drive `navT` on a plain easeInOutCubic timing curve — NO spring or
-        // overshoot (that's variant 03): 0.95 s to reveal the capsule, 0.80 s to
-        // melt it back. `-LiquidNavDebug` stretches both 8× for screenshot tuning.
-        // Collapsing snaps to 0 with no animation so the next expand starts clean.
+        // overshoot (that's variant 03): 0.85 s to swell the surface into the
+        // capsule, 0.70 s to sink it back. `-LiquidNavDebug` stretches both 8×
+        // for screenshot tuning. Collapsing snaps to 0 with no animation so the
+        // next expand starts from a flat surface.
         .onChange(of: navShown) { show in
-            let base = show ? 0.95 : 0.80
+            let base = show ? 0.85 : 0.70
             let dur = base * (liquidNavDebug ? 8 : 1)
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 navT = show ? 1 : 0
@@ -520,18 +531,19 @@ struct NotchView: View {
 
     // MARK: - Expanded panel
 
-    /// Goo capsule + liquid neck (glass masked to the metaball), behind the
-    /// panel so the neck tucks in seamlessly. Only drawn while there's something
-    /// to reveal. The blob hugs the measured control width.
+    /// Surface-bulge droplet + liquid neck (metaball), behind the panel so the
+    /// neck tucks in seamlessly. Only drawn while there's something to reveal.
+    /// The blob hugs the measured control width.
     @ViewBuilder
     private var liquidNavLayer: some View {
+        let navT = renderNavT
         if navT > 0.02 {
             let navBlobW = min(expandedSize.width - 16, navBarWidth + 22)
             // Cross-fade the flat goo out and the real glass capsule in over the
-            // last of the settle: the metaball's flat fill only ever shows in
-            // flight; at rest the nav is the same VisualEffectBlur glass as the
-            // panel, so materials + shadows match the pre-goo look.
-            let s = min(1, max(0, (navT - 0.86) / 0.14))
+            // last of the settle (e ∈ [0.9,1]): the metaball's flat fill only
+            // ever shows in flight; at rest the nav is the same VisualEffectBlur
+            // glass as the panel, so materials + shadows match the pre-goo look.
+            let s = min(1, max(0, (navT - 0.9) / 0.1))
             let rest = s * s * (3 - 2 * s)          // 0 mid-flight → 1 settled
             ZStack(alignment: .top) {
                 LiquidNav(t: navT,
@@ -539,7 +551,9 @@ struct NotchView: View {
                           navWidth: navBlobW,
                           navHeight: NotchMetrics.navIslandHeight,
                           navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
-                          panelTopRadius: state.isExpanded ? 26 : 34)
+                          panelTopRadius: state.isExpanded ? 26 : 34,
+                          iconCount: 5,
+                          iconSpacing: navBlobW * 0.17)
                     .frame(width: expandedSize.width,
                            height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
@@ -562,7 +576,7 @@ struct NotchView: View {
 
     /// The content panel, shifted down as the nav emerges and up as it melts.
     private var expandedPanelLayer: some View {
-        let shift = (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(navT)
+        let shift = (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
         return contentIsland(size: expandedSize)
             .frame(width: expandedSize.width, height: expandedSize.height)
             // Corner radius relaxes slightly in flight (34 hidden → 26 open) for
@@ -576,21 +590,24 @@ struct NotchView: View {
     /// Nav controls riding the liquid capsule, fading + settling in as the
     /// droplet forms. Intrinsic width, measured into `NavWidthKey` for the blob.
     private var navControlsLayer: some View {
-        // Resolve the controls only once the capsule is basically formed, and
-        // quickly — a short smoothstep over the tail of the reveal, so the text
-        // snaps in with the droplet instead of the old slow cross-fade.
-        let raw = min(1, max(0, (navT - 0.66) / 0.24))
-        let op = raw * raw * (3 - 2 * raw)
-        let scale = 0.94 + 0.06 * CGFloat(min(1, max(0, navT)))
+        // The real SF Symbols are the last thing to resolve: the dot metaball
+        // carries the icons until the very end, then the crisp controls cross-
+        // fade in over iconIn = smooth(0.88, 1) with a slight scale-up, so the
+        // dots sharpen INTO the real icons rather than popping over them.
+        let navT = renderNavT
+        let raw = min(1, max(0, (navT - 0.88) / 0.12))
+        let iconIn = raw * raw * (3 - 2 * raw)
+        let scale = 0.7 + 0.3 * CGFloat(iconIn)
         return navControls
             .frame(height: NotchMetrics.navIslandHeight)
             .fixedSize(horizontal: true, vertical: false)
             .background(GeometryReader { g in
                 Color.clear.preference(key: NavWidthKey.self, value: g.size.width)
             })
-            .opacity(op)
+            .opacity(iconIn)
             .scaleEffect(scale, anchor: .center)
-            .allowsHitTesting(navT > 0.6)
+            // Hit areas live only at rest — mid-morph the buttons aren't there.
+            .allowsHitTesting(navT > 0.98)
     }
 
     /// The nav bar controls: tabs + pin + settings + quit. Just the controls —

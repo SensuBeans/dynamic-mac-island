@@ -737,7 +737,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// frame-by-frame with `screencapture`. Off by default — never runs unless
     /// the launch arg / user default is set.
     private func startLiquidNavDebugIfNeeded() {
-        guard UserDefaults.standard.bool(forKey: "LiquidNavDebug") else { return }
+        let defaults = UserDefaults.standard
+        // A long, unique ASCII marker so `strings` can PROVE this code shipped in
+        // the running binary — the short "LiquidNavDebug" key is ≤15 bytes and
+        // Swift inlines it as a small string, invisible to `strings`. Also prints
+        // to Console at launch as a live "the new build is running" signal.
+        NSLog("SurfaceBulgeLiquidNavHarness_v02_engaged")
+
+        // `-LiquidNavFreeze <e>`: pin the morph at a STATIC reveal value with no
+        // animation, so each beat-sheet frame is deterministic. NotchView reads
+        // the same key for `renderNavT`; here we just hold the panel open.
+        if defaults.object(forKey: "LiquidNavFreeze") != nil {
+            state.isExpanded = true
+            state.navHovered = true
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidNavDebug") else { return }
         var shown = false
         let toggle: () -> Void = { [weak self] in
             guard let self else { return }
@@ -746,7 +762,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.state.navHovered = shown     // drives navShown → the navT morph
         }
         toggle()                              // begin with a reveal
-        // Period exceeds the slowed morph (0.95·8 ≈ 7.6 s show / 0.80·8 ≈ 6.4 s
+        // Period exceeds the slowed morph (0.85·8 ≈ 6.8 s show / 0.70·8 ≈ 5.6 s
         // hide) plus a settle hold, so each direction finishes before reversing.
         liquidNavDebugTimer = Timer.scheduledTimer(withTimeInterval: 9.0,
                                                    repeats: true) { _ in toggle() }
@@ -758,7 +774,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, self.state.isExpanded else { return }
             // The debug harness owns nav state while looping — don't let a stray
             // cursor override navHovered or collapse the panel out from under it.
+            // Freeze mode (`-LiquidNavFreeze`) likewise holds the panel open.
             if self.liquidNavDebugTimer != nil { return }
+            if UserDefaults.standard.object(forKey: "LiquidNavFreeze") != nil { return }
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
