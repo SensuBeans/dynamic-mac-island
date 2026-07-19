@@ -449,29 +449,38 @@ final class MediaWatcher: ObservableObject {
         case .music:
             fetchMusicArtworkAsync(key: key, title: np.title)
         case .spotify:
+            // Read the artwork URL OFF the main thread. NSAppleScript is a
+            // synchronous main-thread Apple-Event round-trip to Spotify (see the
+            // note on runScriptAsync) and was blocking the UI on every Spotify
+            // track flip — precisely while the ear/pill choreography animates, so
+            // a slow/busy Spotify dropped animation frames. Use the same
+            // osascript-off-main path the Music artwork fetch already uses; hop
+            // back to main (runScriptAsync delivers there) only to assign.
             let script = "tell application \"Spotify\" to get artwork url of current track"
-            guard let urlString = runAppleScript(script)?.stringValue,
-                  let url = URL(string: urlString) else {
-                // No URL: don't leave the previous track's art stranded under
-                // the new key — clear the key so the next event refetches.
-                artwork = nil
-                artworkKey = nil
-                return
-            }
-            URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                let image = data.flatMap { NSImage(data: $0) }
-                DispatchQueue.main.async {
-                    guard let self, self.artworkKey == key else { return }
-                    if let image {
-                        self.artwork = image
-                    } else {
-                        // Failed download → don't cache stale art under this
-                        // key; reset so a later player event tries again.
-                        self.artwork = nil
-                        self.artworkKey = nil
-                    }
+            runScriptAsync(script) { [weak self] urlString in
+                guard let self, self.artworkKey == key else { return }  // superseded
+                guard let urlString, let url = URL(string: urlString) else {
+                    // No URL: don't leave the previous track's art stranded under
+                    // the new key — clear the key so the next event refetches.
+                    self.artwork = nil
+                    self.artworkKey = nil
+                    return
                 }
-            }.resume()
+                URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                    let image = data.flatMap { NSImage(data: $0) }
+                    DispatchQueue.main.async {
+                        guard let self, self.artworkKey == key else { return }
+                        if let image {
+                            self.artwork = image
+                        } else {
+                            // Failed download → don't cache stale art under this
+                            // key; reset so a later player event tries again.
+                            self.artwork = nil
+                            self.artworkKey = nil
+                        }
+                    }
+                }.resume()
+            }
         case .youtube:
             break  // thumbnail fetched in pollYouTube()
         }
