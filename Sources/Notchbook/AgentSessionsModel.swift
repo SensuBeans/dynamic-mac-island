@@ -608,7 +608,7 @@ final class AgentSessionsModel: ObservableObject {
             liveIDs.insert(id)
 
             let base = p.map { classify($0, age: age) } ?? .idle
-            let resolved = resolveState(base: base, meta: meta, hasTranscript: p != nil)
+            let resolved = resolveState(base: base, meta: meta, hasTranscript: p != nil, age: age)
 
             // Transition tracking keyed by session (survives having no transcript).
             let prev = sessionStates[id]
@@ -1467,8 +1467,11 @@ final class AgentSessionsModel: ObservableObject {
             // (a session left untouched for a while reads as idle, not fresh).
             if p.lastMsgStopReason == "end_turn" { return age < idleMin ? .complete : .idle }
             // Mid-turn (tool_use / streaming): a tool can run for minutes — still
-            // working, NOT idle.
-            return .working
+            // working, NOT idle. But cap it like every other branch: a transcript
+            // silent past idleMax is a hung/abandoned turn, not live work, so it
+            // ages out to idle instead of lighting the pill forever. (The sibling
+            // end_turn and user-last branches already age out; this one didn't.)
+            return age < idleMax ? .working : .idle
         }
 
         // Last message is a user prompt: assistant presumed spinning up.
@@ -1480,11 +1483,16 @@ final class AgentSessionsModel: ObservableObject {
     /// transcript but never reports "working" (the process says it's not busy),
     /// so a quiet session settles to complete (just finished) or idle.
     private func resolveState(base: AgentState, meta: SessionMeta?,
-                              hasTranscript: Bool) -> AgentState {
+                              hasTranscript: Bool, age: TimeInterval) -> AgentState {
         if base == .interrupted { return .interrupted }
         guard let meta else { return base }
         switch meta.status {
-        case "busy":    return .working
+        // A live 'busy' is authoritative — EXCEPT when it never clears: a hung
+        // turn, or a stale <pid>.json whose pid was reused, can report 'busy'
+        // while the transcript has gone cold. Past idleMax with no new entry,
+        // stop trusting 'busy' and defer to the (now aged-out) transcript state,
+        // so the working pill can't stay lit indefinitely with no self-healing.
+        case "busy":    return age < idleMax ? .working : base
         case "waiting": return .waiting
         default:        return base == .complete ? .complete : .idle
         }
