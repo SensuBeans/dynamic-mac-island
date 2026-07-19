@@ -114,6 +114,13 @@ struct NotchView: View {
     /// State changes (waiting→working→complete) keep the label's own spring — the
     /// liquid runs ONLY on appear/disappear.
     @State private var agentT: Double = 0
+    /// True only while the pill sits fully at REST (the bud-and-pinch morph has
+    /// completed and it is shown). The subtle state-change spring
+    /// (waiting→working→complete) is gated on this instead of `renderAgentT`,
+    /// which the view body can only read as the animation ENDPOINT (1 the instant
+    /// an appear starts) — so the spring used to run through the whole appear
+    /// morph, double-animating the label on top of the liquid bud.
+    @State private var agentSettled = false
     /// The pill's measured resting capsule rect (island space), fed to LiquidAgent
     /// so the morph targets the exact rest geometry. Persisted so the disappear leg
     /// can still draw after the real label unmounts.
@@ -586,8 +593,16 @@ struct NotchView: View {
             agentEarLatch = showMediaEar
             let base = show ? 0.60 : 0.50
             let dur = base * (liquidAgentDebug ? 6 : 1)
+            agentSettled = false   // morph in flight — suppress the label spring
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 agentT = show ? 1 : 0
+            }
+            // Mark settled when the morph finishes (the withAnimation completion
+            // API needs macOS 14; this deployment target is lower). Re-check the
+            // intent on fire: a newer toggle may have superseded this leg, in
+            // which case it already reset agentSettled and scheduled its own.
+            DispatchQueue.main.asyncAfter(deadline: .now() + dur) {
+                if show == showAgentPill { agentSettled = show }
             }
         }
         // Remember the pill that's melting away so the disappear leg can still
@@ -599,7 +614,7 @@ struct NotchView: View {
         // never fires for the initial value, so it would otherwise never reveal).
         .onAppear {
             if showMediaEar { earT = 1 }
-            if showAgentPill { agentT = 1; lastAgentPill = activePill }
+            if showAgentPill { agentT = 1; agentSettled = true; lastAgentPill = activePill }
             closeT = state.isExpanded ? 0 : 1
         }
         // Drive `closeT` (C4 Surface Return) on easeInOutCubic: 0.85 s close /
@@ -917,7 +932,7 @@ struct NotchView: View {
                 // spring is disabled (nil), so it can't ALSO animate the label's
                 // appearance on mount: that double motion (goo bud + spring pop) was
                 // the reported "double open". The liquid owns appear/disappear alone.
-                .animation(renderAgentT > 0.99 ? .spring(response: 0.3, dampingFraction: 0.78) : nil,
+                .animation(agentSettled ? .spring(response: 0.3, dampingFraction: 0.78) : nil,
                            value: pill)
             }
         }
