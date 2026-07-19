@@ -276,6 +276,22 @@ private struct AgentRow: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(session.cwd)
+        // The cancel "undo" grace must not outlive the row. resumeCancelWork is
+        // row-local @State, but the DispatchWorkItem it schedules keeps running
+        // after the row unmounts (island collapsed / tab switched / row re-sorted)
+        // — and unmount also resets resumeCancelling, tearing down the only undo
+        // affordance. So a click-to-cancel followed by leaving the island fired
+        // the cancel unattended with no way to undo, then consumed the epoch and
+        // blocked re-arm for the whole window (user: "it reset when I left and
+        // came back"). Abort the pending cancel on disappear so leaving the panel
+        // can never silently drop an armed auto-resume; the arm stays live and the
+        // capsule simply re-renders on return. (The <6s immediate-cancel branch
+        // already reached the model; here we only clear its harmless UI flash.)
+        .onDisappear {
+            resumeCancelWork?.cancel()
+            resumeCancelWork = nil
+            resumeCancelling = false
+        }
     }
 
     // Working-state pulse target (animates between 0.35 and 1).
