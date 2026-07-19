@@ -1091,13 +1091,13 @@ struct NotchView: View {
                           panelWidth: stdW,
                           navWidth: navBlobW,
                           navHeight: NotchMetrics.navIslandHeight,
-                          // Bottom mode: the real panel never shifts, so the
-                          // canvas must not bake the shift into its surface
-                          // line (navSlot 0 = fixed surface; with the mirror
-                          // this lands the rest capsule EXACTLY in the 9pt
-                          // slot below the panel — derived, not tuned).
-                          navSlot: settings.navAtBottom ? 0
-                              : NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
+                          // Full slot in BOTH modes — identical choreography
+                          // (dots, droplet, travel). Bottom mode compensates
+                          // the baked-in surface motion with the animated
+                          // counter-offset below, not by shortening the morph
+                          // (navSlot 0 compressed the travel — user-flagged
+                          // "the dots animation is better in the top nav").
+                          navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
                           // One dot per real control: every visible page tab
                           // plus the pin, settings, and power buttons — the
@@ -1119,20 +1119,25 @@ struct NotchView: View {
                     .offset(y: -18)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(1 - rest)
-                // Real crisp capsule, same footprint as the settled goo capsule.
-                // Bottom mode: with navSlot 0 the goo rests 43pt higher pre-flip,
-                // so the crisp twin shifts up the same amount to stay congruent
-                // through the mirror.
+                // Real crisp capsule, same footprint as the settled goo capsule
+                // (flip-invariant; the whole layer mirrors in bottom mode).
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.clear)
                     .background(VisualEffectBlur().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.32)))
                     .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
-                    .offset(y: settings.navAtBottom
-                        ? -(NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) : 0)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(rest)
             }
+            // Bottom mode's ANIMATED mirror anchor: the canvas bakes the
+            // panel-shift into its surface line (43·navT downward). Counter it
+            // pre-flip (−43·navT; the call-site mirror negates it to +43·navT),
+            // which pins the flipped surface line ON the real panel's bottom
+            // edge for EVERY morph value — full choreography, zero drift.
+            // Lives inside the relay so it renders each mid-flight frame.
+            .offset(y: settings.navAtBottom
+                ? -(NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * navT
+                : 0)
             .frame(width: stdW,
                    height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46,
                    alignment: .top)

@@ -19,7 +19,7 @@ final class SettingsStore: ObservableObject {
 
     // MARK: General
     @Published var hoverToExpand: Bool { didSet { set(hoverToExpand, "general.hoverToExpand") } }
-    /// Nav bar docks under the notch (false★) or hangs below the panel (true).
+    /// Nav bar docks under the notch (false) or hangs below the panel (true★).
     /// The liquid morph runs mirrored in bottom mode — same choreography.
     @Published var navAtBottom: Bool { didSet { set(navAtBottom, "general.navAtBottom") } }
     /// Dwell before a hover opens the panel, seconds. instant★ / 0.2 / 0.5.
@@ -106,7 +106,7 @@ final class SettingsStore: ObservableObject {
         // exactly like today. `object(forKey:)` below then always resolves.
         defaults.register(defaults: [
             "general.hoverToExpand": true,
-            "general.navAtBottom": false,
+            "general.navAtBottom": true,   // user-chosen default (Jul 18)
             "general.expandDelay": 0.0,
             "general.haptics": true,
             "general.toastDuration": 3.0,
