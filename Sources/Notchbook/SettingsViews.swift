@@ -294,6 +294,11 @@ struct SettingsGeneralPage: View {
                 SettingSegmented(selection: $settings.expandDelay,
                                  options: [("Instant", 0.0), ("0.2s", 0.2), ("0.5s", 0.5)])
             }
+            SettingRow(label: "Nav bar position",
+                       help: "Bottom: the bar bulges out below the panel") {
+                SettingSegmented(selection: $settings.navAtBottom,
+                                 options: [("Top", false), ("Bottom", true)])
+            }
             SettingRow(label: "Haptics") {
                 SettingSwitch(isOn: $settings.haptics)
             }

@@ -414,16 +414,25 @@ struct NotchView: View {
             liquidCloseLayer
 
             ZStack(alignment: .top) {
+                // Nav placement, one offset for goo AND controls:
+                //  • Bottom mode (setting): the whole liquid nav hangs BELOW the
+                //    panel; the goo runs MIRRORED (scaleEffect y:-1) so the same
+                //    choreography bulges out of the panel's bottom edge.
+                //  • Parked (pinned, top mode): rides up into the strip above
+                //    the panel (free space — no hardware notch on a parked
+                //    island). Full strip height buys a 4–9pt float gap; the
+                //    droplet overshoot may kiss the window's top edge, which
+                //    beats a merged rest state.
+                let navOffsetY: CGFloat = settings.navAtBottom
+                    ? expandedSize.height + NotchMetrics.navContentGap
+                    : (state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
                 liquidNavLayer                       // goo capsule + neck (behind)
-                    // Parked (pinned): the whole liquid nav — goo AND controls,
-                    // same offset — rides up into the strip above the panel
-                    // (free space: a parked island has no hardware notch).
-                    // Full strip height: -notchHeight alone left the capsule
-                    // flush against the panel top ("merged"). This buys a
-                    // 4–9pt float gap (notch-dependent), matching the docked
-                    // read; the droplet overshoot may kiss the window's top
-                    // edge mid-flight, which beats a merged rest state.
-                    .offset(y: state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
+                    .scaleEffect(x: 1, y: settings.navAtBottom ? -1 : 1)
+                    // Flipping displaces the canvas's asymmetric headroom
+                    // (topPad + neck run below the capsule): without the
+                    // compensation the goo capsule crossfades ~36pt below the
+                    // crisp controls. Value verified against freeze frames.
+                    .offset(y: navOffsetY + (settings.navAtBottom ? -36 : 0))
                 // Real glass panel: cross-fades OUT early on close (the liquid
                 // stand-in takes over) and IN over the last stretch on open. The
                 // nonlinear window must live in an Animatable relay so it renders
@@ -433,7 +442,7 @@ struct NotchView: View {
                         .opacity(1 - smoothstep(0.10, 0.26, e))
                 }
                 navControlsLayer                     // tabs/pin/settings/quit (on top)
-                    .offset(y: state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
+                    .offset(y: navOffsetY)
             }
             // Fixed width: the off-screen probe reports the widest reachable
             // control set (widest-titled tab selected) up front, and the capsule
@@ -1145,8 +1154,11 @@ struct NotchView: View {
                             notchWidth: metrics.notchWidth,
                             notchHeight: metrics.notchHeight,
                             gap: NotchMetrics.islandGap,
-                            navShift: (NotchMetrics.navIslandHeight
-                                       + NotchMetrics.navContentGap) * CGFloat(navE),
+                            // Bottom-nav mode never shifts the panel, so the
+                            // goo's rest geometry is the unshifted layout.
+                            navShift: settings.navAtBottom ? 0
+                                : (NotchMetrics.navIslandHeight
+                                   + NotchMetrics.navContentGap) * CGFloat(navE),
                             panelWidth: panel.width,
                             panelHeight: panel.height,
                             debugPink: liquidClosePink)
@@ -1165,7 +1177,9 @@ struct NotchView: View {
     /// choreography and simply rests OVER the panel's top edge, a transient
     /// floating toolbar instead of a space-maker.
     private var expandedPanelLayer: some View {
-        let shift = state.parked ? 0
+        // No shift when parked (island must not move) NOR in bottom-nav mode
+        // (the bar grows downward below the panel — nothing needs the room).
+        let shift = (state.parked || settings.navAtBottom) ? 0
             : (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
         return contentIsland(size: expandedSize)
             .frame(width: expandedSize.width, height: expandedSize.height)

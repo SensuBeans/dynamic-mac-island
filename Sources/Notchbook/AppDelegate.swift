@@ -991,21 +991,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the cursor over the bar's lower half falls outside and it retracts
             // out from under the pointer. Screen coords are bottom-up, so the
             // band hangs off the maxY (top) edge.
-            let navZoneHeight = self.metrics.notchHeight
-                + NotchMetrics.islandGap
-                + NotchMetrics.navIslandHeight + 28
+            // Bottom-nav mode mirrors the trigger bands to the island's BOTTOM
+            // edge (screen coords are bottom-up: bottom = minY).
+            let navBottom = self.settings.navAtBottom
+            let navZoneHeight = navBottom
+                ? NotchMetrics.navContentGap + NotchMetrics.navIslandHeight + 28
+                : self.metrics.notchHeight
+                    + NotchMetrics.islandGap
+                    + NotchMetrics.navIslandHeight + 28
             let stayZone = NSRect(x: visible.minX,
-                                  y: visible.maxY - navZoneHeight,
+                                  y: navBottom ? visible.minY : visible.maxY - navZoneHeight,
                                   width: visible.width,
                                   height: navZoneHeight)
             // Hysteresis (user-tuned): REVEALING demands the cursor actually
-            // reach the island's top border strip — the old single zone fired
-            // a good 60pt early, while still over content. Once revealed, the
-            // generous zone keeps it out so using the nav buttons never
-            // retracts the bar mid-reach.
-            let enterH = self.metrics.notchHeight + NotchMetrics.islandGap + 10
+            // reach the island's border strip (top strip normally, bottom strip
+            // in bottom-nav mode) — the old single zone fired a good 60pt
+            // early, while still over content. Once revealed, the generous zone
+            // keeps it out so using the nav buttons never retracts the bar
+            // mid-reach.
+            let enterH = navBottom
+                ? NotchMetrics.navContentGap + NotchMetrics.navIslandHeight + 10
+                : self.metrics.notchHeight + NotchMetrics.islandGap + 10
             let enterZone = NSRect(x: visible.minX,
-                                   y: visible.maxY - enterH,
+                                   y: navBottom ? visible.minY : visible.maxY - enterH,
                                    width: visible.width,
                                    height: enterH)
             let inNav = self.state.navHovered
