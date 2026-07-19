@@ -309,7 +309,25 @@ final class AgentSessionsModel: ObservableObject {
         let tty: String?
         let host: TerminalHost
         let mode: ResumeMode
+        /// Backoff clock for transient fire failures (busy / transcript being
+        /// rewritten): the arm stays live but its next attempt is deferred to
+        /// this instant so a still-busy session doesn't spin the timer. nil ⇒
+        /// no pending retry (fire when resetAt+grace is reached).
+        var nextAttemptAt: Date? = nil
+        func retrying(at t: Date) -> ArmedResume {
+            var c = self; c.nextAttemptAt = t; return c
+        }
+        /// Effective fire moment: the later of the reset+grace deadline and any
+        /// pending retry backoff.
+        func fireDeadline(grace: TimeInterval) -> Date {
+            let base = resetAt.addingTimeInterval(grace)
+            return max(base, nextAttemptAt ?? base)
+        }
     }
+
+    /// Outcome of a single fire attempt. `.transient` leaves the arm live for a
+    /// later retry; `.terminal` and `.fired` both consume the epoch for good.
+    private enum FireOutcome { case fired, transient, terminal }
 
     /// Inputs collected per session during the rebuild loop, then evaluated for
     /// arming after `readUsage()` has refreshed the cap state.
@@ -336,6 +354,14 @@ final class AgentSessionsModel: ObservableObject {
     /// Grace after a window's `resetsAt` before firing — lets the account limit
     /// actually clear server-side before we type `continue`.
     private let resumeGrace: TimeInterval = 5
+    /// Backoff between retries after a *transient* fire failure (busy session /
+    /// transcript mid-rewrite): long enough that a busy session can't spin the
+    /// timer, short enough to catch the busy window clearing.
+    private let resumeRetryBackoff: TimeInterval = 10
+    /// Give up retrying (and finally consume the epoch) once the fire moment is
+    /// this far in the past — a session wedged 'busy' forever must not retry
+    /// unboundedly.
+    private let resumeRetryWindow: TimeInterval = 300
 
     /// Support dir for the two auto-resume sidecars (always the real Application
     /// Support path — never the `NOTCHBOOK_USAGE_OVERRIDE` redirect, which only
@@ -794,7 +820,7 @@ final class AgentSessionsModel: ObservableObject {
     /// fires on wake and the resume happens then.
     private func rescheduleResumeTimer() {
         guard let earliest = armedResumes.values
-            .map({ $0.resetAt.addingTimeInterval(resumeGrace) }).min() else {
+            .map({ $0.fireDeadline(grace: resumeGrace) }).min() else {
             resumeTimer?.cancel(); resumeTimer = nil; resumeTimerDeadline = nil
             return
         }
@@ -814,30 +840,57 @@ final class AgentSessionsModel: ObservableObject {
     private func fireDueResumes() {
         let now = Date()
         let due = armedResumes.values
-            .filter { $0.resetAt.addingTimeInterval(resumeGrace) <= now.addingTimeInterval(0.5) }
+            .filter { $0.fireDeadline(grace: resumeGrace) <= now.addingTimeInterval(0.5) }
+        var changed = false
         for a in due {
-            armedResumes.removeValue(forKey: a.sessionId)
-            consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))   // never re-fire this epoch
-            lastResumeDecision[a.sessionId] = nil
-            fireOne(a)
+            // Consume the epoch ONLY on a definitive outcome — firing it, or a
+            // terminal guard failure (pid dead, transcript advanced, identity
+            // changed). A transient failure (busy / transcript mid-rewrite)
+            // leaves the arm live with a backoff so the next tick retries; the
+            // old code consumed the epoch up-front, so one transient blip
+            // cancelled the resume for the whole 5-hour window.
+            let outcome = fireOne(a)
+            switch outcome {
+            case .fired, .terminal:
+                armedResumes.removeValue(forKey: a.sessionId)
+                consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))
+                lastResumeDecision[a.sessionId] = nil
+                changed = true
+            case .transient:
+                let base = a.resetAt.addingTimeInterval(resumeGrace)
+                if now.timeIntervalSince(base) > resumeRetryWindow {
+                    // Wedged too long — stop retrying and consume for good.
+                    logDecision("fire-giveup transient-elapsed session=\(a.sessionId.prefix(8))")
+                    armedResumes.removeValue(forKey: a.sessionId)
+                    consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))
+                    lastResumeDecision[a.sessionId] = nil
+                    changed = true
+                } else {
+                    armedResumes[a.sessionId] =
+                        a.retrying(at: now.addingTimeInterval(resumeRetryBackoff))
+                }
+            }
         }
         rescheduleResumeTimer()
-        if !due.isEmpty { persistResumeStateIfChanged() }
+        if changed { persistResumeStateIfChanged() }
     }
 
     /// Re-check ALL guards at fire time; any failure ⇒ silent cancel (no toast, no
     /// injection). Guards pass ⇒ inject (or notify) + toast. Runs on `ioQueue`;
     /// injection hops to `controlQueue`/main like focus/approve.
-    private func fireOne(_ a: ArmedResume) {
+    @discardableResult
+    private func fireOne(_ a: ArmedResume) -> FireOutcome {
         let sid = a.sessionId.prefix(8)
-        // Guard 1: session file still present, same pid, alive.
+        // Guard 1: session file still present, same pid, alive. TERMINAL — a
+        // dead/replaced pid can never satisfy this arm.
         guard let meta = readSessionMetas()[a.sessionId], meta.pid == a.pid,
               kill(Int32(a.pid), 0) == 0 else {
-            logDecision("fire-cancel guard-pid session=\(sid)"); return
+            logDecision("fire-cancel guard-pid session=\(sid)"); return .terminal
         }
         // Guard 3: not busy (a just-started manual resume would be busy).
+        // TRANSIENT — busy is expected to clear; retry rather than cancel.
         guard meta.status != "busy" else {
-            logDecision("fire-cancel guard-busy session=\(sid)"); return
+            logDecision("fire-retry guard-busy session=\(sid)"); return .transient
         }
         // Guard 2: transcript untouched since arming AND still mid-turn (a manual
         // resume writes a user entry — advances newestEntryTs and clears mid-turn).
@@ -845,15 +898,20 @@ final class AgentSessionsModel: ObservableObject {
         // state file (Date→epoch→Date) can differ from the freshly re-parsed
         // transcript Date by sub-microseconds; any REAL new entry moves the clock
         // by seconds, so 0.5 s cleanly separates "untouched" from "moved".
-        guard let p = parser(forID: a.sessionId),
-              sameInstant(p.newestEntryTs, a.armedEntryTs),
-              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else {
-            logDecision("fire-cancel guard-transcript session=\(sid)"); return
+        // A missing parser is TRANSIENT (the file is momentarily being
+        // rewritten); a transcript that actually MOVED — or a turn that
+        // completed / the user took over — is TERMINAL.
+        guard let p = parser(forID: a.sessionId) else {
+            logDecision("fire-retry guard-parser session=\(sid)"); return .transient
         }
-        // Guard 4: terminal identity re-resolves to the same tty + host.
+        guard sameInstant(p.newestEntryTs, a.armedEntryTs),
+              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else {
+            logDecision("fire-cancel guard-transcript session=\(sid)"); return .terminal
+        }
+        // Guard 4: terminal identity re-resolves to the same tty + host. TERMINAL.
         let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
         guard identity.tty == a.tty, identity.host == a.host else {
-            logDecision("fire-cancel guard-identity session=\(sid)"); return
+            logDecision("fire-cancel guard-identity session=\(sid)"); return .terminal
         }
 
         let project = meta.cwd.isEmpty
@@ -890,6 +948,7 @@ final class AgentSessionsModel: ObservableObject {
                 break   // never inject-mode; defensive
             }
         }
+        return .fired
     }
 
     /// Two `Date?`s that mean the same instant. Used only for the fire-time
