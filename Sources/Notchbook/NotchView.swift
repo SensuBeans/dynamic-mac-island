@@ -1125,6 +1125,16 @@ struct NotchView: View {
                     .fill(.clear)
                     .background(VisualEffectBlur().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.32)))
+                    // Hairline rim so the glass capsule reads as ONE bounded
+                    // surface enclosing every control (tabs + pin/gear/power).
+                    // The capsule already encloses them geometrically, but the
+                    // dark frosted fill is near-invisible against the desktop, so
+                    // pin/gear/power looked orphaned past the tab-bar's own inner
+                    // pill. Every other frosted island — the track toast (872),
+                    // the count badge (979), the content panel — carries this same
+                    // .14 white stroke; the nav capsule was the lone exception.
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
                     .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(rest)
