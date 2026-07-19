@@ -601,10 +601,19 @@ final class AgentSessionsModel: ObservableObject {
                                       lastActivity: lastActivity ?? since),
                           prev?.state))
 
-            // Auto-resume detection uses RAW parser flags (mid-turn = assistant
-            // last, not end_turn), never the resolved UI state which the process
-            // fold drifts to idle/waiting once a session is capped.
-            let midTurn = (p?.lastMsgIsAssistant ?? false) && (p?.lastMsgStopReason != "end_turn")
+            // Auto-resume detection uses RAW parser flags, never the resolved UI
+            // state which the process fold drifts to idle/waiting once capped.
+            // Resume-worthy = the turn is INCOMPLETE, which is either shape:
+            //  • assistant last without end_turn (classic mid-turn), or
+            //  • a USER-role entry last (an unanswered prompt or a tool_result
+            //    awaiting the assistant) — the shape a limit-stopped session
+            //    almost always has, and exactly what the old assistant-only
+            //    predicate rejected: capped sessions logged
+            //    "skip not-midTurn(lastMsg=user)" and never armed (Jul 18).
+            // Arming is only ever evaluated for CAPPED sessions, so a user-last
+            // transcript here always means "reply blocked by the limit".
+            let midTurn = ((p?.lastMsgIsAssistant ?? false) && (p?.lastMsgStopReason != "end_turn"))
+                || !(p?.lastMsgIsAssistant ?? true)
             resumeCandidates.append(ResumeCandidate(
                 id: id, pid: meta.pid, host: identity.host, tty: identity.tty,
                 newestEntryTs: lastActivity, midTurn: midTurn,
@@ -739,8 +748,9 @@ final class AgentSessionsModel: ObservableObject {
                 noteDecision(c.id, key: "no-pid", line: "skip no-pid"); continue
             }
             guard c.midTurn else {
-                let last = c.lastMsgIsAssistant ? "end_turn" : "user"
-                noteDecision(c.id, key: "not-midTurn", line: "skip not-midTurn(lastMsg=\(last))")
+                // Only reachable for assistant-last end_turn transcripts now —
+                // a genuinely finished conversation has nothing to resume.
+                noteDecision(c.id, key: "not-midTurn", line: "skip not-midTurn(lastMsg=end_turn)")
                 continue
             }
             let mode: ResumeMode
