@@ -318,7 +318,19 @@ struct NotchView: View {
                            height: metrics.notchHeight)
                     .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
                                           bottomRadius: 10))
-                    .opacity(showMediaEar ? smoothstep(0.9, 1, e) : 1)
+                    // Backing presence = the media-ear reveal OR the pomodoro
+                    // countdown, taken independently (S1). The media term rides
+                    // the goo morph (fades in over the last 10%); the pomodoro
+                    // term is a steady 1. Keying opacity on `showMediaEar ? … : 1`
+                    // conflated them: when music started over a running countdown
+                    // the term jumped to smoothstep(0.9,1,~0)=0 for a frame — the
+                    // countdown bar blinked out before the ear budded — and when
+                    // music stopped with the countdown on, the `: 1` else pinned
+                    // the bar fully opaque so the retracting goo had nothing to
+                    // recede against. max() decouples the two: the countdown holds
+                    // the bar steady while the media goo reveals/hides on top.
+                    .opacity(max(showMediaEar ? smoothstep(0.9, 1, e) : 0,
+                                 (pomodoro.isRunning && settings.timerCountdownEar) ? 1 : 0))
                 }
 
                 // E1 "Side Bulge": the notch's right flank swells into the ear.
