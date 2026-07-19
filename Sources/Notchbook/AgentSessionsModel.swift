@@ -735,6 +735,21 @@ final class AgentSessionsModel: ObservableObject {
             logDecision("settings-on")
         }
 
+        // Bound consumedEpochs at runtime: drop keys whose reset window has
+        // fully passed (the same predicate restoreResumeState uses at launch).
+        // It was pruned ONLY at launch before, so during a long-running session
+        // it only ever gained entries — every consumed/fired resume left a key
+        // that lived forever, bloating memory and the persisted 'consumed'
+        // array on every write.
+        let nowEpoch = now.timeIntervalSince1970
+        let epochsBefore = consumedEpochs.count
+        consumedEpochs = consumedEpochs.filter {
+            ($0.split(separator: "|").last.flatMap { Double($0) } ?? .infinity) > nowEpoch
+        }
+        if consumedEpochs.count != epochsBefore {
+            logDecision("epoch-prune dropped=\(epochsBefore - consumedEpochs.count)")
+        }
+
         // Drop arms for sessions that vanished this tick.
         for id in armedResumes.keys where !liveIDs.contains(id) {
             armedResumes.removeValue(forKey: id)
