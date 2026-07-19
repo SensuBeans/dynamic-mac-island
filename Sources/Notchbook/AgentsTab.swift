@@ -281,17 +281,12 @@ private struct AgentRow: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(session.cwd)
-        // The cancel "undo" grace must not outlive the row. resumeCancelWork is
-        // row-local @State, but the DispatchWorkItem it schedules keeps running
-        // after the row unmounts (island collapsed / tab switched / row re-sorted)
-        // — and unmount also resets resumeCancelling, tearing down the only undo
-        // affordance. So a click-to-cancel followed by leaving the island fired
-        // the cancel unattended with no way to undo, then consumed the epoch and
-        // blocked re-arm for the whole window (user: "it reset when I left and
-        // came back"). Abort the pending cancel on disappear so leaving the panel
-        // can never silently drop an armed auto-resume; the arm stays live and the
-        // capsule simply re-renders on return. (The <6s immediate-cancel branch
-        // already reached the model; here we only clear its harmless UI flash.)
+        // Leaving the island (row unmount: collapse / tab switch / re-sort) drops
+        // any in-flight "Cancel?" confirm back to the armed pill. The pending work
+        // is only an auto-revert now, but cancel it anyway so it can't fire against
+        // a torn-down row; resetting resumeCancelling keeps the arm and re-renders
+        // the countdown on return. (Cancelling is a deliberate two-tap; leaving is
+        // not one of the taps, so it must never cancel.)
         .onDisappear {
             resumeCancelWork?.cancel()
             resumeCancelWork = nil
@@ -428,8 +423,9 @@ private struct AgentRow: View {
     /// Trailing auto-resume affordance. On auto-typeable hosts: a dim ⚡ when not
     /// armed (display-only, revealed on hover like the other inactive controls);
     /// an amber countdown capsule when armed (always visible — a countdown must be
-    /// seen). Clicking the armed capsule flips to a ~5 s "undo" grace before the
-    /// cancel actually reaches the model. Hidden entirely on `.other`/`.none`.
+    /// seen). The amber pill is the ON state; the FIRST tap only asks ("Cancel?"),
+    /// a second deliberate tap cancels — a single tap can never drop the arm.
+    /// Hidden entirely on `.other`/`.none`.
     @ViewBuilder
     private var autoResumeChip: some View {
         if hostAutoTypeable {
@@ -439,8 +435,8 @@ private struct AgentRow: View {
                 }
                 .buttonStyle(.plain)
                 .help(resumeCancelling
-                      ? "Auto-resume cancelled — click to undo"
-                      : "Auto-resumes at \(Self.clock.string(from: fireAt)) — click to cancel")
+                      ? "Tap again to cancel auto-resume — or wait to keep it"
+                      : "Auto-resume is on — resumes at \(Self.clock.string(from: fireAt)). Tap to cancel.")
                 .transition(.scale.combined(with: .opacity))
             } else if hovered, agents.isCapped {
                 // Only surface the affordance when the account is actually at its
@@ -469,49 +465,43 @@ private struct AgentRow: View {
         .overlay(Capsule().stroke(Self.amber.opacity(0.55), lineWidth: 1))
     }
 
+    /// The confirm state after the first tap: a clear red "Cancel?" so the tap
+    /// reads as destructive (not "activate"). A second tap here commits; anything
+    /// else (wait/leave/tap elsewhere) reverts to the armed pill.
     private var cancellingCapsule: some View {
         HStack(spacing: 3) {
-            Image(systemName: "arrow.uturn.backward").font(.system(size: 8, weight: .bold))
-            Text("undo").font(.system(size: 9, weight: .medium))
+            Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            Text("Cancel?").font(.system(size: 9, weight: .semibold))
         }
-        .foregroundStyle(.white.opacity(0.6))
+        .foregroundStyle(.red)
         .padding(.horizontal, 7)
         .frame(height: 22)
-        .background(Capsule().fill(.white.opacity(0.1)))
+        .background(Capsule().fill(.red.opacity(0.14)))
+        .overlay(Capsule().stroke(.red.opacity(0.55), lineWidth: 1))
     }
 
-    /// First click on the armed capsule ⇒ show "undo" and start a 5 s grace; the
-    /// model stays armed the whole time. Grace lapses ⇒ tell the model to cancel.
-    /// Click again within grace ⇒ just cancel the pending work, back to armed.
+    /// The amber pill is the "auto-resume is ON" STATUS — a single tap must never
+    /// disable it. The old design (tap → 5 s timer → cancel) was a trap: users tap
+    /// the pill to *engage* the feature (the pill IS the engaged state), and the
+    /// timer then dropped the arm on leave/forget — "I activated it, came back, it
+    /// was gone." So now a tap only ARMS a confirm; the arm stays live. A second
+    /// deliberate tap actually cancels. The pending work item is an auto-REVERT
+    /// (back to armed), never an auto-cancel, so waiting, leaving, or a stray tap
+    /// can only ever KEEP the arm — cancelling always takes two intentional taps.
     private func toggleResumeCancel() {
+        resumeCancelWork?.cancel()
+        resumeCancelWork = nil
         if resumeCancelling {
-            resumeCancelWork?.cancel()
-            resumeCancelWork = nil
+            // Second, deliberate tap → actually cancel (reaches the model now).
             resumeCancelling = false
+            agents.cancelAutoResume(session.id)
         } else {
-            let id = session.id
-            // Too close to fire time for the undo grace to be safe: the wall-clock
-            // fire timer would beat a 5 s-delayed cancel and resume anyway. Cancel
-            // NOW (a brief "cancelled" flash instead of an undo window).
-            if let fireAt = session.autoResumeAt, fireAt.timeIntervalSince(now) < 6 {
-                agents.cancelAutoResume(id)
-                resumeCancelling = true
-                let flash = DispatchWorkItem {
-                    resumeCancelling = false
-                    resumeCancelWork = nil
-                }
-                resumeCancelWork = flash
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: flash)
-                return
-            }
+            // First tap → ask. Nothing is cancelled; auto-revert to armed shortly
+            // so a stray tap doesn't leave the pill stuck in the confirm state.
             resumeCancelling = true
-            let work = DispatchWorkItem {
-                agents.cancelAutoResume(id)
-                resumeCancelling = false
-                resumeCancelWork = nil
-            }
-            resumeCancelWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+            let revert = DispatchWorkItem { resumeCancelling = false; resumeCancelWork = nil }
+            resumeCancelWork = revert
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: revert)
         }
     }
 
