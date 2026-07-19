@@ -82,6 +82,22 @@ struct NotchView: View {
     /// the reveal until the state settles, so the ear opens ONCE, cleanly.
     // Ear reveal timing lives in EarRevealModel now (single owner) — the view
     // holds no ear debounce state and maps the model's edges 1:1 onto earT.
+
+    /// Latched media content: the ear row renders these, NEVER raw player
+    /// state — raw `nowPlaying`/`artwork` churn through nil on track changes,
+    /// which used to blink the mounted content and pop layout width before
+    /// the reveal (the residual "activates twice"). Latches only ever move
+    /// from value to value; nil ticks keep the outgoing content.
+    @State private var lastNowPlaying: MediaWatcher.NowPlaying?
+    @State private var lastArtwork: NSImage?
+    /// Keeps the ear row MOUNTED through the hide morph so the liquid owns
+    /// the exit (content is already faded by the iconIn window); the row
+    /// unmounts invisibly once this clears.
+    @State private var earLinger = false
+    /// LiquidAgent's donor geometry latched at the morph edge — reading live
+    /// hasMedia mid-flight teleported the in-flight pill goo when the ear
+    /// settled during a bud.
+    @State private var agentEarLatch = false
     /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
     /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
     private var earTFreeze: Double? {
@@ -235,7 +251,15 @@ struct NotchView: View {
     }
 
     private var island: some View {
-        let hasMedia = (media.nowPlaying != nil && !media.earHidden)
+        // GROUND-UP RULE: everything the collapsed island presents for media
+        // keys off the SETTLED reveal signal (showMediaEar ← EarRevealModel),
+        // never raw player state. Keying off raw `nowPlaying` popped the black
+        // bar at full ear width the instant a track was detected — an
+        // unliquified first "activation" — and the liquid morph then ran when
+        // the state settled: the original "activates and animates twice",
+        // present since before every debounce patch. One signal, one reveal.
+        // (The pomodoro countdown ear keeps its plain fade, as before.)
+        let hasMedia = showMediaEar
             || (pomodoro.isRunning && settings.timerCountdownEar)
         let hasToast = state.toast != nil
         let hasAgent = agentSessions.hasActivePill
@@ -324,13 +348,13 @@ struct NotchView: View {
                                     notchWidth: metrics.notchWidth,
                                     notchHeight: metrics.notchHeight,
                                     earWidth: metrics.mediaEarWidth,
-                                    hasEar: hasMedia,
+                                    hasEar: agentEarLatch,
                                     pillRect: agentPillFrame,
                                     glyphCenterX: nil,
                                     countCenterX: nil,
                                     tint: pillTint(pill),
                                     debugPink: liquidAgentPink)
-                            .frame(width: metrics.collapsedSize(withMedia: hasMedia,
+                            .frame(width: metrics.collapsedSize(withMedia: agentEarLatch,
                                                                 withAgent: true).width
                                            + LiquidAgent.rightPad,
                                    height: metrics.notchHeight
@@ -517,6 +541,24 @@ struct NotchView: View {
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 earT = show ? 1 : 0
             }
+            if show {
+                earLinger = false
+            } else {
+                // Keep the row mounted while the liquid hide plays; unmount
+                // happens after, invisibly (content opacity is long at 0).
+                earLinger = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.1) {
+                    if !showMediaEar { earLinger = false }
+                }
+            }
+        }
+        // Content latches: value→value only, so churn-nil ticks and async
+        // artwork decodes can never blink the mounted ear row.
+        .onChange(of: media.nowPlaying) { np in
+            if let np { lastNowPlaying = np }
+        }
+        .onChange(of: media.artwork) { art in
+            if let art { lastArtwork = art }
         }
         // Drive `agentT` (LiquidAgent bud-and-pinch) on the same easeInOutCubic:
         // 0.60 s show / 0.50 s hide, 6× under the debug harness. Keyed on
@@ -524,6 +566,9 @@ struct NotchView: View {
         // state changes never re-run the liquid — only appear/disappear + the
         // toast handoff (toast steals the slot → melt; toast clears → re-bud).
         .onChange(of: showAgentPill) { show in
+            // Latch the donor geometry at the edge — the goo must not re-aim
+            // mid-flight if the media ear settles during the bud.
+            agentEarLatch = showMediaEar
             let base = show ? 0.60 : 0.50
             let dur = base * (liquidAgentDebug ? 6 : 1)
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
@@ -562,23 +607,11 @@ struct NotchView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.05) {
                     guard !state.isExpanded else { return }
                     morphHoldExpanded = false
-                    // The close's final beat: the mass is absorbed, the bare
-                    // notch rests a breath — then it EXHALES the media ear with
-                    // the full Side Bulge + content dots. Without this replay
-                    // the ear just pops back with the bar's fade (earT never
-                    // left 1 while the panel was open).
-                    if showMediaEar {
-                        // Reset must RENDER before the animated set — both writes
-                        // in one tick coalesce to 1→1 and SwiftUI animates nothing.
-                        earT = 0
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            guard !state.isExpanded else { return }
-                            let earDur = 0.70 * (liquidIslandDebug ? 6 : 1)
-                            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: earDur)) {
-                                earT = 1
-                            }
-                        }
-                    }
+                    // No exhale replay (ground-up simplification): the ear kept
+                    // earT=1 while the panel was open, so the collapsed bar
+                    // returns WHOLE with its own 0.2s fade — one calm entrance.
+                    // The old reset-and-replay was a deliberate second ear
+                    // animation and read as part of "it animates twice".
                 }
             }
             // Animate the nav melt (was a hard snap) so it reads as the capsule-
@@ -687,9 +720,15 @@ struct NotchView: View {
     /// Dynamic Island ears: album art on the left, live activity on the right.
     /// (Toasts moved OUT of the bar into their own floating capsule — `toastCapsule`.)
     private var ears: some View {
-        Group {
+        // Arbitration + mounting keyed on the SETTLED signal (showMediaEar /
+        // earLinger), never raw player state: raw keys made this row pop
+        // layout width at detection time (before the reveal), blink on
+        // track-churn nil ticks, and vanish instantly on stop while the
+        // liquid hide ran on an empty bar — all read as double activations.
+        let mediaEarMounted = (showMediaEar || earLinger) && !state.isExpanded
+        return Group {
             if pomodoro.isRunning, settings.timerCountdownEar,
-                      media.nowPlaying == nil || media.earHidden,
+                      !mediaEarMounted,
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
                 HStack(spacing: 5) {
@@ -709,7 +748,7 @@ struct NotchView: View {
                 }
                 .frame(height: metrics.notchHeight)
                 .transition(.opacity)
-            } else if let np = media.nowPlaying, !media.earHidden, !state.isExpanded {
+            } else if mediaEarMounted, let np = media.nowPlaying ?? lastNowPlaying {
                 // Right ear only: never cover the frontmost app's menu items.
                 // Wrapped in the Animatable relay so the crisp content fade-in
                 // (nonlinear iconIn window) renders every mid-flight value —
@@ -766,14 +805,12 @@ struct NotchView: View {
                  // At rest this is 1, so the hover→transport morph works normally.
                  .opacity(smoothstep(0.84, 1, earE))
                 }
-                // The LiquidEar goo + the relay opacity above OWN the reveal. A
-                // plain `.transition(.opacity)` also fired on INSERTION (when
-                // nowPlaying flips), and — driven by the container's
-                // `.animation(value: hasMedia)` spring — faded the album + waves in
-                // a SECOND time on top of the goo: the reported activation glitch.
-                // Insertion is now `.identity` (liquid owns it); removal keeps the
-                // fade so music-stop tears down gracefully as the branch unmounts.
-                .transition(.asymmetric(insertion: .identity, removal: .opacity))
+                // The LiquidEar goo + the relay opacity above OWN both the
+                // reveal AND the exit (earLinger keeps this mounted through
+                // the hide morph; content opacity is already 0 at unmount).
+                // Any transition here fires a competing fade on top of the
+                // goo — that was the reported activation glitch.
+                .transition(.identity)
             }
         }
     }
@@ -786,7 +823,9 @@ struct NotchView: View {
         Group {
             if let toast = state.toast, !state.isExpanded {
                 HStack(spacing: 7) {
-                    if toast.useArtwork, let art = media.artwork {
+                    // Latched art (value→value): a churn-nil or late decode
+                    // must not swap the capsule's leading image mid-display.
+                    if toast.useArtwork, let art = media.artwork ?? lastArtwork {
                         Image(nsImage: art)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
@@ -929,7 +968,7 @@ struct NotchView: View {
 
     private func artworkThumb(side: CGFloat) -> some View {
         Group {
-            if let art = media.artwork {
+            if let art = media.artwork ?? lastArtwork {
                 Image(nsImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
