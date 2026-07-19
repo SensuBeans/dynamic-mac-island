@@ -121,6 +121,11 @@ struct NotchView: View {
     /// an appear starts) — so the spring used to run through the whole appear
     /// morph, double-animating the label on top of the liquid bud.
     @State private var agentSettled = false
+    /// Keeps the crisp agent-pill label mounted through the DISAPPEAR leg
+    /// (mirrors earLinger). The mount condition read renderAgentT — the endpoint,
+    /// 0 the instant a disappear starts — so the label unmounted at frame 0 while
+    /// the goo melts, leaving a blank beat then an empty capsule (S8).
+    @State private var agentLinger = false
     /// The pill's measured resting capsule rect (island space), fed to LiquidAgent
     /// so the morph targets the exact rest geometry. Persisted so the disappear leg
     /// can still draw after the real label unmounts.
@@ -641,6 +646,16 @@ struct NotchView: View {
             let base = show ? 0.60 : 0.50
             let dur = base * (liquidAgentDebug ? 6 : 1)
             agentSettled = false   // morph in flight — suppress the label spring
+            // Keep the crisp label mounted through the disappear leg (mirrors
+            // earLinger) so it hands off to the goo instead of popping to blank.
+            if show {
+                agentLinger = false
+            } else {
+                agentLinger = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + dur + 0.1) {
+                    if !showAgentPill { agentLinger = false }
+                }
+            }
             withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
                 agentT = show ? 1 : 0
             }
@@ -950,7 +965,7 @@ struct NotchView: View {
         Group {
             // Mounted through the whole morph — including the disappear leg, when
             // `activePill` is already nil (we render the melting `lastAgentPill`).
-            if showAgentPill || renderAgentT > 0.001, let pill = activePill ?? lastAgentPill {
+            if showAgentPill || agentLinger || renderAgentT > 0.001, let pill = activePill ?? lastAgentPill {
                 NavTDriven(t: renderAgentT) { e in
                     Button {
                         state.currentTab = .agents
