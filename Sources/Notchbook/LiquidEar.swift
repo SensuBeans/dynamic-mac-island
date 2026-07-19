@@ -49,7 +49,7 @@ struct LiquidEar: View, Animatable {
     // --- Tuning knobs (mirror LiquidNav's 8/19 metaball family) ---
     static let bodyBlur: CGFloat = 5
     static let bodyThreshold: Double = 0.42
-    static let dotBlur: CGFloat = 3
+    static let dotBlur: CGFloat = 3.5   // matches LiquidNav's dot softness
     static let dotThreshold: Double = 0.42
     static let dotFill = Color(white: 0.83)   // ≈ #cfd6df; becomes the light views
 
@@ -96,6 +96,55 @@ struct LiquidEar: View, Animatable {
             bodyCtx.drawLayer(content: bodyShapes)
 
             if debugPink { return }
+
+            // --- Refractive in-flight glass (LiquidNav's visual language, so the
+            // ear's reveal AND close-out read as the same material as the nav
+            // morph — user-flagged mismatch: the ear was a flat black blob).
+            // Styling lives STRICTLY mid-flight: `flight` is 0 at both ends, so
+            // the resting bar and the fused notch stay pure black and the crisp
+            // content cross-fade lands with no brightness pop. Clipped to the
+            // fused silhouette AND to the ear extension — the notch region
+            // never lightens.
+            if earRect.width > 2 {
+                let flight = 4 * e * (1 - e)
+                var glass = ctx
+                glass.clipToLayer { mask in
+                    var m = mask
+                    m.addFilter(.alphaThreshold(min: Self.bodyThreshold, color: .white))
+                    m.addFilter(.blur(radius: Self.bodyBlur))
+                    m.drawLayer(content: bodyShapes)
+                }
+                glass.clip(to: Path(CGRect(x: notchRight + 1, y: 0,
+                                           width: size.width - notchRight - 1,
+                                           height: size.height)))
+                // Inner luminance: cool light pooling at the blob's crown,
+                // deepening toward its base (LiquidNav's lume, ear-scaled).
+                let lume = Gradient(stops: [
+                    .init(color: Color(red: 0.66, green: 0.74, blue: 0.86)
+                        .opacity(0.30 * flight), location: 0.00),
+                    .init(color: Color(red: 0.30, green: 0.35, blue: 0.44)
+                        .opacity(0.18 * flight), location: 0.45),
+                    .init(color: .clear, location: 1.00),
+                ])
+                glass.fill(Path(CGRect(origin: .zero, size: size)),
+                           with: .linearGradient(lume,
+                                 startPoint: CGPoint(x: earRect.midX, y: earRect.minY),
+                                 endPoint: CGPoint(x: earRect.midX, y: earRect.maxY)))
+                // Specular top rim along the blob's crown.
+                var rim = glass
+                rim.blendMode = .plusLighter
+                let rimGrad = Gradient(stops: [
+                    .init(color: .white.opacity(0.50 * flight), location: 0.00),
+                    .init(color: .white.opacity(0.15 * flight), location: 0.30),
+                    .init(color: .clear, location: 0.60),
+                ])
+                rim.stroke(Path(roundedRect: earRect,
+                                cornerRadius: min(h / 2, earRect.width / 2)),
+                           with: .linearGradient(rimGrad,
+                                 startPoint: CGPoint(x: earRect.midX, y: earRect.minY),
+                                 endPoint: CGPoint(x: earRect.midX, y: earRect.maxY)),
+                           lineWidth: 1.2)
+            }
 
             // --- Content dot-melt: two light dots born at the seam → slide to the
             // art thumb + equalizer positions → dissolve as the real views fade in.
