@@ -7,6 +7,7 @@ struct NotchView: View {
     @EnvironmentObject var tray: FilesTray
     @EnvironmentObject var calendarModel: CalendarModel
     @EnvironmentObject var mirror: MirrorController
+    @EnvironmentObject var earReveal: EarRevealModel
     /// Camera was live when the settings overlay opened — the only case where
     /// closing settings may restart it (the placeholder default is opt-in).
     @State private var mirrorPausedForSettings = false
@@ -79,28 +80,8 @@ struct NotchView: View {
     /// Kicking off `earT` on the FIRST tick animated the goo while all of that
     /// churned underneath it — the reported open stutter. This work item defers
     /// the reveal until the state settles, so the ear opens ONCE, cleanly.
-    @State private var earRevealWork: DispatchWorkItem?
-    /// Uptime past which the reveal stops waiting for artwork and opens with
-    /// whatever content exists (see the show leg of the earT onChange).
-    @State private var earRevealGiveUp: Double = 0
-
-    /// One reveal tick: if the artwork hasn't landed and the budget hasn't
-    /// lapsed, re-arm; otherwise run the morph. Every tick re-checks
-    /// `showMediaEar` so a track stopping mid-wait cancels cleanly, and the
-    /// pending item stays in `earRevealWork` so any state flip cancels it.
-    private func scheduleEarReveal(delay: Double, animate: @escaping (Double) -> Void) {
-        let work = DispatchWorkItem {
-            guard showMediaEar else { return }
-            if media.artwork == nil,
-               ProcessInfo.processInfo.systemUptime < earRevealGiveUp {
-                scheduleEarReveal(delay: 0.2, animate: animate)
-                return
-            }
-            animate(1)
-        }
-        earRevealWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-    }
+    // Ear reveal timing lives in EarRevealModel now (single owner) — the view
+    // holds no ear debounce state and maps the model's edges 1:1 onto earT.
     /// `-LiquidEarFreeze <e>`: pin the ear morph at a static value for
     /// deterministic beat-sheet capture (mirrors `LiquidNavFreeze`).
     private var earTFreeze: Double? {
@@ -193,7 +174,7 @@ struct NotchView: View {
     /// `-LiquidIslandDebug` the auto-loop drives it via a forced flag (no player).
     private var showMediaEar: Bool {
         if liquidIslandDebug { return state.liquidEarDebugForced }
-        return media.nowPlaying != nil && !media.earHidden
+        return earReveal.earVisible
     }
 
     /// Smoothstep a→b at x, clamped (the mock's `smooth`, for view-level windows).
@@ -528,33 +509,13 @@ struct NotchView: View {
         }
         // Drive `earT` (E1 Side Bulge) on easeInOutCubic: 0.70 s show / 0.55 s
         // hide, per the motion contract. `-LiquidIslandDebug` stretches both 6×.
-        // The SHOW leg is debounced so it fires once from a settled media state
-        // (see `earRevealWork`) — that is the "reset the open" fix for the stutter.
+        // DUMB BY DESIGN: all settling/artwork/absence timing lives in
+        // EarRevealModel, which emits only true edges — every edge here is a
+        // real morph, and nothing can restart one mid-flight.
         .onChange(of: showMediaEar) { show in
-            earRevealWork?.cancel()
             let dur = (show ? 0.70 : 0.55) * (liquidIslandDebug ? 6 : 1)
-            let animateEar: (Double) -> Void = { target in
-                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) { earT = target }
-            }
-            if show {
-                // Let the media state land first (metadata, artwork, isPlaying, the
-                // now-playing toast, the width spring), THEN open in one clean pass.
-                // No wait under the debug harness — it forces a synthetic ear with
-                // no real player, so there is nothing to settle.
-                if liquidIslandDebug {
-                    animateEar(1)
-                } else {
-                    // BOTH content pieces must activate together (user diagnosis:
-                    // the art and the sound wave arriving separately IS the
-                    // end-of-reveal glitch — EQ lands with the morph, artwork
-                    // pops in whenever its fetch finishes). Hold the reveal
-                    // until the artwork exists, within a budget; art-less
-                    // sources reveal EQ-only when the budget lapses.
-                    earRevealGiveUp = ProcessInfo.processInfo.systemUptime + 1.8
-                    scheduleEarReveal(delay: 0.32, animate: animateEar)
-                }
-            } else {
-                animateEar(0)
+            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                earT = show ? 1 : 0
             }
         }
         // Drive `agentT` (LiquidAgent bud-and-pinch) on the same easeInOutCubic:

@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let lyrics = LyricsModel()
     private let calendarModel = CalendarModel()
     private let mirror = MirrorController()
+    private let earReveal = EarRevealModel()
     private let toggles = TogglesModel()
     private let stats = StatsModel()
     private let pomodoro = PomodoroModel()
@@ -78,6 +79,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
         state.onQuit = { NSApp.terminate(nil) }
+        // The ear's single-owner reducer watches the media pipeline from launch.
+        earReveal.bind(to: media)
         state.onExpandRequest = { [weak self] in self?.expand() }
         state.onHoverChange = { [weak self] inside in self?.hoverIsland(inside) }
         // Songs/Albums jumps need Accessibility. Once the one-time system
@@ -757,6 +760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(tray)
             .environmentObject(calendarModel)
             .environmentObject(mirror)
+            .environmentObject(earReveal)
             .environmentObject(toggles)
             .environmentObject(stats)
             .environmentObject(pomodoro)
