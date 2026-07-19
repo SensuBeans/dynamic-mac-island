@@ -22,10 +22,15 @@ struct AgentsTab: View {
     @State private var rowsH: CGFloat = 0
 
     private var hasUsage: Bool { !(agents.usage?.isEmpty ?? true) }
-    private var naturalHeight: CGFloat {
-        agents.sessions.isEmpty
-            ? 150   // empty state: sparkles + label + launch button, compact
-            : (hasUsage ? usageH + 8 : 0) + rowsH
+    /// nil = "not measured yet" — hugSize then holds the CAP rather than a tiny
+    /// pre-measurement value. usageH/rowsH start at 0, so reporting the populated
+    /// height before the GeometryReaders land published ~0, which hugSize floored
+    /// to 120 and the spring-animated panel visibly dipped cap→120→real. Report
+    /// nil until both readers that feed the height have reported.
+    private var naturalHeight: CGFloat? {
+        if agents.sessions.isEmpty { return 150 }  // empty state: known constant
+        guard rowsH > 0, (!hasUsage || usageH > 0) else { return nil }
+        return (hasUsage ? usageH + 8 : 0) + rowsH
     }
 
     var body: some View {

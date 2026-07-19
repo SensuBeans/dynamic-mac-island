@@ -15,9 +15,15 @@ struct ServersTab: View {
     @State private var headerH: CGFloat = 0
     @State private var listH: CGFloat = 0
 
-    private var naturalHeight: CGFloat {
+    /// nil = "not measured yet" — hugSize then holds the CAP rather than the tiny
+    /// pre-measurement value (headerH/listH start at 0, so the else branch
+    /// published ~8 before the GeometryReaders landed, flooring the panel to 120
+    /// and springing it cap→120→real). Report nil until the state is known AND
+    /// both readers have reported.
+    private var naturalHeight: CGFloat? {
         if servers.loaded, !servers.reachable { return 140 }
         if servers.loaded, servers.servers.isEmpty { return 150 }
+        guard servers.loaded, headerH > 0, listH > 0 else { return nil }
         return headerH + 8 + listH
     }
 
