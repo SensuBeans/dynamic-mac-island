@@ -40,8 +40,13 @@ final class AudioSpectrum: ObservableObject {
 
     func setActive(_ on: Bool) {
         guard on != active else { return }
-        active = on
-        if on { start() } else { stop() }
+        // Don't mark active until start() has FULLY succeeded (it sets the flag
+        // itself on the last line). Setting it up-front meant any early-return
+        // in start() — tap-create or aggregate-create failing — left active ==
+        // true doing nothing, and the `on != active` guard then no-op'd every
+        // later setActive(true), so the live waveform could never retry and
+        // stayed on the synthetic fallback until the tab hid.
+        if on { start() } else { active = false; stop() }
     }
 
     private func start() {
@@ -77,14 +82,14 @@ final class AudioSpectrum: ObservableObject {
             stop()
             return
         }
-        // A failed start would otherwise leave `active` true doing nothing and
-        // the tap/aggregate device leaked — tear down and mark inactive so a
-        // later show can retry cleanly.
         guard AudioDeviceStart(agg, ioProcID) == noErr else {
             stop()
-            active = false
             return
         }
+        // Every step succeeded — only now is the tap truly live. Marking active
+        // HERE (not before start()) guarantees every failure path above leaves
+        // active == false, so a later setActive(true) retries cleanly.
+        active = true
     }
 
     /// Destroys the process tap and the "Notchbook Audio Tap" aggregate device.
