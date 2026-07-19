@@ -1179,7 +1179,13 @@ struct NotchView: View {
                     .frame(width: stdW,
                            height: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap + 46 + 18)
                     .offset(y: -18)
-                    .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+                    .shadow(color: .black.opacity(0.45), radius: 12,
+                            // Negate in bottom mode: the whole layer is mirrored
+                            // (scaleEffect y:-1), which would flip a y:5 shadow to
+                            // y:-5 and cast it UP into the panel. Pre-negating puts
+                            // it back to +5 post-flip, so the capsule shadow falls
+                            // DOWNWARD like the panel's own shadow in both modes.
+                            y: settings.navAtBottom ? -5 : 5)
                     .opacity(1 - rest)
                 // Real crisp capsule, same footprint as the settled goo capsule
                 // (flip-invariant; the whole layer mirrors in bottom mode).
@@ -1198,7 +1204,13 @@ struct NotchView: View {
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
                     .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
-                    .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
+                    .shadow(color: .black.opacity(0.45), radius: 12,
+                            // Negate in bottom mode: the whole layer is mirrored
+                            // (scaleEffect y:-1), which would flip a y:5 shadow to
+                            // y:-5 and cast it UP into the panel. Pre-negating puts
+                            // it back to +5 post-flip, so the capsule shadow falls
+                            // DOWNWARD like the panel's own shadow in both modes.
+                            y: settings.navAtBottom ? -5 : 5)
                     .opacity(rest)
             }
             // Bottom mode's ANIMATED mirror anchor: the canvas bakes the
