@@ -30,6 +30,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    /// Collapse hit-test rect, held at the recent MAX through a shrink's spring
+    /// settle. islandRect() returns the ENDPOINT size at once, but the panel
+    /// animates to it over ~0.3 s, so on a SHRINK (a row removed, a session ends,
+    /// Mirror stops) the rect snaps small while the panel is still rendered large
+    /// — a cursor resting in the still-visible lower band then falls outside and
+    /// collapse() fires under it. Grows are adopted immediately (cursor already
+    /// inside); shrinks hold the larger rect for islandShrinkSettle. See S4.
+    private var heldCollapseRect: NSRect = .zero
+    private var heldCollapseUntil: Date = .distantPast
+    private let islandShrinkSettle: TimeInterval = 0.4
     private var expandWork: DispatchWorkItem?
     private var hoverPoll: Timer?
     private var spacePoll: Timer?
@@ -982,7 +992,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
-            let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
+            let target = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
+            // Never let the collapse rect trail the rendered panel on a shrink.
+            let visible = self.collapseRect(target: target)
             let mouse = NSEvent.mouseLocation
             // The nav dock rides the TOP of the island, but the bar itself is
             // rendered `notchHeight + gap` BELOW the rect's top edge (the rect
@@ -1043,6 +1055,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         globalMouseMonitor = nil
         localMouseMonitor = nil
+        // Reset the hold so the next expand starts clean.
+        heldCollapseRect = .zero
+        heldCollapseUntil = .distantPast
+    }
+
+    /// The rect the collapse test uses, smoothed so it never trails the rendered
+    /// panel on a SHRINK. A grow (or the first sighting) is adopted immediately —
+    /// the cursor is already inside the larger area. A shrink holds the previous,
+    /// larger rect for islandShrinkSettle so the down-spring can't collapse the
+    /// panel under a cursor resting in the still-visible band; once the hold
+    /// elapses the render has caught up and the smaller target is adopted.
+    private func collapseRect(target: NSRect) -> NSRect {
+        let now = Date()
+        if target.height >= heldCollapseRect.height {
+            heldCollapseRect = target
+            heldCollapseUntil = .distantPast
+        } else if heldCollapseUntil == .distantPast {
+            // First frame of a new shrink — start the hold, keep the larger rect.
+            heldCollapseUntil = now.addingTimeInterval(islandShrinkSettle)
+        } else if now >= heldCollapseUntil {
+            // Hold elapsed — adopt the settled (smaller) target.
+            heldCollapseRect = target
+            heldCollapseUntil = .distantPast
+        }
+        // else: within an active hold — keep the larger heldCollapseRect.
+        return heldCollapseRect
     }
 
     private func rebuildMetrics() {
