@@ -428,11 +428,17 @@ struct NotchView: View {
                     : (state.parked ? -(metrics.notchHeight + NotchMetrics.islandGap) : 0)
                 liquidNavLayer                       // goo capsule + neck (behind)
                     .scaleEffect(x: 1, y: settings.navAtBottom ? -1 : 1)
-                    // Flipping displaces the canvas's asymmetric headroom
-                    // (topPad + neck run below the capsule): without the
-                    // compensation the goo capsule crossfades ~36pt below the
-                    // crisp controls. Value verified against freeze frames.
-                    .offset(y: navOffsetY + (settings.navAtBottom ? -36 : 0))
+                    // Bottom mode: mirror the 89pt layer frame about the real
+                    // panel's bottom edge — offset = panelH − frameH, so the
+                    // canvas's internal surface line (outer row 0 with navSlot
+                    // 0, flipped to row 89) lands exactly ON the panel bottom:
+                    // the panel-wide swell tucks behind the real panel (it was
+                    // fully exposed before — the "bigger bar"), and the rest
+                    // capsule derives to the same 9pt slot as the crisp one.
+                    .offset(y: settings.navAtBottom
+                        ? expandedSize.height - (NotchMetrics.navIslandHeight
+                                                 + NotchMetrics.navContentGap + 46)
+                        : navOffsetY)
                 // Real glass panel: cross-fades OUT early on close (the liquid
                 // stand-in takes over) and IN over the last stretch on open. The
                 // nonlinear window must live in an Animatable relay so it renders
@@ -1085,7 +1091,13 @@ struct NotchView: View {
                           panelWidth: stdW,
                           navWidth: navBlobW,
                           navHeight: NotchMetrics.navIslandHeight,
-                          navSlot: NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
+                          // Bottom mode: the real panel never shifts, so the
+                          // canvas must not bake the shift into its surface
+                          // line (navSlot 0 = fixed surface; with the mirror
+                          // this lands the rest capsule EXACTLY in the 9pt
+                          // slot below the panel — derived, not tuned).
+                          navSlot: settings.navAtBottom ? 0
+                              : NotchMetrics.navIslandHeight + NotchMetrics.navContentGap,
                           panelTopRadius: state.isExpanded ? 26 : 34,
                           // One dot per real control: every visible page tab
                           // plus the pin, settings, and power buttons — the
@@ -1108,11 +1120,16 @@ struct NotchView: View {
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(1 - rest)
                 // Real crisp capsule, same footprint as the settled goo capsule.
+                // Bottom mode: with navSlot 0 the goo rests 43pt higher pre-flip,
+                // so the crisp twin shifts up the same amount to stay congruent
+                // through the mirror.
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.clear)
                     .background(VisualEffectBlur().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.32)))
                     .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
+                    .offset(y: settings.navAtBottom
+                        ? -(NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) : 0)
                     .shadow(color: .black.opacity(0.45), radius: 12, y: 5)
                     .opacity(rest)
             }
