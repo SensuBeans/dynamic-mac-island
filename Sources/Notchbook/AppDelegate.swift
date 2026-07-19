@@ -830,6 +830,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if UserDefaults.standard.object(forKey: "LiquidCloseFreeze") != nil { return }
         guard state.isExpanded else { return }
         stopMouseWatch()
+        // Latch the on-screen panel size BEFORE the mirror reverts (S11): a
+        // live/zoomed Mirror shrinks to standard the instant mirror.stop() flips
+        // wantsRunning below, which would start the close morph's Surface Return
+        // from the standard rect and snap. Only Mirror's size is volatile through
+        // a close; every other tab stays put, so .zero (use the live size) there.
+        if state.currentTab == .mirror, mirror.wantsRunning {
+            state.closePanelSize = metrics.expandedSize(zoomed: true,
+                                                        large: state.mirrorBig)
+        } else {
+            state.closePanelSize = .zero
+        }
         state.isExpanded = false
         state.pinned = false
         state.navHovered = false

@@ -86,6 +86,13 @@ final class NotchState: ObservableObject {
     /// hover-rect can track the same dynamic height the view renders — the
     /// two must never disagree or the island collapses under the cursor.
     @Published var tabHugHeight: CGFloat?
+    /// On-screen expanded panel size latched at the START of a collapse, before
+    /// the mirror reverts (S11). A live/zoomed Mirror shrinks to standard the
+    /// instant collapse() flips wantsRunning, so the close morph's Surface Return
+    /// would otherwise start from the standard rect and snap. `.zero` means "no
+    /// latch — use the live expandedSize" (every non-mirror tab is size-stable
+    /// through the close, so only Mirror needs this).
+    @Published var closePanelSize: CGSize = .zero
     /// Cursor is over the nav dock's strip below the panel (drives its
     /// show/hide — the dock stays hidden until summoned).
     @Published var navHovered = false

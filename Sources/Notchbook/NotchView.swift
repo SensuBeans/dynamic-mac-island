@@ -1251,7 +1251,11 @@ struct NotchView: View {
     /// mid-flight frame. Fades in as the real glass fades out, and fades out at the
     /// very end as the collapsed island (bare notch) takes over.
     private var liquidCloseLayer: some View {
-        let panel = expandedSize
+        // Prefer the size latched at collapse start (S11): a zoomed Mirror has
+        // already reverted `expandedSize` to standard by the time this renders,
+        // so recomputing it would start the Surface Return from the wrong rect.
+        // `.zero` (every non-mirror close) falls back to the live expandedSize.
+        let panel = state.closePanelSize == .zero ? expandedSize : state.closePanelSize
         let canvasW: CGFloat = panel.width + 2 * LiquidClose.hPad
         let stack: CGFloat = metrics.notchHeight + NotchMetrics.islandGap
             + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
