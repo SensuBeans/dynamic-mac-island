@@ -232,7 +232,7 @@ private struct ServerRow: View {
             .buttonStyle(.plain)
             .help(server.running ? "Stop" : "Start")
 
-            if server.running {
+            if server.running && server.port > 0 {
                 Button { servers.open(server) } label: {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))

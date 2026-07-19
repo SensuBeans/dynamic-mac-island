@@ -89,6 +89,11 @@ final class ServersModel: ObservableObject {
     /// shown/hidden — zero network otherwise.
     func setPolling(_ active: Bool) {
         pollTimer?.invalidate(); pollTimer = nil
+        // Bump the generation so any request already in flight is dropped as
+        // stale by the `gen == generation` guard in its completion. Without this,
+        // a request dispatched just before the tab hid could land afterward, set
+        // reachable=false, and flash "Local Starter isn't running" on re-show.
+        generation += 1
         guard active else { return }
         refresh()   // immediate
         let t = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
@@ -172,6 +177,10 @@ final class ServersModel: ObservableObject {
 
     /// Open the server in the default browser on the same host the Starter uses.
     func open(_ s: Server) {
+        // A "running" entry whose port fell back to 0 has no real URL — building
+        // http://host:0 would silently fail to open with no feedback. Guard here
+        // (the row also hides its open button when port == 0).
+        guard s.port > 0 else { return }
         let host = URL(string: baseString)?.host ?? "localhost"
         if let u = URL(string: "http://\(host):\(s.port)") { NSWorkspace.shared.open(u) }
     }
