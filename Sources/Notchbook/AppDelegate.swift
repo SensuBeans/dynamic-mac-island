@@ -144,7 +144,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 s.height += self.metrics.notchHeight + NotchMetrics.islandGap
                     + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
             } else {
-                s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
+                // LOCKSTEP: the collapsed bar renders off the SETTLED reveal
+                // signal (EarRevealModel), so the hover rect must too.
+                s = self.metrics.collapsedSize(withMedia: self.earReveal.earVisible || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
                                                toast: self.state.toast != nil,
                                                withAgent: self.agentSessions.hasActivePill)
                 x = self.metrics.islandLeadingPad(expanded: false)
