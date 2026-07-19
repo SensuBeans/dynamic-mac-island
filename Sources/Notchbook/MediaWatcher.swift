@@ -439,9 +439,17 @@ final class MediaWatcher: ObservableObject {
         let key = "\(np.source.rawValue)|\(np.title)|\(np.artist)"
         guard key != artworkKey else { return }
         artworkKey = key
+        // ROOT of the stale-artwork cluster (S2): the track just changed, so drop
+        // the previous cover NOW. artwork publishes async (after nowPlaying), and
+        // was never cleared on a change, so every consumer that pairs title+art —
+        // the ear, the toast, the reveal gate — briefly showed the new title over
+        // the old cover. Cleared art (nil until the matching image lands) shows a
+        // placeholder instead of the wrong cover, and the EarRevealModel art-gate
+        // (`art != nil`) now waits for the real art rather than firing on a
+        // lingering previous-track image.
+        artwork = nil
         // Never let an artwork query launch the player app itself.
         guard isRunning(np.source) else {
-            artwork = nil
             return
         }
 
@@ -456,12 +464,25 @@ final class MediaWatcher: ObservableObject {
             // a slow/busy Spotify dropped animation frames. Use the same
             // osascript-off-main path the Music artwork fetch already uses; hop
             // back to main (runScriptAsync delivers there) only to assign.
-            let script = "tell application \"Spotify\" to get artwork url of current track"
-            runScriptAsync(script) { [weak self] urlString in
+            // Read the track NAME alongside the url in one round trip, so we can
+            // verify the art belongs to THIS title (S2). Spotify's scripting can
+            // lag right after a flip and hand back the PREVIOUS track's url; the
+            // Music path guards the same way (returnedName == title).
+            let script = """
+            tell application "Spotify"
+            set _n to name of current track
+            set _u to artwork url of current track
+            return _n & linefeed & _u
+            end tell
+            """
+            runScriptAsync(script) { [weak self] out in
                 guard let self, self.artworkKey == key else { return }  // superseded
-                guard let urlString, let url = URL(string: urlString) else {
-                    // No URL: don't leave the previous track's art stranded under
-                    // the new key — clear the key so the next event refetches.
+                let parts = (out ?? "").components(separatedBy: "\n")
+                guard parts.count >= 2, parts[0] == np.title,
+                      let url = URL(string: parts[1]) else {
+                    // No URL, or the returned name doesn't match (scripting lag):
+                    // don't strand the previous track's art under the new key —
+                    // clear the key so the next event refetches.
                     self.artwork = nil
                     self.artworkKey = nil
                     return

@@ -596,10 +596,18 @@ struct NotchView: View {
         // Content latches: value→value only, so churn-nil ticks and async
         // artwork decodes can never blink the mounted ear row.
         .onChange(of: media.nowPlaying) { np in
-            if let np { lastNowPlaying = np }
+            guard let np else { return }   // keep the last through nil churn ticks
+            // Drop the cached cover when the TRACK changes so `?? lastArtwork`
+            // can't pair a fresh title with the previous track's art (S2). Within
+            // a track (metadata refresh / churn) the cached art is kept — that's
+            // what stops the thumbnail blinking on nil ticks.
+            if np.title != lastNowPlaying?.title || np.artist != lastNowPlaying?.artist {
+                lastArtwork = nil
+            }
+            lastNowPlaying = np
         }
         .onChange(of: media.artwork) { art in
-            if let art { lastArtwork = art }
+            if let art { lastArtwork = art }   // only non-nil: nil churn keeps the last
         }
         // Drive `agentT` (LiquidAgent bud-and-pinch) on the same easeInOutCubic:
         // 0.60 s show / 0.50 s hide, 6× under the debug harness. Keyed on
