@@ -473,7 +473,14 @@ struct NotchView: View {
             .frame(width: expandedSize.width)
             .padding(.top, metrics.notchHeight + gap)
             // Interactivity gated to rest — mid-morph the controls aren't there.
-            .allowsHitTesting(state.isExpanded && renderCloseT < 0.05)
+            // `renderCloseT` here is the @State endpoint (closeT is set to its
+            // target inside withAnimation), not the mid-morph value — the body
+            // can't observe the animation. When open it is pinned at 0, so the
+            // old `renderCloseT < 0.05` term was always true during open; when
+            // closing, collapse() flips isExpanded false up-front so the `&&`
+            // already short-circuits. The term therefore never gated anything —
+            // the gate is exactly state.isExpanded.
+            .allowsHitTesting(state.isExpanded)
             // Pinned = parkable: grab any non-interactive part of the panel or
             // nav capsule and drag the island anywhere (native window drag —
             // buttons/sliders/editors still win the gesture). Unpinning snaps
