@@ -125,6 +125,13 @@ struct NotchView: View {
     /// so the morph targets the exact rest geometry. Persisted so the disappear leg
     /// can still draw after the real label unmounts.
     @State private var agentPillFrame: CGRect = .zero
+    /// The goo's TARGET rest rect, frozen for the duration of a bud/pinch flight
+    /// (S7). `agentPillFrame` is measured live and, while layout is opacity-
+    /// independent, a media-ear toggle mid-flight REFLOWS the row and jumps it —
+    /// re-aiming the flying capsule while the donor side stays pinned
+    /// (agentEarLatch). Re-seeded at each reveal edge, then held until the pill
+    /// settles, so the goo aims at one fixed rect for the whole morph.
+    @State private var agentPillFrameLatch: CGRect = .zero
     /// The last non-nil pill, kept so the disappear flight renders the label/tint
     /// that is melting away (the live `activePill` is already nil by then).
     @State private var lastAgentPill: AgentSessionsModel.CollapsedPill?
@@ -361,14 +368,14 @@ struct NotchView: View {
                 // it MUST live inside the NavTDriven. Drawn above the backing, below
                 // the HStack content, so the real label sharpens in on top at rest.
                 NavTDriven(t: renderAgentT) { e in
-                    if !state.isExpanded, e > 0.02, e < 0.999, agentPillFrame != .zero,
+                    if !state.isExpanded, e > 0.02, e < 0.999, agentPillFrameLatch != .zero,
                        let pill = activePill ?? lastAgentPill {
                         LiquidAgent(t: e,
                                     notchWidth: metrics.notchWidth,
                                     notchHeight: metrics.notchHeight,
                                     earWidth: metrics.mediaEarWidth,
                                     hasEar: agentEarLatch,
-                                    pillRect: agentPillFrame,
+                                    pillRect: agentPillFrameLatch,
                                     glyphCenterX: nil,
                                     countCenterX: nil,
                                     tint: pillTint(pill),
@@ -406,7 +413,15 @@ struct NotchView: View {
             // GeometryReader unmounts and the preference reverts to .zero, which
             // would wipe the rect and leave the NEXT open with no rest target
             // until it re-measures (a late/again goo mount — the double-open).
-            .onPreferenceChange(AgentPillFrameKey.self) { if $0 != .zero { agentPillFrame = $0 } }
+            .onPreferenceChange(AgentPillFrameKey.self) { rect in
+                guard rect != .zero else { return }
+                agentPillFrame = rect
+                // Feed the goo a FROZEN target: seed it once per reveal (when the
+                // reveal edge cleared it to .zero), then only refresh it while the
+                // pill sits at rest. During a flight the last-seeded rect is held,
+                // so a mid-morph row reflow can't re-aim the capsule (S7).
+                if agentSettled || agentPillFrameLatch == .zero { agentPillFrameLatch = rect }
+            }
             // Own its constant collapsed anchor (left edge flush at the notch).
             // Nothing here animates horizontally on expand — the bar just fades
             // IN PLACE, killing the old diagonal drag.
@@ -618,6 +633,11 @@ struct NotchView: View {
             // Latch the donor geometry at the edge — the goo must not re-aim
             // mid-flight if the media ear settles during the bud.
             agentEarLatch = showMediaEar
+            // Re-seed the goo's TARGET rect for this reveal: clearing it makes the
+            // next AgentPillFrameKey measurement (this reveal's rest frame, which
+            // matches the ear state just latched) the frozen target for the whole
+            // flight (S7).
+            if show { agentPillFrameLatch = .zero }
             let base = show ? 0.60 : 0.50
             let dur = base * (liquidAgentDebug ? 6 : 1)
             agentSettled = false   // morph in flight — suppress the label spring
