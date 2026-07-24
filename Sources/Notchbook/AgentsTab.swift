@@ -281,6 +281,10 @@ private struct AgentRow: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(session.cwd)
+        // Right-click anywhere on the row to enable/disable auto-resume — the
+        // reliable, always-there path (no hover, no cap-state guessing) the dim
+        // ⚡ bolt never gave.
+        .contextMenu { autoResumeMenu }
         // Leaving the island (row unmount: collapse / tab switch / re-sort) drops
         // any in-flight "Cancel?" confirm back to the armed pill. The pending work
         // is only an auto-revert now, but cancel it anyway so it can't fire against
@@ -410,6 +414,36 @@ private struct AgentRow: View {
         return "Jump to this session's terminal"
     }
 
+    // MARK: Auto-resume right-click menu
+
+    /// Enable/disable auto-resume for this session. Primary control now — a
+    /// right-click is always available, unlike the hover ⚡ (which only appeared
+    /// on a capped/banner hover and read as a dead glyph). Enabling force-arms via
+    /// the same path as the bolt (`armManually`): it needs a known reset window
+    /// (a live cap or the session's own limit banner), so it's offered only then;
+    /// otherwise the item explains why. Disabling cancels the arm for this window.
+    @ViewBuilder
+    private var autoResumeMenu: some View {
+        if !hostAutoTypeable {
+            Text("Auto-resume needs a Terminal.app or notch session")
+        } else if session.autoResumeArmed || session.autoResumeOptedIn {
+            Button(role: .destructive) { agents.setAutoResume(session.id, enabled: false) } label: {
+                Label("Disable auto-resume", systemImage: "bolt.slash.fill")
+            }
+            if let at = session.autoResumeAt {
+                Text("Resumes at \(Self.clock.string(from: at))")
+            } else {
+                Text("On — resumes when this session hits its limit")
+            }
+        } else {
+            // Always enabled: opting in is remembered and arms the moment a limit
+            // hits, so this is never a dead/greyed item.
+            Button { agents.setAutoResume(session.id, enabled: true) } label: {
+                Label("Enable auto-resume", systemImage: "bolt.fill")
+            }
+        }
+    }
+
     // MARK: Auto-resume chip
 
     /// Auto-resume can only ever fire on a host we can type into.
@@ -438,15 +472,22 @@ private struct AgentRow: View {
                       ? "Tap again to cancel auto-resume — or wait to keep it"
                       : "Auto-resume is on — resumes at \(Self.clock.string(from: fireAt)). Tap to cancel.")
                 .transition(.scale.combined(with: .opacity))
-            } else if hovered, agents.isCapped {
-                // Only surface the affordance when the account is actually at its
-                // ceiling (auto-resume can arm) — otherwise a normal hover shows
-                // no bolt at all.
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(width: 20, height: 22)
-                    .help("Auto-resume — this session limit is hit; it will arm to continue when the window resets")
+            } else if hovered, agents.isCapped || session.hasLimitBanner {
+                // A REAL button now (was a dead display-only glyph). Surfaced when
+                // the account is at its ceiling OR this session is sitting on a
+                // live limit banner — either way a tap arms it to continue when
+                // the window resets. Manual arming bypasses the auto-arm shape/pct
+                // gates, so it works even on a finished session the user wants to
+                // keep going.
+                Button { agents.setAutoResume(session.id, enabled: true) } label: {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Self.amber.opacity(0.8))
+                        .frame(width: 20, height: 22)
+                }
+                .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
+                .help("Enable auto-resume — continue this session when the limit window resets")
             }
         }
     }

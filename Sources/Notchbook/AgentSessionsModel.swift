@@ -87,6 +87,20 @@ struct AgentSession: Identifiable {
     var pid: Int?             // Claude Code process pid (from ~/.claude/sessions)
     var name: String?         // friendly session name ("core-00")
     var autoResumeAt: Date?   // armed auto-resume fire time (nil = not armed / notify-only)
+    /// The session's transcript currently ends on a live 5-hour-limit banner
+    /// (Claude Code's per-session cut-off notice). Gates the hover bolt so the
+    /// manual-arm affordance shows on a genuinely cut-off session even when the
+    /// account-wide usage spool hasn't reflected the cap yet (the frozen-spool
+    /// case that made auto-detection a render-timing lottery).
+    var hasLimitBanner: Bool
+    /// This session currently has a live auto-resume arm (ANY mode — inject or
+    /// notify-only). Drives the row's right-click menu (Enable vs Disable) so the
+    /// toggle is correct even for notify-only hosts, which never set `autoResumeAt`.
+    var autoResumeArmed: Bool
+    /// The user turned auto-resume ON for this session via the row menu (a
+    /// persistent opt-in). Shows "Disable" in the menu even while the opt-in is
+    /// still pending — before a limit has actually armed it.
+    var autoResumeOptedIn: Bool
 
     /// The tool call this row is waiting to approve — name + one-line detail.
     /// Non-nil ONLY on `.waiting` rows (populated in `makeSession`); a working
@@ -205,7 +219,9 @@ final class AgentSessionsModel: ObservableObject {
 
     /// Injected: fire an auto-resume into the island's own built-in terminal
     /// session (host `.notch`). Runs on MAIN (touches `TerminalSessionsModel`).
-    var onNotchResume: ((UUID) -> Void)?
+    /// Returns whether it actually injected — `false` means the tab was gone /
+    /// its shell dead, so the caller toasts notify-only instead of green (H5).
+    var onNotchResume: ((UUID) -> Bool)?
 
     /// Injected: an auto-resume fired. `notify == false` ⇒ resume was injected
     /// (green toast, no sound); `notify == true` ⇒ notify-only host or a
@@ -305,10 +321,20 @@ final class AgentSessionsModel: ObservableObject {
         let sessionId: String
         let pid: Int
         let resetAt: Date
-        let armedEntryTs: Date?
+        /// The transcript's newest-entry ts captured at arm time. `var` because a
+        /// banner that lands AFTER a spool-triggered arm advances the transcript
+        /// clock; the arm must re-stamp this to the post-banner ts or the fire-time
+        /// `sameInstant` guard fails for every real cap (Bug B2).
+        var armedEntryTs: Date?
         let tty: String?
         let host: TerminalHost
-        let mode: ResumeMode
+        /// `var` so a restored `.notch` inject arm (whose tab UUID is stale after a
+        /// relaunch) can be downgraded to notify-only (H4).
+        var mode: ResumeMode
+        /// User armed this via the bolt (F3): fire regardless of transcript shape
+        /// (the user may deliberately resume a finished/end_turn session); only the
+        /// user-took-over `sameInstant` guard still applies.
+        var manual: Bool = false
         /// Backoff clock for transient fire failures (busy / transcript being
         /// rewritten): the arm stays live but its next attempt is deferred to
         /// this instant so a still-busy session doesn't spin the timer. nil ⇒
@@ -337,13 +363,21 @@ final class AgentSessionsModel: ObservableObject {
         let host: TerminalHost
         let tty: String?
         let newestEntryTs: Date?
-        let midTurn: Bool     // assistant last, stop_reason != end_turn (raw parser)
+        let midTurn: Bool     // isResumeWorthy: incomplete turn (raw parser)
         let lastMsgIsAssistant: Bool  // for the skip log's lastMsg=user|end_turn detail
         let status: String?   // process status from the session meta
+        let bannerTs: Date?       // the live limit banner's ts (nil = no banner)
+        let bannerResetText: String?  // the live banner's text, for reset parsing
     }
 
     /// Currently-armed sessions, keyed by sessionId. Touched only on `ioQueue`.
     private var armedResumes: [String: ArmedResume] = [:]
+    /// Sessions the user explicitly turned auto-resume ON for via the row menu — a
+    /// persistent per-session opt-in. An opted-in session arms the moment a reset
+    /// is resolvable (a live cap or its own limit banner), bypassing the cut-off
+    /// SHAPE gate (resume even a finished session) and firing shape-agnostically.
+    /// Survives relaunch; pruned to live sessions each tick. Touched only on ioQueue.
+    private var autoResumeOptIn: Set<String> = []
     /// Consumed `(sessionId, resetAt)` epochs — a fired/cancelled arm never
     /// re-arms for the same reset window (the usage file still reads 100% after
     /// the window reopens and must not re-trigger). Touched only on `ioQueue`.
@@ -411,10 +445,15 @@ final class AgentSessionsModel: ObservableObject {
 
     func shutdown() {
         stopFSEvents()
-        timer?.cancel()
-        timer = nil
-        resumeTimer?.cancel()
-        resumeTimer = nil
+        // Both timers are owned by `ioQueue` (created + mutated there); cancel them
+        // ON that queue so shutdown doesn't race a concurrent rebuild/fire (H8).
+        ioQueue.sync {
+            timer?.cancel()
+            timer = nil
+            resumeTimer?.cancel()
+            resumeTimer = nil
+            resumeTimerDeadline = nil
+        }
     }
 
     /// Raise the Terminal.app tab running this session (host `.terminalApp`;
@@ -629,21 +668,17 @@ final class AgentSessionsModel: ObservableObject {
 
             // Auto-resume detection uses RAW parser flags, never the resolved UI
             // state which the process fold drifts to idle/waiting once capped.
-            // Resume-worthy = the turn is INCOMPLETE, which is either shape:
-            //  • assistant last without end_turn (classic mid-turn), or
-            //  • a USER-role entry last (an unanswered prompt or a tool_result
-            //    awaiting the assistant) — the shape a limit-stopped session
-            //    almost always has, and exactly what the old assistant-only
-            //    predicate rejected: capped sessions logged
-            //    "skip not-midTurn(lastMsg=user)" and never armed (Jul 18).
-            // Arming is only ever evaluated for CAPPED sessions, so a user-last
-            // transcript here always means "reply blocked by the limit".
-            let midTurn = ((p?.lastMsgIsAssistant ?? false) && (p?.lastMsgStopReason != "end_turn"))
-                || !(p?.lastMsgIsAssistant ?? true)
+            // `isResumeWorthy` (single source, shared with the fire-time guard):
+            // the turn is INCOMPLETE — assistant-last without end_turn (classic
+            // mid-turn, incl. the limit banner's stop_sequence), or a USER-role
+            // entry last (an unanswered prompt / a tool_result awaiting the
+            // assistant — the shape a limit-stopped session almost always has).
+            let banner = p?.limitBanner
             resumeCandidates.append(ResumeCandidate(
                 id: id, pid: meta.pid, host: identity.host, tty: identity.tty,
-                newestEntryTs: lastActivity, midTurn: midTurn,
-                lastMsgIsAssistant: p?.lastMsgIsAssistant ?? false, status: meta.status))
+                newestEntryTs: lastActivity, midTurn: p?.isResumeWorthy ?? false,
+                lastMsgIsAssistant: p?.lastMsgIsAssistant ?? false, status: meta.status,
+                bannerTs: banner?.entryTs, bannerResetText: banner?.resetText))
         }
         // Forget state for sessions that closed.
         sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
@@ -665,7 +700,11 @@ final class AgentSessionsModel: ObservableObject {
         // countdown chip (inject mode only — notify-only shows no chip).
         let ordered = built.map { pair -> AgentSession in
             var s = pair.session
-            if let a = armedResumes[s.id], a.mode == .inject { s.autoResumeAt = a.resetAt }
+            if let a = armedResumes[s.id] {
+                s.autoResumeArmed = true
+                if a.mode == .inject { s.autoResumeAt = a.resetAt }   // inject shows the chip
+            }
+            s.autoResumeOptedIn = autoResumeOptIn.contains(s.id)
             return s
         }.sorted {
             if $0.state.sortRank != $1.state.sortRank {
@@ -714,6 +753,10 @@ final class AgentSessionsModel: ObservableObject {
         let liveIDs = Set(candidates.map(\.id))
         // Forget decision history for sessions that closed (bounds the map).
         lastResumeDecision = lastResumeDecision.filter { liveIDs.contains($0.key) }
+        // Prune per-session opt-in to live sessions (a closed session's sid never
+        // returns — a new `claude` gets a fresh sid — so a stale opt-in is dead
+        // weight). Bounds the set + the persisted array.
+        autoResumeOptIn = autoResumeOptIn.filter { liveIDs.contains($0) }
 
         // Settings OFF ⇒ detector inert: drop live arms (do NOT consume epochs, so
         // toggling back ON re-arms), keep the timer honest, done.
@@ -750,60 +793,115 @@ final class AgentSessionsModel: ObservableObject {
             logDecision("epoch-prune dropped=\(epochsBefore - consumedEpochs.count)")
         }
 
-        // Drop arms for sessions that vanished this tick.
+        // Drop arms for sessions that vanished this tick (terminal closed / row
+        // dropped off the live list). LOG it (H9/D): these silent evictions were
+        // where the only fire-capable arms in the feature's history disappeared
+        // without a trace.
         for id in armedResumes.keys where !liveIDs.contains(id) {
             armedResumes.removeValue(forKey: id)
+            lastResumeDecision[id] = nil
+            logDecision("evict session=\(id.prefix(8)) reason=row-vanished")
         }
 
-        // Capped == the 5-hour window at/above 99% AND its reset is still ahead.
-        // A stale spool whose reset already passed must never arm (a past reset is
-        // indistinguishable from old data — the file only refreshes while sessions
-        // run). No cap ⇒ nothing new arms; existing arms keep their own resetAt.
-        let cappedResetAt: Date? = {
-            guard let usage = lastUsage, let resetAt = usage.sessionResetsAt,
-                  (usage.sessionPct ?? 0) >= 99, resetAt > now else { return nil }
-            return resetAt
+        // Spool cap == the 5-hour window at/above 99% AND its reset still ahead.
+        // A stale spool whose reset already passed must never trigger (a past
+        // reset is indistinguishable from old data — the file only refreshes
+        // while sessions run). This is the SECONDARY trigger now: it may arm a
+        // tick before the per-session banner flushes. The banner is primary and
+        // fires even when this is false (the frozen-spool case, Bug A).
+        let spoolCapped: Bool = {
+            guard let u = lastUsage, (u.sessionPct ?? 0) >= 99,
+                  let r = u.sessionResetsAt, r > now else { return false }
+            return true
         }()
 
         for c in candidates {
-            guard let resetAt = cappedResetAt else {
-                // Not capped — nothing arms. Log the pct once per entry into this
-                // state (the pct lives in the LINE, not the dedup KEY, so normal
-                // pct drift doesn't re-log).
+            // Any existing arm is preserved UNCONDITIONALLY — only the fire path,
+            // an explicit cancel, or a row-vanished eviction removes it. Crucially
+            // this includes an arm whose resetAt has just PASSED: at that instant
+            // fireDueResumes is about to fire it (resetAt+grace), and re-resolving
+            // here would re-parse the banner — whose "9:38pm" now rolls a full day
+            // forward because that minute is gone — pushing the fire to tomorrow
+            // before the timer could fire (the 1.5 s tick beats the resetAt+5 s
+            // deadline). That single bug is why a real cap never fired. Also keeps
+            // a MANUAL arm alive after the account cap eases.
+            if let existing = armedResumes[c.id] {
+                let epoch = Int(existing.resetAt.timeIntervalSince1970)
+                // Bug B2 fix: when the banner lands AFTER a spool-triggered arm it
+                // advances the transcript past the ts we stamped, so re-stamp
+                // armedEntryTs to keep the fire-time sameInstant guard matching.
+                // Gated on the banner STILL being live (`c.bannerTs != nil`): a
+                // forward move to a real USER message (the user taking over) is
+                // NOT a banner settle — leaving armedEntryTs put there lets Guard 2
+                // correctly cancel that arm (matrix Row 5), instead of chasing the
+                // user's new entry and firing over them.
+                if c.bannerTs != nil, let newTs = c.newestEntryTs,
+                   let oldTs = existing.armedEntryTs,
+                   newTs.timeIntervalSince(oldTs) > 0.5 {
+                    armedResumes[c.id]?.armedEntryTs = newTs
+                    noteDecision(c.id, key: "rearm|\(epoch)",
+                                 line: "re-arm banner armedTs=\(Self.logStamp.string(from: newTs))")
+                } else {
+                    noteDecision(c.id, key: "armed|\(epoch)",
+                                 line: "armed resetAt=\(Self.logStamp.string(from: existing.resetAt))")
+                }
+                continue
+            }
+
+            // Trigger: the user opted this session in (menu Enable), OR a live limit
+            // banner (per-session ground truth), OR the account spool at its ceiling.
+            // Any arms; the banner path no longer depends on the spool reaching 99%.
+            let optedIn = autoResumeOptIn.contains(c.id)
+            let hasBanner = c.bannerTs != nil
+            guard optedIn || hasBanner || spoolCapped else {
+                // Nothing to arm. Log the pct once per entry into this state (the
+                // pct lives in the LINE, not the dedup KEY, so pct drift doesn't
+                // re-log).
                 noteDecision(c.id, key: "not-capped",
                              line: "skip not-capped(pct=\(lastUsage?.sessionPct ?? 0))")
                 continue
             }
-            // Already armed for THIS epoch — leave it. Armed for an older epoch
-            // (reset window changed) — fall through to re-arm on the new one.
-            if let existing = armedResumes[c.id], existing.resetAt == resetAt {
-                noteDecision(c.id, key: "armed",
-                             line: "armed resetAt=\(Self.logStamp.string(from: resetAt))")
+            guard let resetAt = resolveReset(spool: lastUsage?.sessionResetsAt,
+                                             bannerText: c.bannerResetText, now: now) else {
+                // Opted-in but no limit yet — hold the opt-in and keep checking each
+                // tick; it arms the instant a cap/banner gives a reset time.
+                noteDecision(c.id, key: optedIn ? "optin-pending" : "no-reset",
+                             line: optedIn ? "optin-pending — no limit yet" : "skip no-reset-time")
                 continue
             }
+            // Epoch in the dedup key (H7): a fresh reset window must re-log rather
+            // than be silenced by a stale "armed"/"epoch-consumed" key.
+            let epoch = Int(resetAt.timeIntervalSince1970)
             if consumedEpochs.contains(epochKey(c.id, resetAt)) {
-                noteDecision(c.id, key: "epoch-consumed", line: "skip epoch-consumed")
+                noteDecision(c.id, key: "epoch-consumed|\(epoch)", line: "skip epoch-consumed")
                 continue
             }
             guard let pid = c.pid else {
                 noteDecision(c.id, key: "no-pid", line: "skip no-pid"); continue
             }
-            guard c.midTurn else {
-                // Only reachable for assistant-last end_turn transcripts now —
-                // a genuinely finished conversation has nothing to resume.
-                noteDecision(c.id, key: "not-midTurn", line: "skip not-midTurn(lastMsg=end_turn)")
-                continue
+            // F4: AUTOMATIC arming is cut-off-only — a finished (assistant-last
+            // end_turn) conversation has nothing to resume. An explicit opt-in
+            // OVERRIDES this: the user asked to continue this session regardless.
+            if !optedIn {
+                guard c.midTurn else {
+                    noteDecision(c.id, key: "not-midTurn", line: "skip not-midTurn(lastMsg=end_turn)")
+                    continue
+                }
             }
             let mode: ResumeMode
             switch c.host {
             case .terminalApp, .notch: mode = .inject
             case .other, .none:        mode = .notifyOnly
             }
+            // Opted-in arms fire shape-agnostically (manual: true) — the user's
+            // explicit intent, not a detected cut-off.
             armedResumes[c.id] = ArmedResume(
                 sessionId: c.id, pid: pid, resetAt: resetAt,
-                armedEntryTs: c.newestEntryTs, tty: c.tty, host: c.host, mode: mode)
-            noteDecision(c.id, key: "armed",
+                armedEntryTs: c.newestEntryTs, tty: c.tty, host: c.host,
+                mode: mode, manual: optedIn)
+            noteDecision(c.id, key: "armed|\(epoch)",
                          line: "arm mode=\(mode == .inject ? "inject" : "notify") "
+                             + "via=\(optedIn ? "optin" : hasBanner ? "banner" : "spool") "
                              + "resetAt=\(Self.logStamp.string(from: resetAt))")
         }
         rescheduleResumeTimer()
@@ -826,6 +924,62 @@ final class AgentSessionsModel: ObservableObject {
             self.persistResumeStateIfChanged()
             self.rebuild()   // reflect the dropped chip promptly
         }
+    }
+
+    /// Turn auto-resume ON/OFF for one session from the row's right-click menu — a
+    /// persistent per-session opt-in (survives relaunch). ON: if a reset is
+    /// resolvable right now (a live cap or the session's own limit banner) it arms
+    /// immediately; otherwise the opt-in is remembered and `evaluateArming` arms it
+    /// the moment the session hits its limit — so "Enable" always works, even on a
+    /// session that isn't capped yet. An opted-in arm fires shape-agnostically
+    /// (`manual: true`): the user asked to continue this session, even a finished
+    /// one. OFF: forget the opt-in and cancel any live arm for this window.
+    func setAutoResume(_ sessionId: String, enabled: Bool) {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            if enabled {
+                self.autoResumeOptIn.insert(sessionId)
+                // Drop any prior cancel of this session's windows so re-enabling sticks.
+                self.consumedEpochs = self.consumedEpochs.filter { !$0.hasPrefix("\(sessionId)|") }
+                self.armOptIn(sessionId, now: Date())
+                self.logDecision("optin-enable session=\(sessionId.prefix(8))")
+            } else {
+                self.autoResumeOptIn.remove(sessionId)
+                if let a = self.armedResumes.removeValue(forKey: sessionId) {
+                    self.consumedEpochs.insert(self.epochKey(sessionId, a.resetAt))
+                }
+                self.lastResumeDecision[sessionId] = nil
+                self.logDecision("optin-disable session=\(sessionId.prefix(8))")
+            }
+            self.rescheduleResumeTimer()
+            self.persistResumeStateIfChanged()
+            self.rebuild()   // reflect the chip/menu state promptly
+        }
+    }
+
+    /// Arm an opted-in session right now IF a reset is resolvable; otherwise leave
+    /// it pending (evaluateArming keeps retrying every tick until a limit appears).
+    /// Never toasts — a pending opt-in is a valid, expected state.
+    private func armOptIn(_ sessionId: String, now: Date) {
+        guard armedResumes[sessionId] == nil,
+              let meta = readSessionMetas()[sessionId],
+              let resetAt = resolveReset(spool: lastUsage?.sessionResetsAt,
+                                         bannerText: parser(forID: sessionId)?.limitBanner?.resetText,
+                                         now: now) else { return }
+        let p = parser(forID: sessionId)
+        let identity = resolveIdentity(pid: meta.pid, sid: sessionId)
+        let mode: ResumeMode
+        switch identity.host {
+        case .terminalApp, .notch: mode = .inject
+        case .other, .none:        mode = .notifyOnly
+        }
+        armedResumes[sessionId] = ArmedResume(
+            sessionId: sessionId, pid: meta.pid, resetAt: resetAt,
+            armedEntryTs: p?.newestEntryTs, tty: identity.tty,
+            host: identity.host, mode: mode, manual: true)
+        lastResumeDecision[sessionId] = "armed|\(Int(resetAt.timeIntervalSince1970))"
+        logDecision("arm via=optin mode=\(mode == .inject ? "inject" : "notify") "
+                  + "resetAt=\(Self.logStamp.string(from: resetAt)) session=\(sessionId.prefix(8))")
     }
 
     // MARK: - Auto-resume: firing (ioQueue only)
@@ -853,6 +1007,19 @@ final class AgentSessionsModel: ObservableObject {
     /// Fire every arm whose deadline has arrived. Each is consumed (fired or
     /// silently cancelled) exactly once, then the timer is rescheduled for the rest.
     private func fireDueResumes() {
+        // The one-shot timer that invoked us is now SPENT. Clear it so the
+        // reschedule at the end always installs a fresh timer — otherwise a
+        // clock-skew tick that finds nothing due leaves rescheduleResumeTimer's
+        // dedup matching the spent timer's deadline and never re-arming, so the
+        // arm hangs forever, unfired and unlogged (H2).
+        resumeTimer?.cancel()
+        resumeTimer = nil
+        resumeTimerDeadline = nil
+
+        // Settings may have flipped off since this timer was scheduled (H6) — the
+        // 1.5 s evaluateArming tick owns the actual disarm; here we just don't fire.
+        guard autoResumeEnabled() else { logDecision("fire-skip settings-off"); return }
+
         let now = Date()
         let due = armedResumes.values
             .filter { $0.fireDeadline(grace: resumeGrace) <= now.addingTimeInterval(0.5) }
@@ -896,37 +1063,65 @@ final class AgentSessionsModel: ObservableObject {
     @discardableResult
     private func fireOne(_ a: ArmedResume) -> FireOutcome {
         let sid = a.sessionId.prefix(8)
-        // Guard 1: session file still present, same pid, alive. TERMINAL — a
-        // dead/replaced pid can never satisfy this arm.
-        guard let meta = readSessionMetas()[a.sessionId], meta.pid == a.pid,
-              kill(Int32(a.pid), 0) == 0 else {
+        // Guard 1a: the pid must be alive. Dead/replaced ⇒ TERMINAL — no retry
+        // can revive it.
+        guard kill(Int32(a.pid), 0) == 0 else {
             logDecision("fire-cancel guard-pid session=\(sid)"); return .terminal
+        }
+        // Guard 1b (H1): read the live session file. A missing/torn read WHILE the
+        // pid is alive is a mid-rewrite blip — TRANSIENT, retry (the old code
+        // consumed the epoch here, killing the resume for a whole 5-hour window on
+        // one unlucky read). A file that now names a DIFFERENT pid is a replaced
+        // session — TERMINAL.
+        guard let meta = readSessionMetas()[a.sessionId] else {
+            logDecision("fire-retry guard-meta session=\(sid)"); return .transient
+        }
+        guard meta.pid == a.pid else {
+            logDecision("fire-cancel guard-pid-replaced session=\(sid)"); return .terminal
         }
         // Guard 3: not busy (a just-started manual resume would be busy).
         // TRANSIENT — busy is expected to clear; retry rather than cancel.
         guard meta.status != "busy" else {
             logDecision("fire-retry guard-busy session=\(sid)"); return .transient
         }
-        // Guard 2: transcript untouched since arming AND still mid-turn (a manual
-        // resume writes a user entry — advances newestEntryTs and clears mid-turn).
-        // Tolerance compare, not `==`: `armedEntryTs` round-tripped through the
-        // state file (Date→epoch→Date) can differ from the freshly re-parsed
-        // transcript Date by sub-microseconds; any REAL new entry moves the clock
-        // by seconds, so 0.5 s cleanly separates "untouched" from "moved".
-        // A missing parser is TRANSIENT (the file is momentarily being
-        // rewritten); a transcript that actually MOVED — or a turn that
-        // completed / the user took over — is TERMINAL.
+        // Guard 3b: a session parked at a permission prompt (a Bash/tool approval)
+        // reports status "waiting". Injecting "continue" there does NOT resume it —
+        // the prompt CAPTURES the keystroke, so the input is swallowed (observed
+        // live at the 2026-07-23 cap: two sessions sitting on a Bash prompt never
+        // received the injected continue; the user had to type it after answering
+        // the prompt). Answering the prompt is itself the resume, so don't inject
+        // into (and mangle) it — force notify-only and let the user handle it.
+        let atPrompt = (meta.status == "waiting")
+        let effectiveMode: ResumeMode = atPrompt ? .notifyOnly : a.mode
+        // Guard 2: transcript untouched since arming (F1 stamps the post-banner ts,
+        // so this holds for a real cap now). Tolerance compare, not `==`:
+        // `armedEntryTs` round-tripped through the state file (Date→epoch→Date) can
+        // differ from the freshly re-parsed Date by sub-microseconds; any REAL new
+        // entry moves the clock by seconds, so 0.5 s cleanly separates "untouched"
+        // from "the user took over". A missing parser is TRANSIENT (the file is
+        // momentarily being rewritten); a transcript that MOVED is TERMINAL.
         guard let p = parser(forID: a.sessionId) else {
             logDecision("fire-retry guard-parser session=\(sid)"); return .transient
         }
-        guard sameInstant(p.newestEntryTs, a.armedEntryTs),
-              p.lastMsgIsAssistant, p.lastMsgStopReason != "end_turn" else {
+        guard sameInstant(p.newestEntryTs, a.armedEntryTs) else {
             logDecision("fire-cancel guard-transcript session=\(sid)"); return .terminal
         }
-        // Guard 4: terminal identity re-resolves to the same tty + host. TERMINAL.
-        let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
-        guard identity.tty == a.tty, identity.host == a.host else {
-            logDecision("fire-cancel guard-identity session=\(sid)"); return .terminal
+        // Shape half (F2): the turn must still be resume-worthy — same predicate
+        // arming used, so the two can't disagree (Bug B). MANUAL arms skip this:
+        // the user deliberately chose to resume this session, even a finished one.
+        if !a.manual, !p.isResumeWorthy {
+            logDecision("fire-cancel guard-shape session=\(sid)"); return .terminal
+        }
+        // Guard 4: terminal identity re-resolves to the same tty + host. Only for
+        // INJECT — a notify-only arm (incl. a prompt-parked one forced to notify
+        // above) just toasts, so a drifted tty/host (e.g. a restored .notch arm
+        // whose tab UUID is stale after relaunch, H4) must still surface the
+        // "Limits reset" notification rather than dying silently.
+        if effectiveMode == .inject {
+            let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
+            guard identity.tty == a.tty, identity.host == a.host else {
+                logDecision("fire-cancel guard-identity session=\(sid)"); return .terminal
+            }
         }
 
         let project = meta.cwd.isEmpty
@@ -934,10 +1129,11 @@ final class AgentSessionsModel: ObservableObject {
             : URL(fileURLWithPath: meta.cwd).lastPathComponent
         let name = meta.name
 
-        logDecision("fire mode=\(a.mode == .inject ? "inject" : "notify") "
-                  + "host=\(Self.hostLabel(a.host)) session=\(sid)")
+        logDecision("fire mode=\(effectiveMode == .inject ? "inject" : "notify")"
+                  + (atPrompt ? " reason=waiting-prompt" : "")
+                  + " host=\(Self.hostLabel(a.host)) session=\(sid)")
 
-        switch a.mode {
+        switch effectiveMode {
         case .notifyOnly:
             DispatchQueue.main.async { [weak self] in
                 self?.onResumeFired?(project, name, true)
@@ -946,8 +1142,10 @@ final class AgentSessionsModel: ObservableObject {
             switch a.host {
             case .notch(let sid):
                 DispatchQueue.main.async { [weak self] in
-                    self?.onNotchResume?(sid)
-                    self?.onResumeFired?(project, name, false)
+                    // Notify-only if the built-in tab is gone / its shell dead —
+                    // the resume no-ops there, so don't toast a false green (H5).
+                    let injected = self?.onNotchResume?(sid) ?? false
+                    self?.onResumeFired?(project, name, !injected)
                 }
             case .terminalApp:
                 let pid = a.pid
@@ -988,16 +1186,28 @@ final class AgentSessionsModel: ObservableObject {
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { logDecision("restore none"); return }
         let now = Date()
-        var restored = 0, droppedStale = 0, droppedDead = 0
+        var restored = 0, droppedStale = 0, droppedDead = 0, downgraded = 0
         if let arms = root["armed"] as? [[String: Any]] {
             for d in arms {
-                guard let a = armFromDict(d) else { continue }
+                guard var a = armFromDict(d) else { continue }
                 if a.resetAt.addingTimeInterval(resumeGrace) < now { droppedStale += 1; continue }
                 if kill(Int32(a.pid), 0) != 0 { droppedDead += 1; continue }
+                // H4: a restored `.notch` inject arm can't be re-injected — the
+                // built-in tab is a fresh `UUID()` this launch, so its old sid
+                // never re-matches and Guard 4 would kill the arm silently. Keep
+                // the arm but downgrade to notify-only, so at reset it surfaces the
+                // orange "Limits reset" toast instead of vanishing without a trace.
+                if case .notch = a.host, a.mode == .inject {
+                    a.mode = .notifyOnly
+                    downgraded += 1
+                }
                 armedResumes[a.sessionId] = a
                 restored += 1
             }
         }
+        // Restore the persistent per-session opt-in (menu Enable). Kept as-is —
+        // the next evaluateArming tick prunes any whose session didn't come back.
+        if let optin = root["optin"] as? [String] { autoResumeOptIn = Set(optin) }
         var consumedKept = 0
         if let consumed = root["consumed"] as? [String] {
             for key in consumed {
@@ -1009,7 +1219,7 @@ final class AgentSessionsModel: ObservableObject {
             }
         }
         logDecision("restore armed=\(restored) droppedStale=\(droppedStale) "
-                  + "droppedDead=\(droppedDead) consumed=\(consumedKept)")
+                  + "droppedDead=\(droppedDead) downgraded=\(downgraded) consumed=\(consumedKept)")
         rescheduleResumeTimer()
         persistResumeStateIfChanged()   // rewrite pruned set; seeds the dedup cache
     }
@@ -1021,15 +1231,19 @@ final class AgentSessionsModel: ObservableObject {
     private func persistResumeStateIfChanged() {
         guard let data = serializeResumeState() else { return }
         if data == lastPersistedResumeData { return }
-        lastPersistedResumeData = data
         do {
             try FileManager.default.createDirectory(
                 at: autoResumeSupportDir, withIntermediateDirectories: true)
             try data.write(to: resumeStateURL, options: .atomic)
+            // Cache ONLY after the write actually lands (H3): setting it up-front
+            // meant a single failed write suppressed every later retry of the same
+            // state, so a transiently-unwritable dir lost the arm permanently.
+            lastPersistedResumeData = data
             logDecision("persist armed=\(armedResumes.count) consumed=\(consumedEpochs.count)")
         } catch {
             // Best-effort: a failed write just means this arm won't survive a
-            // relaunch — the in-memory arm still fires normally this run.
+            // relaunch — the in-memory arm still fires normally this run. The
+            // cache stays stale so the next tick retries the write.
         }
     }
 
@@ -1040,7 +1254,8 @@ final class AgentSessionsModel: ObservableObject {
             .sorted { $0.sessionId < $1.sessionId }
             .map { armToDict($0) }
         let consumed = consumedEpochs.sorted()
-        let root: [String: Any] = ["armed": arms, "consumed": consumed]
+        let root: [String: Any] = ["armed": arms, "consumed": consumed,
+                                   "optin": autoResumeOptIn.sorted()]
         return try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
     }
 
@@ -1052,6 +1267,7 @@ final class AgentSessionsModel: ObservableObject {
             "host": hostToDict(a.host),
             "mode": a.mode == .inject ? "inject" : "notifyOnly",
         ]
+        if a.manual { d["manual"] = true }
         if let ts = a.armedEntryTs { d["armedEntryTs"] = ts.timeIntervalSince1970 }
         if let tty = a.tty { d["tty"] = tty }
         return d
@@ -1069,7 +1285,8 @@ final class AgentSessionsModel: ObservableObject {
         return ArmedResume(sessionId: sid, pid: pid,
                            resetAt: Date(timeIntervalSince1970: reset),
                            armedEntryTs: entry, tty: d["tty"] as? String,
-                           host: host, mode: mode)
+                           host: host, mode: mode,
+                           manual: (d["manual"] as? Bool) ?? false)
     }
 
     /// `TerminalHost` ↔ JSON (kept local so persistence doesn't force Codable onto
@@ -1339,8 +1556,8 @@ final class AgentSessionsModel: ObservableObject {
 
         // Newest user/assistant timestamp is the keep-alive clock — sidechain
         // INCLUDED (a subagent burst means the parent is still working).
-        if let tsStr = obj["timestamp"] as? String, let ts = Self.parseDate(tsStr),
-           ts > (p.newestEntryTs ?? .distantPast) {
+        let entryTs = (obj["timestamp"] as? String).flatMap(Self.parseDate)
+        if let ts = entryTs, ts > (p.newestEntryTs ?? .distantPast) {
             p.newestEntryTs = ts
         }
 
@@ -1355,6 +1572,25 @@ final class AgentSessionsModel: ObservableObject {
             p.lastMsgIsAssistant = true
             p.lastMsgIsInterrupt = false
             p.lastMsgStopReason = message["stop_reason"] as? String   // nil = streaming
+
+            // 5-hour-limit banner: a `stop_sequence` assistant turn whose text
+            // opens with the limit notice. This is the moment the cap actually
+            // cut the session off, announced per-session with its reset time —
+            // what auto-resume arms on (see F1). Match loosely (prefix +
+            // stop_sequence) so a wording tweak doesn't silently break it; the
+            // same notice can appear inside a subagent's relayed error text, so
+            // requiring the top-level assistant `stop_reason` is what keeps this
+            // from false-firing on that noise. Set/clear on EVERY assistant turn
+            // so a later real turn supersedes a stale banner.
+            if p.lastMsgStopReason == "stop_sequence",
+               let text = Self.firstText(message["content"]),
+               text.hasPrefix(Self.limitBannerPrefix) {
+                p.lastMsgIsLimitBanner = true
+                p.limitBannerTs = entryTs ?? p.newestEntryTs
+                p.limitBannerResetText = text
+            } else {
+                p.lastMsgIsLimitBanner = false
+            }
 
             if let usage = message["usage"] as? [String: Any] {
                 let input = usage["input_tokens"] as? Int ?? 0
@@ -1393,6 +1629,7 @@ final class AgentSessionsModel: ObservableObject {
             p.lastMsgIsAssistant = false
             p.lastMsgStopReason = nil
             p.lastMsgIsInterrupt = Self.isInterrupt(message["content"])
+            p.lastMsgIsLimitBanner = false   // a user entry supersedes any banner
 
             // A tool_result answering the pending call clears the preview.
             if let blocks = message["content"] as? [[String: Any]] {
@@ -1429,6 +1666,80 @@ final class AgentSessionsModel: ObservableObject {
         default:
             return ""
         }
+    }
+
+    // MARK: - Limit-banner parsing (auto-resume detection)
+
+    /// Loose prefix the 5-hour-limit banner opens with. Matched against the
+    /// top-level assistant `stop_sequence` text only (see `parse`), so the same
+    /// notice relayed inside a subagent error can't false-trigger arming.
+    private static let limitBannerPrefix = "You've hit your session limit"
+
+    /// The first text block of an assistant/user `content`, trimmed — an array of
+    /// `{type:"text", text:…}` blocks, or a plain string. nil if none.
+    private static func firstText(_ content: Any?) -> String? {
+        if let s = content as? String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        if let arr = content as? [Any] {
+            for case let item as [String: Any] in arr where (item["type"] as? String) == "text" {
+                if let t = item["text"] as? String {
+                    let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty { return trimmed }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Parse the reset instant out of a banner's text — "resets 1:10pm
+    /// (America/Los_Angeles)". The time is a wall-clock time-of-day in the named
+    /// zone; a 5-hour reset is always ahead, so if today's instance already
+    /// passed (e.g. an "11:59pm" reset read just after midnight) roll it to
+    /// tomorrow. nil if the text has no parseable "resets …" clause / bad zone.
+    private static func parseBannerReset(_ text: String, now: Date) -> Date? {
+        let ns = text as NSString
+        guard let m = bannerResetRegex.firstMatch(
+                in: text, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges == 5,
+              var hour = Int(ns.substring(with: m.range(at: 1))),
+              let minute = Int(ns.substring(with: m.range(at: 2))),
+              let tz = TimeZone(identifier: ns.substring(with: m.range(at: 4)))
+        else { return nil }
+        let ap = ns.substring(with: m.range(at: 3)).lowercased()
+        if ap == "pm", hour != 12 { hour += 12 }
+        if ap == "am", hour == 12 { hour = 0 }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        var comps = cal.dateComponents([.year, .month, .day], from: now)
+        comps.hour = hour; comps.minute = minute; comps.second = 0
+        guard let candidate = cal.date(from: comps) else { return nil }
+        if candidate > now { return candidate }
+        return cal.date(byAdding: .day, value: 1, to: candidate)
+    }
+    private static let bannerResetRegex = try! NSRegularExpression(
+        pattern: #"resets\s+(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)"#,
+        options: [.caseInsensitive])
+
+    /// Resolve a session's auto-resume fire instant, in the F1 order:
+    ///   1. the usage spool's `sessionResetsAt` when it's in the future —
+    ///      cross-validated against the banner text (±10 min) when both parse, so
+    ///      a stale/garbled spool can't override a ground-truth banner;
+    ///   2. the banner text's own parsed reset time.
+    /// nil ⇒ no trustworthy reset instant (nothing to arm / fire on).
+    private func resolveReset(spool: Date?, bannerText: String?, now: Date) -> Date? {
+        let bannerDate = bannerText.flatMap { Self.parseBannerReset($0, now: now) }
+        if let s = spool, s > now {
+            if let b = bannerDate {
+                // Agree within 10 min ⇒ trust the spool; disagree ⇒ the banner is
+                // the per-session ground truth, so it wins.
+                return abs(b.timeIntervalSince(s)) <= 600 ? s : b
+            }
+            return s
+        }
+        if let b = bannerDate, b > now { return b }
+        return nil
     }
 
     /// Interrupt marker: an array item {type:"text", text:"[Request interrupted..."}
@@ -1535,6 +1846,9 @@ final class AgentSessionsModel: ObservableObject {
             pid: meta?.pid,
             name: meta?.name,
             autoResumeAt: nil,
+            hasLimitBanner: p?.limitBanner != nil,
+            autoResumeArmed: false,
+            autoResumeOptedIn: false,
             // Approve preview: what this waiting row is being asked to approve.
             // Sourced from the PreToolUse-hook spool — the ONLY thing that holds
             // the pending call while the prompt is up (the transcript doesn't
@@ -1691,6 +2005,37 @@ private final class FileParser {
     var lastMsgStopReason: String?
     var lastMsgIsInterrupt = false
 
+    // 5-hour-limit banner tracking. When Claude Code stops a turn at the account
+    // cap it appends a `stop_sequence` assistant message whose text opens with
+    // the limit notice ("You've hit your session limit · resets …"). That entry
+    // is the per-session, ground-truth cut-off signal — the thing auto-resume
+    // arms on now, instead of the render-timing-lottery usage spool. The flag is
+    // TRUE only while that banner is the transcript's newest user/assistant
+    // message (a later real turn — or a manual resume's user entry — clears it).
+    var lastMsgIsLimitBanner = false
+    var limitBannerTs: Date?          // the banner entry's own timestamp
+    var limitBannerResetText: String? // the banner's full text (carries "resets …")
+
+    /// The live limit banner, if the transcript currently ends on one. `entryTs`
+    /// is the banner entry's timestamp; `resetText` its full text (parsed for the
+    /// reset time in `evaluateArming`). nil once a newer message supersedes it.
+    var limitBanner: (entryTs: Date, resetText: String)? {
+        guard lastMsgIsLimitBanner, let ts = limitBannerTs, let txt = limitBannerResetText
+        else { return nil }
+        return (ts, txt)
+    }
+
+    /// Resume-worthy transcript shape: an INCOMPLETE turn — either assistant-last
+    /// that didn't cleanly finish (tool_use / streaming / the limit banner's
+    /// `stop_sequence`), or a user-role entry last (an unanswered prompt or a
+    /// tool_result still awaiting the assistant). Assistant-last `end_turn` is the
+    /// one finished shape that is NOT resume-worthy. Single source shared by
+    /// arming (`ResumeCandidate.midTurn`) and the fire-time Guard 2, so the two
+    /// can never disagree (Bug B).
+    var isResumeWorthy: Bool {
+        (lastMsgIsAssistant && lastMsgStopReason != "end_turn") || !lastMsgIsAssistant
+    }
+
     // Pending tool call (for the Approve preview). The last assistant `tool_use`
     // block whose id has not yet been answered by a `tool_result`. A session
     // parked at a permission prompt is exactly this shape: the assistant turn
@@ -1733,6 +2078,9 @@ private final class FileParser {
         lastMsgIsAssistant = false
         lastMsgStopReason = nil
         lastMsgIsInterrupt = false
+        lastMsgIsLimitBanner = false
+        limitBannerTs = nil
+        limitBannerResetText = nil
         pendingToolID = nil
         pendingToolName = ""
         pendingToolDetail = ""

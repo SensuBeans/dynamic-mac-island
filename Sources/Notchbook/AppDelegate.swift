@@ -307,7 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         agentSessions.onNotchResume = { [weak self] sid in
-            self?.terminalSessions.resume(id: sid)
+            self?.terminalSessions.resume(id: sid) ?? false
         }
         agentSessions.onResumeFired = { [weak self] project, name, notify in
             guard let self else { return }

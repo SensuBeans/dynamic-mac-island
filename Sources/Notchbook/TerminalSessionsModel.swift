@@ -71,9 +71,14 @@ final class TerminalSessionsModel: ObservableObject {
     /// usage-limit reset: clear any half-typed line (Ctrl-U, `\u{15}`) then type
     /// `continue` + Return straight to the PTY. The clear rides in the same write
     /// so a leftover partial prompt is never submitted as `<partial>continue`.
-    func resume(id: UUID) {
-        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return }
+    /// Returns whether it actually injected — `false` when the session is gone or
+    /// its shell has died, so the caller can toast notify-only instead of a false
+    /// green "Resumed" (H5).
+    @discardableResult
+    func resume(id: UUID) -> Bool {
+        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return false }
         session.view.send(txt: "\u{15}continue\r")
+        return true
     }
 
     /// Terminate a session's shell and drop it, reselecting a neighbour.
