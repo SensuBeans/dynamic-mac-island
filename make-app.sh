@@ -11,6 +11,13 @@ mkdir -p "$APP/Contents/MacOS"
 
 cp .build/release/Notchbook "$APP/Contents/MacOS/Notchbook"
 
+# App icon. Regenerate with:  swift tools-makeicon.swift AppIcon.iconset \
+#   && iconutil -c icns AppIcon.iconset -o AppIcon.icns && rm -rf AppIcon.iconset
+if [[ -f AppIcon.icns ]]; then
+    mkdir -p "$APP/Contents/Resources"
+    cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -19,6 +26,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key><string>com.sensubeans.notchbook</string>
     <key>CFBundleName</key><string>Dynamic Island</string>
     <key>CFBundleExecutable</key><string>Notchbook</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>
