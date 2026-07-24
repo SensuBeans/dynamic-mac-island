@@ -21,7 +21,6 @@ struct ServersTab: View {
     /// and springing it cap→120→real). Report nil until the state is known AND
     /// both readers have reported.
     private var naturalHeight: CGFloat? {
-        if servers.loaded, !servers.reachable { return 140 }
         if servers.loaded, servers.servers.isEmpty { return 150 }
         guard servers.loaded, headerH > 0, listH > 0 else { return nil }
         return headerH + 8 + listH
@@ -29,20 +28,16 @@ struct ServersTab: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            if servers.loaded, !servers.reachable {
-                unreachable
+            header
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { headerH = g.size.height }
+                        .onChange(of: g.size.height) { headerH = $0 }
+                })
+            if servers.loaded, servers.servers.isEmpty {
+                emptyState("No servers yet — tap ＋ to add a folder")
             } else {
-                header
-                    .background(GeometryReader { g in
-                        Color.clear
-                            .onAppear { headerH = g.size.height }
-                            .onChange(of: g.size.height) { headerH = $0 }
-                    })
-                if servers.loaded, servers.servers.isEmpty {
-                    emptyState("No servers yet — tap ＋ to add a folder")
-                } else {
-                    list
-                }
+                list
             }
         }
         .preference(key: TabHugHeightKey.self, value: naturalHeight)
@@ -131,28 +126,6 @@ struct ServersTab: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private var unreachable: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "bolt.horizontal.circle")
-                .font(.system(size: 26))
-                .foregroundStyle(.white.opacity(0.25))
-            Text("Local Starter isn't running")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
-            Button { servers.launchStarter() } label: {
-                Text("Launch Starter")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(.orange))
-                    .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 
     private func emptyState(_ text: String) -> some View {
         VStack(spacing: 10) {

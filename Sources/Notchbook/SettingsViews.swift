@@ -354,23 +354,25 @@ struct SettingsDetailPage: View {
 // MARK: Servers settings
 
 private struct ServersSettings: View {
-    // Shared with ServersModel (UserDefaults.standard); overriding the URL lets
-    // you point the tab at a dead port to exercise the "isn't running" state.
-    @AppStorage("servers.baseURL") private var baseURL = "http://localhost:7780"
+    // The launcher runs in-process now (see LocalStarter) — there is no daemon
+    // and no URL to point at, so this page just shows where it reads and writes.
     var body: some View {
-        SettingRow(label: "Local Starter URL") {
-            TextField("http://localhost:7780", text: $baseURL)
-                .textFieldStyle(.plain)
+        SettingRow(label: "Projects folder") {
+            Text(LocalStarter.coreDir)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.trailing)
-                .frame(width: 190)
+                .foregroundStyle(.white.opacity(0.7))
+                .lineLimit(1).truncationMode(.head)
+                .frame(width: 190, alignment: .trailing)
         }
-        SettingRow(label: "Reset to default") {
-            Button("localhost:7780") { baseURL = "http://localhost:7780" }
-                .buttonStyle(.plain)
-                .font(.system(size: 11))
-                .foregroundStyle(.orange)
+        SettingRow(label: "Registry & logs") {
+            Button("Reveal in Finder") {
+                NSWorkspace.shared.selectFile(
+                    LocalStarter.registryURL.path,
+                    inFileViewerRootedAtPath: LocalStarter.stateDir)
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11))
+            .foregroundStyle(.orange)
         }
     }
 }

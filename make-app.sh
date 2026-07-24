@@ -11,12 +11,17 @@ mkdir -p "$APP/Contents/MacOS"
 
 cp .build/release/Notchbook "$APP/Contents/MacOS/Notchbook"
 
+mkdir -p "$APP/Contents/Resources"
+
 # App icon. Regenerate with:  swift tools-makeicon.swift AppIcon.iconset \
 #   && iconutil -c icns AppIcon.iconset -o AppIcon.icns && rm -rf AppIcon.iconset
 if [[ -f AppIcon.icns ]]; then
-    mkdir -p "$APP/Contents/Resources"
     cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 fi
+
+# Static file server for the Servers tab, spawned as a detached child by
+# LocalStarter. Without it, "static" entries cannot start.
+cp Resources/_serve.py "$APP/Contents/Resources/_serve.py"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
