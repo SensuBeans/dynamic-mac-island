@@ -59,6 +59,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return "?"
     }
+
+    // MARK: Fullscreen detection (hide collapsed adornments over fullscreen)
+
+    /// True while a fullscreen Space is frontmost on the notch panel's own screen.
+    /// No permissions needed. See opus-fullscreen-hide.md ("Detector v2").
+    ///
+    /// Detector v1 (match a layer-0 window to the full screen frame) CANNOT WORK on
+    /// a notched Mac: Chrome/YouTube fullscreen bounds are (0,33 W×visibleH) — the
+    /// content stops BELOW the notch strip — which is byte-identical to a *maximized*
+    /// (non-fullscreen) window over visibleFrame. Layer-0 geometry is fundamentally
+    /// ambiguous, so tolerance tweaks are futile (ground-truthed on this machine).
+    ///
+    /// The reliable signal: while a fullscreen Space is frontmost, the Dock owns an
+    /// on-screen "Fullscreen Backdrop" window (deep-negative layer) whose bounds equal
+    /// the FULL screen frame. It's absent on the desktop. Backdrops from OTHER spaces
+    /// appear mid-Space-slide at offset x — the bounds==THIS-screen's-frame gate drops
+    /// those. The old layer-0 exact-full-frame match is kept as a cheap secondary OR
+    /// for apps that truly cover the notch.
+    ///
+    /// v3 (name-free): `kCGWindowName` is NOT readable from this app process (no
+    /// Screen-Recording permission), so the v2 `name == "Fullscreen Backdrop"` test
+    /// never matched in-app. Layers ARE always readable. On the DESKTOP the Dock owns
+    /// exactly ONE deep-negative-layer window covering the screen (the wallpaper,
+    /// layer -2147483624); on a FULLSCREEN Space it owns TWO (wallpaper + the
+    /// backdrop at -2147483622). So: count Dock windows covering this screen's full
+    /// frame in the deep-negative band; ≥2 ⇒ fullscreen. The name test is kept only
+    /// as a fast path for the day the app ever gains the permission.
+    ///
+    /// `(signal, deepCount)` — the signal (if any) says the notch screen is showing a
+    /// fullscreen Space: `"backdrop"`, `"layer0"`, or nil. deepCount (Dock deep-layer
+    /// is surfaced so fsLog can print it and make the next live test self-diagnosing.
+    private func detect() -> (String?, Int) {
+        guard let screen = panel?.screen ?? NSScreen.main else { return (nil, 0) }
+        // CGWindow bounds are global TOP-LEFT origin; NSScreen.frame is global
+        // BOTTOM-LEFT. Flip about the PRIMARY display's height (origin 0,0) — the
+        // classic multi-display coordinate bug lives here.
+        let primaryH = (NSScreen.screens.first { $0.frame.origin == .zero }
+                        ?? NSScreen.screens.first)?.frame.height ?? screen.frame.height
+        let f = screen.frame
+        let want = CGRect(x: f.origin.x, y: primaryH - f.maxY,
+                          width: f.width, height: f.height)
+        let mine = ProcessInfo.processInfo.processIdentifier
+        // The backdrop lives among desktop elements, so DON'T exclude them (v1's mask
+        // filtered out the very signal we need).
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
+        else { return (nil, 0) }
+        let tol: CGFloat = 2
+        func coversScreen(_ w: [String: Any]) -> Bool {
+            guard let bDict = w[kCGWindowBounds as String] as? NSDictionary,
+                  let b = CGRect(dictionaryRepresentation: bDict) else { return false }
+            return abs(b.minX - want.minX) <= tol && abs(b.minY - want.minY) <= tol
+                && abs(b.width - want.width) <= tol && abs(b.height - want.height) <= tol
+        }
+        // Primary: Dock-owned deep-negative-layer windows covering THIS screen's full
+        // frame. The deep band (< -1,000,000) excludes normal Dock UI (layers 18/20/25
+        // in the probe). Desktop = 1 (wallpaper); fullscreen = 2 (wallpaper + backdrop).
+        var deep = 0
+        var namedBackdrop = false
+        for w in info where (w[kCGWindowOwnerName as String] as? String) == "Dock" {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer < -1_000_000,
+                  coversScreen(w) else { continue }
+            deep += 1
+            if (w[kCGWindowName as String] as? String) == "Fullscreen Backdrop" {
+                namedBackdrop = true   // fast path if the app ever gains the permission
+            }
+        }
+        if namedBackdrop || deep >= 2 { return ("backdrop", deep) }
+        // Secondary: a foreign layer-0 window that truly covers the WHOLE frame
+        // (notch strip included). Deliberately NOT a visibleFrame-shaped match —
+        // that would false-positive on maximized windows (per the ground truth).
+        for w in info {
+            guard (w[kCGWindowLayer as String] as? Int) == 0 else { continue }
+            if let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid_t(mine) == pid { continue }
+            if coversScreen(w) { return ("layer0", deep) }
+        }
+        return (nil, deep)
+    }
+
+    /// Re-run the detector and publish to `state.frontmostIsFullscreen` ONLY on an
+    /// actual value change (no re-render churn every poll tick). `-FullscreenHideForce`
+    /// pins it true so hiding can be eyeballed without entering fullscreen.
+    private func refreshFullscreenState(_ reason: String) {
+        let forced = UserDefaults.standard.bool(forKey: "FullscreenHideForce")
+        // The window sweep runs every tick (it must — the signal changes with the
+        // frontmost Space). Force short-circuits it; otherwise detect() decides.
+        let (rawSignal, deep) = forced ? ("force", 0) : detect()
+        let signal = forced ? "force" : rawSignal
+        let detected = signal != nil
+        fsLog("decide=\(detected) signal=\(signal ?? "none") deep=\(deep) forced=\(forced) reason=\(reason) published=\(state.frontmostIsFullscreen)")
+        guard state.frontmostIsFullscreen != detected else { return }
+        state.frontmostIsFullscreen = detected
+        fsLog("PUBLISH frontmostIsFullscreen -> \(detected)")
+    }
+
+    /// `-FullscreenHideDebug`: append one line per detector decision to a readable
+    /// file (macOS 26 redacts NSLog args in the unified log, so file logging only).
+    private func fsLog(_ msg: String) {
+        guard UserDefaults.standard.bool(forKey: "FullscreenHideDebug") else { return }
+        let line = "\(Self.fsLogStamp.string(from: Date())) \(msg)\n"
+        let url = URL(fileURLWithPath: "/tmp/notch-fullscreen.log")
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = try? FileHandle(forWritingTo: url) {
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+    private static let fsLogStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
     /// Block-observer tokens auto-unregister on dealloc — must be retained.
     private var observerTokens: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
@@ -398,6 +513,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.spaceWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+            // Entering/leaving fullscreen always switches Spaces — re-check now
+            // and again after the new Space's windows have settled (the poll is
+            // the ultimate safety net if both fire before the switch lands).
+            self.refreshFullscreenState("space-change")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.refreshFullscreenState("space-change+0.6")
+            }
+        })
+
+        // A plain app activation (⌘-Tab into a fullscreen app, etc.) can flip the
+        // fullscreen state without a Space change on some paths — re-check on it too.
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshFullscreenState("app-activate")
         })
 
         // Belt-and-suspenders hover: tracking areas can stop delivering in
@@ -432,6 +563,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // baseline, which would fire one spurious blink when permission lands).
         spacePoll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
+            // Safety-net fullscreen re-check (publishes only on real change).
+            self.refreshFullscreenState("poll")
             let wallpaper = self.currentWallpaperID()
             guard wallpaper != "?" else { return }
             if self.lastWallpaper.isEmpty {
@@ -448,6 +581,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         spacePoll?.tolerance = 0.1
+
+        // Seed the fullscreen state at launch (honors -FullscreenHideForce for V2).
+        refreshFullscreenState("startup")
     }
 
     private func setupToasts() {

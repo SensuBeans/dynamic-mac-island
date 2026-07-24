@@ -290,6 +290,10 @@ struct SettingsGeneralPage: View {
                        help: "Off: click the notch to open") {
                 SettingSwitch(isOn: $settings.hoverToExpand)
             }
+            SettingRow(label: "Hide in fullscreen",
+                       help: "Hide the ears, pill, and toasts while a fullscreen app is up") {
+                SettingSwitch(isOn: $settings.hideInFullscreen)
+            }
             SettingRow(label: "Expand delay") {
                 SettingSegmented(selection: $settings.expandDelay,
                                  options: [("Instant", 0.0), ("0.2s", 0.2), ("0.5s", 0.5)])

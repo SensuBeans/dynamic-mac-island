@@ -164,7 +164,7 @@ struct NotchView: View {
     /// doesn't re-fire on every expand/collapse — only on real appear/disappear
     /// and the toast handoff (toast owns the slot, so the pill melts away for it).
     private var showAgentPill: Bool {
-        activePill != nil && state.toast == nil
+        activePill != nil && state.toast == nil && !fullscreenHidden
     }
     /// Tint for a pill state (matches AgentPillLabel).
     private func pillTint(_ pill: AgentSessionsModel.CollapsedPill) -> Color {
@@ -208,8 +208,19 @@ struct NotchView: View {
     /// the collapsed container's own opacity hides it on expand. Under
     /// `-LiquidIslandDebug` the auto-loop drives it via a forced flag (no player).
     private var showMediaEar: Bool {
+        if fullscreenHidden { return false }
         if liquidIslandDebug { return state.liquidEarDebugForced }
         return earReveal.earVisible
+    }
+
+    /// A native-fullscreen app owns the notch's screen AND the user wants the
+    /// collapsed adornments hidden there. ANDed into the collapsed choke points
+    /// (showMediaEar / hasMedia / showAgentPill / toast) so entering fullscreen
+    /// drives them false→true through the existing liquid `.onChange` animators,
+    /// and leaving restores them. Only ever bites while collapsed — the collapsed
+    /// layer is already opacity-0 while expanded — so hover-to-expand is untouched.
+    private var fullscreenHidden: Bool {
+        state.frontmostIsFullscreen && settings.hideInFullscreen
     }
 
     /// Smoothstep a→b at x, clamped (the mock's `smooth`, for view-level windows).
@@ -278,9 +289,11 @@ struct NotchView: View {
         // the state settled: the original "activates and animates twice",
         // present since before every debounce patch. One signal, one reveal.
         // (The pomodoro countdown ear keeps its plain fade, as before.)
-        let hasMedia = showMediaEar
-            || (pomodoro.isRunning && settings.timerCountdownEar)
-        let hasToast = state.toast != nil
+        // `!fullscreenHidden` gates the pomodoro-countdown term too (showMediaEar
+        // already carries it); one flag suppresses every collapsed adornment.
+        let hasMedia = !fullscreenHidden
+            && (showMediaEar || (pomodoro.isRunning && settings.timerCountdownEar))
+        let hasToast = state.toast != nil && !fullscreenHidden
         let hasAgent = agentSessions.hasActivePill
         let expandedSize = expandedSize
         let size = state.isExpanded
@@ -821,6 +834,7 @@ struct NotchView: View {
         return Group {
             if pomodoro.isRunning, settings.timerCountdownEar,
                       !mediaEarMounted,
+                      !fullscreenHidden,
                       !state.isExpanded {
                 // Live countdown while the pomodoro runs.
                 HStack(spacing: 5) {
@@ -913,7 +927,7 @@ struct NotchView: View {
     /// outboard slot as the agent pill (which hides while a toast is up).
     private var toastCapsule: some View {
         Group {
-            if let toast = state.toast, !state.isExpanded {
+            if let toast = state.toast, !state.isExpanded, !fullscreenHidden {
                 HStack(spacing: 7) {
                     // Latched art (value→value): a churn-nil or late decode
                     // must not swap the capsule's leading image mid-display.

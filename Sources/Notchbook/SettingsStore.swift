@@ -19,6 +19,9 @@ final class SettingsStore: ObservableObject {
 
     // MARK: General
     @Published var hoverToExpand: Bool { didSet { set(hoverToExpand, "general.hoverToExpand") } }
+    /// Hide every collapsed adornment (ears, agent pill, toasts) while a native-
+    /// fullscreen app covers the notch panel's screen. Hover-to-expand still works.
+    @Published var hideInFullscreen: Bool { didSet { set(hideInFullscreen, "general.hideInFullscreen") } }
     /// Nav bar docks under the notch (false) or hangs below the panel (true★).
     /// The liquid morph runs mirrored in bottom mode — same choreography.
     @Published var navAtBottom: Bool { didSet { set(navAtBottom, "general.navAtBottom") } }
@@ -106,6 +109,7 @@ final class SettingsStore: ObservableObject {
         // exactly like today. `object(forKey:)` below then always resolves.
         defaults.register(defaults: [
             "general.hoverToExpand": true,
+            "general.hideInFullscreen": true,
             "general.navAtBottom": true,   // user-chosen default (Jul 18)
             "general.expandDelay": 0.0,
             "general.haptics": true,
@@ -150,6 +154,7 @@ final class SettingsStore: ObservableObject {
         ])
 
         hoverToExpand = defaults.bool(forKey: "general.hoverToExpand")
+        hideInFullscreen = defaults.bool(forKey: "general.hideInFullscreen")
         navAtBottom = defaults.bool(forKey: "general.navAtBottom")
         expandDelay = defaults.double(forKey: "general.expandDelay")
         haptics = defaults.bool(forKey: "general.haptics")

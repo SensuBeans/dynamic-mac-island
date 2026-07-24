@@ -148,6 +148,12 @@ final class NotchState: ObservableObject {
     @Published var tabSwipeProgress: CGFloat = 0
     /// Hidden entirely while the user swipes between Spaces.
     @Published var spaceTransitioning = false
+    /// A native-fullscreen window (from any app) is covering the notch panel's
+    /// own screen. Set by AppDelegate's fullscreen detector; when combined with
+    /// the `hideInFullscreen` setting it suppresses every collapsed adornment
+    /// (media ear, agent pill, pomodoro ear, toasts) so nothing paints over
+    /// fullscreen video. Hover-to-expand is unaffected. See opus-fullscreen-hide.md.
+    @Published var frontmostIsFullscreen = false
     /// A popped-up NSMenu (sound output picker) is tracking — the mouse-away
     /// watcher must not collapse the panel out from under it. Not @Published:
     /// only the AppKit watcher reads it.
