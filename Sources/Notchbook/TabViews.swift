@@ -401,33 +401,36 @@ struct MediaTab: View {
     }
 
     private var placeholder: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "music.note")
-                .font(.system(size: 26))
-                .foregroundStyle(.white.opacity(0.25))
+        // The launch button row is the anchor: it sits at the vertical center
+        // of the tab's content area (the maxHeight fill centers the row's
+        // intrinsic frame). The caption floats directly above it via an
+        // overlay whose own height drives the offset, so the 14 pt gap holds
+        // no matter how the panel height shifts.
+        HStack(spacing: 10) {
+            LaunchButton(icon: "music.note", label: "Music") {
+                media.launchAndPlay(.music)
+            }
+            if FileManager.default.fileExists(atPath: "/Applications/Spotify.app") {
+                LaunchButton(icon: "waveform", label: "Spotify") {
+                    media.launchAndPlay(.spotify)
+                }
+            }
+            LaunchButton(icon: "play.rectangle.fill", label: "YouTube") {
+                if let url = URL(string: "https://www.youtube.com") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+        .overlay(alignment: .top) {
             Text("Nothing Playing")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.6))
-            HStack(spacing: 10) {
-                LaunchButton(icon: "music.note", label: "Music") {
-                    media.launchAndPlay(.music)
-                }
-                if FileManager.default.fileExists(atPath: "/Applications/Spotify.app") {
-                    LaunchButton(icon: "waveform", label: "Spotify") {
-                        media.launchAndPlay(.spotify)
-                    }
-                }
-                LaunchButton(icon: "play.rectangle.fill", label: "YouTube") {
-                    if let url = URL(string: "https://www.youtube.com") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-            }
-            .padding(.top, 4)
-            Spacer()
+                // Park the caption 14 pt above the button row — matching the
+                // old 10 pt VStack gap + 4 pt top padding — measured from its
+                // own bottom edge so it never overlaps the buttons.
+                .alignmentGuide(.top) { dims in dims.height + 14 }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var artwork: some View {
@@ -1381,7 +1384,9 @@ struct MirrorTab: View {
                     .buttonStyle(.plain)
                     .padding(8)
                 }
-        } else {
+        } else if mirror.denied || mirror.unavailable {
+            // Error states have no button to anchor on, so keep the icon +
+            // message centered between spacers as before.
             VStack(spacing: 10) {
                 Spacer()
                 Image(systemName: "web.camera")
@@ -1392,28 +1397,37 @@ struct MirrorTab: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.45))
                         .multilineTextAlignment(.center)
-                } else if mirror.unavailable {
+                } else {
                     Text("No camera available")
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.45))
                         .multilineTextAlignment(.center)
-                } else {
-                    Text("Check yourself before a call")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Button { mirror.start() } label: {
-                        Text("Show Mirror")
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(.orange))
-                            .foregroundStyle(.black)
-                    }
-                    .buttonStyle(.plain)
                 }
                 Spacer()
             }
             .frame(maxWidth: .infinity)
+        } else {
+            // Same composition as the media tab's placeholder: the "Show
+            // Mirror" button is the anchor, centered in the content area, with
+            // the caption floating 14 pt above it (its own height drives the
+            // offset). The web.camera icon is dropped — at the panel's real
+            // height it clipped past the top edge.
+            Button { mirror.start() } label: {
+                Text("Show Mirror")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(.orange))
+                    .foregroundStyle(.black)
+            }
+            .buttonStyle(.plain)
+            .overlay(alignment: .top) {
+                Text("Check yourself before a call")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .alignmentGuide(.top) { dims in dims.height + 14 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

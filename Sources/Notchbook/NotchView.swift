@@ -1145,10 +1145,13 @@ struct NotchView: View {
     private var liquidNavLayer: some View {
         NavTDriven(t: renderNavT) { navT in
             if navT > 0.02 {
-            // Clamp against the STANDARD panel width (a constant), not this
-            // tab's panel, so the capsule width can't vary between a wide page
-            // (terminal 620) and a standard one (460). navBarWidth is already the
-            // fixed widest-control width from the probe; +22 is breathing room.
+            // Clamp against the STANDARD panel width (a constant), not this tab's
+            // panel, so the capsule can't vary between a wide page (terminal 620)
+            // and a standard one (460) — and so the pill is never WIDER than the
+            // island it sits under. navBarWidth is the fixed widest-control width
+            // from the probe; +22 is breathing room. The chip metrics below are
+            // sized so a full tab set still measures under this ceiling instead of
+            // overflowing it (which used to chop the end controls off).
             let navBlobW = min(metrics.expandedSize().width - 16, navBarWidth + 22)
             // Cross-fade the flat goo out and the real glass capsule in over the
             // last of the settle (e ∈ [0.9,1]): the metaball's flat fill only
@@ -1374,7 +1377,7 @@ struct NotchView: View {
     /// carries no material of its own.
     private func navControls(selectedOverride: NotchTab? = nil,
                              measuring: Bool = false) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             tabBar(selectedOverride: selectedOverride, measuring: measuring)
             dotAnchor(Button { state.pinned.toggle() } label: {
                 Image(systemName: state.pinned ? "pin.fill" : "pin")
@@ -1386,6 +1389,18 @@ struct NotchView: View {
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: state.pinned)
             .help(state.pinned ? "Unpin — collapse when the mouse leaves"
                                : "Pin the panel open")
+            // Optically center the pin/gear/power trio in its own section (the
+            // frosted band between the pages pill's right edge and the capsule's
+            // right glass edge). The pages pill is drawn +6pt past its measured
+            // row (the −6 capsule overhang below), so the visual gap from pill to
+            // pin is only 8−6 = 2pt, while the right side has the 12pt trailing pad
+            // PLUS the capsule's clamp breathing (~6.75pt at the 10-tab width) =
+            // ~18.75pt — the trio hugged the pill. Shifting it right by (18.75−2)/2
+            // ≈ 8pt equalizes the two gaps. This +8 leading is REDISTRIBUTED, not
+            // added: the row's trailing pad drops 12→4 by the same 8pt, so
+            // navBarWidth (and the 444 ceiling / capsule size) is unchanged, and
+            // the tab dock stays put — only the trio moves.
+                .padding(.leading, 8)
             dotAnchor(Button {
                 // Gear toggles the whole section: open at the root list, or close.
                 state.settingsRoute = state.settingsRoute == nil ? .root : nil
@@ -1404,7 +1419,13 @@ struct NotchView: View {
             .buttonStyle(.plain)
             .help("Quit Notchbook")
         }
-        .padding(.horizontal, 12)
+        // Asymmetric to bank the +8 leading the pin trio spends (see above): the
+        // leading stays 12, the trailing drops to 4 so the row's total width — and
+        // thus navBarWidth and the capsule — is byte-for-byte the same as symmetric
+        // 12/12. The measuring/probe path runs this identical code, so the fixed
+        // capsule width never moves.
+        .padding(.leading, 12)
+        .padding(.trailing, 4)
         .frame(maxHeight: .infinity)
         .coordinateSpace(name: "navRow")
         .background(GeometryReader { g in
@@ -1494,19 +1515,42 @@ struct NotchView: View {
     /// Tabs to render — the live drag order while reordering, else the real one.
     private var displayTabs: [NotchTab] { dragOrder ?? state.visibleTabs }
 
+    /// Adaptive tab-chip metrics — the SINGLE source of truth for inter-chip
+    /// spacing and unselected-chip horizontal padding, keyed off how many tabs are
+    /// actually visible. The nav capsule is sized by `navWidthProbe` from the
+    /// CURRENT visible set (never the 11-tab worst case), so a trimmed-down bar has
+    /// real slack under the 444pt ceiling (= panel 460 − 16). We spend that slack
+    /// on visibly more breathing room: gap 3 / pad 6 for 10-or-fewer tabs. Only the
+    /// FULL 11-tab set has to fall back to the compact gap 2 / pad 5, because at
+    /// gap 3 / pad 6 the full row overflows 444 and would clip the end controls
+    /// (measured: 11 @ 3/6 ≈ 461pt vs 431pt @ 2/5; 10 @ 3/6 fits with headroom).
+    /// Both `tabBar` (live + probe) and `slotCenterX` (drag-reorder math) read
+    /// these, so the geometry never desyncs between what's drawn and what's dragged.
+    private var chipGap: CGFloat { state.visibleTabs.count >= 11 ? 2 : 3 }
+    private var chipPadUnselected: CGFloat { state.visibleTabs.count >= 11 ? 5 : 6 }
+
     /// `selectedOverride`/`measuring` drive the off-screen width probe: it lays
     /// the bar out as if `selectedOverride` were the current tab, without feeding
     /// the reorder-width plumbing.
     private func tabBar(selectedOverride: NotchTab? = nil,
                         measuring: Bool = false) -> some View {
         let tabs = measuring ? state.visibleTabs : displayTabs
-        return HStack(spacing: 2) {
+        return HStack(spacing: chipGap) {
             ForEach(tabs, id: \.self) { tab in
                 tabChip(tab, selectedOverride: selectedOverride, emitWidth: !measuring)
             }
         }
         .padding(2)
-        .background(Capsule().fill(.white.opacity(0.06)))
+        // The pages section reads as its own longer pill, distinct from the
+        // trailing pin/gear/power. The capsule is drawn WIDER than the chips via
+        // negative padding — a purely visual extent that does NOT enlarge the
+        // measured row, so it spends the slack already sitting inside the nav pill
+        // instead of pushing the row back over the width ceiling (which is what
+        // clipped the end controls before).
+        .background(
+            Capsule().fill(.white.opacity(0.06))
+                .padding(.horizontal, -6)
+        )
         .coordinateSpace(name: "tabbar")
         .onPreferenceChange(TabChipWidthKey.self) { if !measuring { chipWidths = $0 } }
         .animation(measuring ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
@@ -1533,7 +1577,20 @@ struct NotchView: View {
         }
         .foregroundStyle(selected ? .white
                          : .white.opacity(targeted ? 0.9 : 0.45))
-        .padding(.horizontal, selected ? 10 : 8)
+        // Adaptive horizontal padding (see `chipPadUnselected`): with a full tab set
+        // (11 visible) an untrimmed control row once measured ~501pt against a 444pt
+        // ceiling (= panel width 460 − 16), so the end controls (leading tab +
+        // trailing power) were clipped. At 11 tabs we stay compact (pad 5, gap 2 →
+        // ~431pt) — the tightest the full set can be without scaling the row (which
+        // would desync the liquid melt-dot centers) or widening the pill past the
+        // island. But the capsule is sized from the CURRENT visible set, so a
+        // trimmed bar (≤10 tabs) has slack under 444: there we spread out to pad 6 /
+        // gap 3 for visibly more breathing room. Selected chips keep their fixed 8
+        // (the title already gives them width); only the icon-only unselected chips
+        // step. Do NOT push the unselected pad past 6 while 11 tabs can still use it
+        // — at 3/6 the full 11-set already overflows 444 (~461pt), hence the compact
+        // fallback keyed on the count.
+        .padding(.horizontal, selected ? 8 : chipPadUnselected)
         .frame(height: 24)
         .background(
             Capsule().fill(.white.opacity(
@@ -1572,14 +1629,16 @@ struct NotchView: View {
     }
 
     /// Resting center x of a chip in the tab-bar coordinate space, from measured
-    /// widths (2 pt leading pad + 2 pt inter-chip spacing) — stable during the
-    /// reflow animation, unlike live frame reads.
+    /// widths (2 pt leading pad from `.padding(2)` + the adaptive `chipGap` between
+    /// chips) — stable during the reflow animation, unlike live frame reads. Reads
+    /// the SAME `chipGap` the HStack lays out with, so drag targets stay exact under
+    /// both the compact (11-tab) and spread (≤10-tab) spacing.
     private func slotCenterX(of tab: NotchTab, in order: [NotchTab]) -> CGFloat {
         var x: CGFloat = 2
         for t in order {
             let w = chipWidths[t] ?? 30
             if t == tab { return x + w / 2 }
-            x += w + 2
+            x += w + chipGap
         }
         return x
     }
@@ -1620,7 +1679,7 @@ struct NotchView: View {
         for t in order where t != dragging {
             let w = chipWidths[t] ?? 30
             if cx + w / 2 < x { target += 1 }
-            cx += w + 2
+            cx += w + chipGap
         }
         guard target != from else { return }
         order.remove(at: from)
