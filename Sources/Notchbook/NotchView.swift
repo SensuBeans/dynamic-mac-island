@@ -740,6 +740,17 @@ struct NotchView: View {
             // ear shows/hides so the little bars track real audio, not a sine.
             spectrum.setActive(spectrumShouldBeActive)
         }
+        .onChange(of: state.frontmostIsFullscreen) { _ in
+            // Entering/leaving fullscreen hides the collapsed ear (fullscreenHidden),
+            // so drop/restore the system-audio tap with it — no purple recording
+            // indicator over fullscreen video.
+            spectrum.setActive(spectrumShouldBeActive)
+        }
+        .onChange(of: settings.hideInFullscreen) { _ in
+            // Toggling the "Hide in fullscreen" setting flips fullscreenHidden while
+            // already in fullscreen — re-evaluate the tap to match.
+            spectrum.setActive(spectrumShouldBeActive)
+        }
         .onChange(of: spectrum.levels) { levels in
             // Each fresh audio sample nudges the ambient colors along,
             // loudness sets the pace; no samples (paused) — no motion.
@@ -819,7 +830,7 @@ struct NotchView: View {
     private var spectrumShouldBeActive: Bool {
         settings.liveWaveform
             && media.nowPlaying?.isPlaying == true
-            && (state.isExpanded || !media.earHidden)
+            && (state.isExpanded || (!media.earHidden && !fullscreenHidden))
     }
 
     /// Dynamic Island ears: album art on the left, live activity on the right.
