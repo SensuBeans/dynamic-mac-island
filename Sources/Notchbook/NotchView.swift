@@ -1050,7 +1050,6 @@ struct NotchView: View {
     /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
     private struct AgentPillLabel: View {
         let pill: AgentSessionsModel.CollapsedPill
-        @State private var pulse = false
 
         private var count: Int {
             switch pill {
@@ -1072,13 +1071,26 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    Circle()
-                        .fill(tint)
+                    // Drawn in a Canvas with a fixed frame, driven by a
+                    // TimelineView. The previous form was a `.repeatForever`
+                    // opacity animation on a plain Circle, which kept a live
+                    // animator inside the notch's view graph: every frame it
+                    // invalidated the parent and SwiftUI re-solved the WHOLE
+                    // tree — nav chips, width probes, clip shapes — to move one
+                    // 7pt dot. A Canvas leaf redraws only its own pixels and
+                    // cannot invalidate anything above it.
+                    TimelineView(.periodic(from: .now, by: 1.0 / 20.0)) { ctx in
+                        Canvas { gc, size in
+                            let t = ctx.date.timeIntervalSinceReferenceDate
+                            // Same 0.75 s ease-in-out cadence, autoreversing.
+                            let phase = (sin(t * .pi / 0.75) + 1) / 2
+                            let opacity = 0.3 + 0.7 * phase
+                            gc.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)),
+                                    with: .color(tint.opacity(opacity)))
+                        }
                         .frame(width: 7, height: 7)
-                        .opacity(pulse ? 0.3 : 1)
-                        .onAppear { pulse = true }
-                        .animation(.easeInOut(duration: 0.75).repeatForever(autoreverses: true),
-                                   value: pulse)
+                    }
+                    .frame(width: 7, height: 7)
                 case .waiting:
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9, weight: .bold))
