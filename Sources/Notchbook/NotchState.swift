@@ -19,6 +19,17 @@ enum SettingsRoute: Equatable {
     case page(NotchTab)
 }
 
+/// Natural (unclamped) content height reported by hug-sized tabs (Agents,
+/// Servers): the island shrinks to fit their rows and grows row-by-row up to
+/// the tab's size cap instead of always renting the full 300pt panel.
+/// One mounted tab reports at a time (the content switch unmounts the rest).
+struct TabHugHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = nextValue() ?? value
+    }
+}
+
 enum NotchTab: String, CaseIterable {
     case media, notes, timer, tray, terminal, agents, servers, calendar, mirror, stats, toggles
 
@@ -64,6 +75,24 @@ final class NotchState: ObservableObject {
     /// Pinned: the panel ignores mouse-leave and stays expanded until the
     /// user unpins it (or presses Esc).
     @Published var pinned = false
+    /// Parked: pinned AND actually dragged away from the notch-home frame
+    /// (AppDelegate sets it from window moves). Pinned-at-home keeps the full
+    /// docked layout — the parked nav placement/no-shift rules apply only
+    /// once the island really left the notch, otherwise pinning visibly
+    /// shoved the capsule up into the hardware notch (user-flagged).
+    @Published var parked = false
+    /// Live natural content height of the current hug-sized tab (Agents /
+    /// Servers), from TabHugHeightKey. Published so AppDelegate's islandRect
+    /// hover-rect can track the same dynamic height the view renders — the
+    /// two must never disagree or the island collapses under the cursor.
+    @Published var tabHugHeight: CGFloat?
+    /// On-screen expanded panel size latched at the START of a collapse, before
+    /// the mirror reverts (S11). A live/zoomed Mirror shrinks to standard the
+    /// instant collapse() flips wantsRunning, so the close morph's Surface Return
+    /// would otherwise start from the standard rect and snap. `.zero` means "no
+    /// latch — use the live expandedSize" (every non-mirror tab is size-stable
+    /// through the close, so only Mirror needs this).
+    @Published var closePanelSize: CGSize = .zero
     /// Cursor is over the nav dock's strip below the panel (drives its
     /// show/hide — the dock stays hidden until summoned).
     @Published var navHovered = false
@@ -79,6 +108,7 @@ final class NotchState: ObservableObject {
     /// Tabs the user has hidden from the nav dock and tab-swipe cycle.
     @Published var hiddenTabs: Set<NotchTab> {
         didSet {
+            recomputeVisibleTabs()
             UserDefaults.standard.set(hiddenTabs.map(\.rawValue),
                                       forKey: "hiddenTabs")
         }
@@ -89,6 +119,7 @@ final class NotchState: ObservableObject {
     @Published var tabOrder: [NotchTab] {
         didSet {
             UserDefaults.standard.set(tabOrder.map(\.rawValue), forKey: "tabOrder")
+            recomputeVisibleTabs()
         }
     }
     /// Mirror at double size ("twice as big") — toggled from the mirror
@@ -103,6 +134,14 @@ final class NotchState: ObservableObject {
     /// Cursor is over the collapsed island's sound-wave ear — it morphs
     /// into mini transport controls.
     @Published var earHovered = false
+    /// `-LiquidIslandDebug`: forces the media-ear reveal on/off without a real
+    /// player, so the auto-loop harness can exercise the LiquidEar morph. Only
+    /// consulted while the debug flag is set; nil/false in normal use.
+    @Published var liquidEarDebugForced = false
+    /// `-LiquidAgentDebug`: a synthetic collapsed pill injected by the auto-loop
+    /// harness so the LiquidAgent morph can be exercised without a real agent
+    /// session. Only consulted while the debug flag is set; nil in normal use.
+    @Published var liquidAgentDebugPill: AgentSessionsModel.CollapsedPill?
     /// Transient notification shown beside the notch while collapsed.
     @Published var toast: NotchToast?
     /// Live progress of a horizontal two-finger swipe over the expanded
@@ -111,6 +150,12 @@ final class NotchState: ObservableObject {
     @Published var tabSwipeProgress: CGFloat = 0
     /// Hidden entirely while the user swipes between Spaces.
     @Published var spaceTransitioning = false
+    /// A native-fullscreen window (from any app) is covering the notch panel's
+    /// own screen. Set by AppDelegate's fullscreen detector; when combined with
+    /// the `hideInFullscreen` setting it suppresses every collapsed adornment
+    /// (media ear, agent pill, pomodoro ear, toasts) so nothing paints over
+    /// fullscreen video. Hover-to-expand is unaffected. See opus-fullscreen-hide.md.
+    @Published var frontmostIsFullscreen = false
     /// A popped-up NSMenu (sound output picker) is tracking — the mouse-away
     /// watcher must not collapse the panel out from under it. Not @Published:
     /// only the AppKit watcher reads it.
@@ -165,9 +210,16 @@ final class NotchState: ObservableObject {
 
     /// Tabs shown in the nav dock and reachable by swipe, in canonical order.
     /// Never empty — if every tab were hidden, media stays as a floor.
-    var visibleTabs: [NotchTab] {
+    ///
+    /// Stored, not computed: this is read several times per layout pass (nav
+    /// chips, width probe, tab bar), so as a computed property it allocated a
+    /// filtered array on every access, on the main thread, at frame rate.
+    @Published private(set) var visibleTabs: [NotchTab] = [.media]
+
+    fileprivate func recomputeVisibleTabs() {
         let visible = tabOrder.filter { !hiddenTabs.contains($0) }
-        return visible.isEmpty ? [.media] : visible
+        let next = visible.isEmpty ? [.media] : visible
+        if next != visibleTabs { visibleTabs = next }
     }
 
     /// Commit a new order for the visible tabs (from a nav-dock drag). Hidden
@@ -232,6 +284,8 @@ final class NotchState: ObservableObject {
         } else {
             pages = Array(repeating: "", count: desired)
         }
+        // didSet does not fire during init, so seed the stored list by hand.
+        recomputeVisibleTabs()
         if hiddenTabs.contains(currentTab) { currentTab = visibleTabs[0] }
         cancellable = $pages
             .dropFirst()

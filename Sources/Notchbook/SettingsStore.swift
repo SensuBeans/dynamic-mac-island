@@ -19,6 +19,12 @@ final class SettingsStore: ObservableObject {
 
     // MARK: General
     @Published var hoverToExpand: Bool { didSet { set(hoverToExpand, "general.hoverToExpand") } }
+    /// Hide every collapsed adornment (ears, agent pill, toasts) while a native-
+    /// fullscreen app covers the notch panel's screen. Hover-to-expand still works.
+    @Published var hideInFullscreen: Bool { didSet { set(hideInFullscreen, "general.hideInFullscreen") } }
+    /// Nav bar docks under the notch (false) or hangs below the panel (true★).
+    /// The liquid morph runs mirrored in bottom mode — same choreography.
+    @Published var navAtBottom: Bool { didSet { set(navAtBottom, "general.navAtBottom") } }
     /// Dwell before a hover opens the panel, seconds. instant★ / 0.2 / 0.5.
     @Published var expandDelay: Double { didSet { set(expandDelay, "general.expandDelay") } }
     @Published var haptics: Bool { didSet { set(haptics, "general.haptics") } }
@@ -103,6 +109,8 @@ final class SettingsStore: ObservableObject {
         // exactly like today. `object(forKey:)` below then always resolves.
         defaults.register(defaults: [
             "general.hoverToExpand": true,
+            "general.hideInFullscreen": true,
+            "general.navAtBottom": true,   // user-chosen default (Jul 18)
             "general.expandDelay": 0.0,
             "general.haptics": true,
             "general.toastDuration": 3.0,
@@ -146,6 +154,8 @@ final class SettingsStore: ObservableObject {
         ])
 
         hoverToExpand = defaults.bool(forKey: "general.hoverToExpand")
+        hideInFullscreen = defaults.bool(forKey: "general.hideInFullscreen")
+        navAtBottom = defaults.bool(forKey: "general.navAtBottom")
         expandDelay = defaults.double(forKey: "general.expandDelay")
         haptics = defaults.bool(forKey: "general.haptics")
         toastDuration = defaults.double(forKey: "general.toastDuration")
@@ -188,7 +198,9 @@ final class SettingsStore: ObservableObject {
         mirrorFlip = defaults.bool(forKey: "mirror.flip")
         mirrorRememberBig = defaults.bool(forKey: "mirror.rememberBig")
 
-        statsRefreshRate = defaults.double(forKey: "stats.refreshRate")
+        // Clamped at the boundary: a corrupt or wrong-typed plist value reads
+        // back as 0, which would turn the Stats poll into a main-thread spin.
+        statsRefreshRate = min(10, max(0.5, defaults.double(forKey: "stats.refreshRate")))
         statsHiddenTiles = defaults.stringArray(forKey: "stats.hiddenTiles") ?? []
 
         agentsAutoResume = defaults.bool(forKey: "agents.autoResume")

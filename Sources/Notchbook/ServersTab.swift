@@ -10,19 +10,37 @@ struct ServersTab: View {
     @EnvironmentObject var servers: ServersModel
     @EnvironmentObject var state: NotchState
 
+    /// Measured natural heights for hug sizing (see TabHugHeightKey): the
+    /// island grows row-by-row with each added server up to the size cap.
+    @State private var headerH: CGFloat = 0
+    @State private var listH: CGFloat = 0
+
+    /// nil = "not measured yet" — hugSize then holds the CAP rather than the tiny
+    /// pre-measurement value (headerH/listH start at 0, so the else branch
+    /// published ~8 before the GeometryReaders landed, flooring the panel to 120
+    /// and springing it cap→120→real). Report nil until the state is known AND
+    /// both readers have reported.
+    private var naturalHeight: CGFloat? {
+        if servers.loaded, servers.servers.isEmpty { return 150 }
+        guard servers.loaded, headerH > 0, listH > 0 else { return nil }
+        return headerH + 8 + listH
+    }
+
     var body: some View {
         VStack(spacing: 8) {
-            if servers.loaded, !servers.reachable {
-                unreachable
+            header
+                .background(GeometryReader { g in
+                    Color.clear
+                        .onAppear { headerH = g.size.height }
+                        .onChange(of: g.size.height) { headerH = $0 }
+                })
+            if servers.loaded, servers.servers.isEmpty {
+                emptyState("No servers yet — tap ＋ to add a folder")
             } else {
-                header
-                if servers.loaded, servers.servers.isEmpty {
-                    emptyState("No servers yet — tap ＋ to add a folder")
-                } else {
-                    list
-                }
+                list
             }
         }
+        .preference(key: TabHugHeightKey.self, value: naturalHeight)
         .onAppear { servers.refresh() }
     }
 
@@ -98,32 +116,16 @@ struct ServersTab: View {
             VStack(spacing: 6) {
                 ForEach(servers.servers) { ServerRow(server: $0) }
             }
+            // Natural row-stack height (unclamped, inside the scroll content).
+            .background(GeometryReader { g in
+                Color.clear
+                    .onAppear { listH = g.size.height }
+                    .onChange(of: g.size.height) { listH = $0 }
+            })
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private var unreachable: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "bolt.horizontal.circle")
-                .font(.system(size: 26))
-                .foregroundStyle(.white.opacity(0.25))
-            Text("Local Starter isn't running")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.6))
-            Button { servers.launchStarter() } label: {
-                Text("Launch Starter")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(.orange))
-                    .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 
     private func emptyState(_ text: String) -> some View {
         VStack(spacing: 10) {
@@ -146,6 +148,7 @@ private struct ServerRow: View {
     @State private var hovered = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 10) {
             Circle()
                 .fill(server.running ? Color.green : .white.opacity(0.18))
@@ -163,12 +166,26 @@ private struct ServerRow: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(.white.opacity(0.1)))
-                Text(":\(server.port)")
+                // ":0" is not a port — it is the `?? 0` fallback for an entry
+                // that has never been assigned one, and it read like a bug next
+                // to rows showing real numbers.
+                Text(server.port > 0 ? ":\(server.port)" : "—")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.4))
             }
             Spacer(minLength: 4)
             actions
+        }
+        // A launch that never bound its port used to leave the row identical to
+        // one that was never started. Say what the log said.
+        if let why = servers.lastError[server.name] {
+            Text(why)
+                .font(.system(size: 9))
+                .foregroundStyle(.orange.opacity(0.9))
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .padding(.leading, 2)
+        }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
@@ -181,6 +198,14 @@ private struct ServerRow: View {
         .onTapGesture { server.running ? servers.open(server) : servers.start(server.name) }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(server.path)
+        // Removes from the list only — never stops a running process (parity
+        // with the web UI; the row's ■ button is how you stop). Custom entries
+        // are deleted; discovered ones get hidden — both re-addable via ＋.
+        .contextMenu {
+            Button(role: .destructive) { servers.remove(server.name) } label: {
+                Label("Remove from list", systemImage: "trash")
+            }
+        }
     }
 
     private var actions: some View {
@@ -201,7 +226,7 @@ private struct ServerRow: View {
             .buttonStyle(.plain)
             .help(server.running ? "Stop" : "Start")
 
-            if server.running {
+            if server.running && server.port > 0 {
                 Button { servers.open(server) } label: {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))

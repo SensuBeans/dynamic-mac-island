@@ -138,12 +138,31 @@ final class MediaWatcher: ObservableObject {
         }
     }
 
+    /// True while the Media tab is actually on screen. The Chrome tab-walk is
+    /// only worth 3 s cadence then; the rest of the time a slow tick is enough
+    /// to notice a YouTube session for the collapsed ear.
+    private var youtubeHot = false
+
+    /// Visibility gate, matching setProgressPolling. Ungated, this spawned an
+    /// osascript against Chrome every 3 s forever — ~960 process launches an
+    /// hour with the notch closed, each one walking every tab of every window.
+    func setYouTubePolling(_ hot: Bool) {
+        guard hot != youtubeHot else { return }
+        youtubeHot = hot
+        guard youtubeEnabled else { return }
+        startYouTubeTimer()
+        if hot { pollYouTube() }   // don't make an opening tab wait a tick
+    }
+
     private func startYouTubeTimer() {
-        guard youtubeTimer == nil else { return }
-        youtubeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        youtubeTimer?.invalidate()
+        // 3 s while visible, 30 s when cold: the collapsed ear still discovers
+        // a YouTube session, at a tenth of the cost.
+        let interval: TimeInterval = youtubeHot ? 3 : 30
+        youtubeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.pollYouTube()
         }
-        youtubeTimer?.tolerance = 1
+        youtubeTimer?.tolerance = youtubeHot ? 1 : 10
     }
 
     /// Turn YouTube detection on/off from settings. Off: stop polling and drop
@@ -160,6 +179,10 @@ final class MediaWatcher: ObservableObject {
     }
 
     private func pollYouTube() {
+        // Spawning osascript to ask a browser that isn't running is pure waste.
+        guard !NSRunningApplication
+            .runningApplications(withBundleIdentifier: "com.google.Chrome").isEmpty
+        else { return }
         guard youtubeEnabled else { return }
         let current = nowPlaying
         if autoSwitchYouTube {
@@ -445,9 +468,17 @@ final class MediaWatcher: ObservableObject {
         let key = "\(np.source.rawValue)|\(np.title)|\(np.artist)"
         guard key != artworkKey else { return }
         artworkKey = key
+        // ROOT of the stale-artwork cluster (S2): the track just changed, so drop
+        // the previous cover NOW. artwork publishes async (after nowPlaying), and
+        // was never cleared on a change, so every consumer that pairs title+art —
+        // the ear, the toast, the reveal gate — briefly showed the new title over
+        // the old cover. Cleared art (nil until the matching image lands) shows a
+        // placeholder instead of the wrong cover, and the EarRevealModel art-gate
+        // (`art != nil`) now waits for the real art rather than firing on a
+        // lingering previous-track image.
+        artwork = nil
         // Never let an artwork query launch the player app itself.
         guard isRunning(np.source) else {
-            artwork = nil
             return
         }
 
@@ -455,29 +486,51 @@ final class MediaWatcher: ObservableObject {
         case .music:
             fetchMusicArtworkAsync(key: key, title: np.title)
         case .spotify:
-            let script = "tell application \"Spotify\" to get artwork url of current track"
-            guard let urlString = runAppleScript(script)?.stringValue,
-                  let url = URL(string: urlString) else {
-                // No URL: don't leave the previous track's art stranded under
-                // the new key — clear the key so the next event refetches.
-                artwork = nil
-                artworkKey = nil
-                return
-            }
-            URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-                let image = data.flatMap { NSImage(data: $0) }
-                DispatchQueue.main.async {
-                    guard let self, self.artworkKey == key else { return }
-                    if let image {
-                        self.artwork = image
-                    } else {
-                        // Failed download → don't cache stale art under this
-                        // key; reset so a later player event tries again.
-                        self.artwork = nil
-                        self.artworkKey = nil
-                    }
+            // Read the artwork URL OFF the main thread. NSAppleScript is a
+            // synchronous main-thread Apple-Event round-trip to Spotify (see the
+            // note on runScriptAsync) and was blocking the UI on every Spotify
+            // track flip — precisely while the ear/pill choreography animates, so
+            // a slow/busy Spotify dropped animation frames. Use the same
+            // osascript-off-main path the Music artwork fetch already uses; hop
+            // back to main (runScriptAsync delivers there) only to assign.
+            // Read the track NAME alongside the url in one round trip, so we can
+            // verify the art belongs to THIS title (S2). Spotify's scripting can
+            // lag right after a flip and hand back the PREVIOUS track's url; the
+            // Music path guards the same way (returnedName == title).
+            let script = """
+            tell application "Spotify"
+            set _n to name of current track
+            set _u to artwork url of current track
+            return _n & linefeed & _u
+            end tell
+            """
+            runScriptAsync(script) { [weak self] out in
+                guard let self, self.artworkKey == key else { return }  // superseded
+                let parts = (out ?? "").components(separatedBy: "\n")
+                guard parts.count >= 2, parts[0] == np.title,
+                      let url = URL(string: parts[1]) else {
+                    // No URL, or the returned name doesn't match (scripting lag):
+                    // don't strand the previous track's art under the new key —
+                    // clear the key so the next event refetches.
+                    self.artwork = nil
+                    self.artworkKey = nil
+                    return
                 }
-            }.resume()
+                URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+                    let image = data.flatMap { NSImage(data: $0) }
+                    DispatchQueue.main.async {
+                        guard let self, self.artworkKey == key else { return }
+                        if let image {
+                            self.artwork = image
+                        } else {
+                            // Failed download → don't cache stale art under this
+                            // key; reset so a later player event tries again.
+                            self.artwork = nil
+                            self.artworkKey = nil
+                        }
+                    }
+                }.resume()
+            }
         case .youtube:
             break  // thumbnail fetched in pollYouTube()
         }

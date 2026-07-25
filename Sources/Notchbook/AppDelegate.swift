@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let lyrics = LyricsModel()
     private let calendarModel = CalendarModel()
     private let mirror = MirrorController()
+    private let earReveal = EarRevealModel()
     private let toggles = TogglesModel()
     private let stats = StatsModel()
     private let pomodoro = PomodoroModel()
@@ -29,6 +30,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    /// Collapse hit-test rect, held at the recent MAX through a shrink's spring
+    /// settle. islandRect() returns the ENDPOINT size at once, but the panel
+    /// animates to it over ~0.3 s, so on a SHRINK (a row removed, a session ends,
+    /// Mirror stops) the rect snaps small while the panel is still rendered large
+    /// — a cursor resting in the still-visible lower band then falls outside and
+    /// collapse() fires under it. Grows are adopted immediately (cursor already
+    /// inside); shrinks hold the larger rect for islandShrinkSettle. See S4.
+    private var heldCollapseRect: NSRect = .zero
+    private var heldCollapseUntil: Date = .distantPast
+    private let islandShrinkSettle: TimeInterval = 0.4
     private var expandWork: DispatchWorkItem?
     private var hoverPoll: Timer?
     private var spacePoll: Timer?
@@ -49,6 +60,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return "?"
     }
+
+    // MARK: Fullscreen detection (hide collapsed adornments over fullscreen)
+
+    /// True while a fullscreen Space is frontmost on the notch panel's own screen.
+    /// No permissions needed. See opus-fullscreen-hide.md ("Detector v2").
+    ///
+    /// Detector v1 (match a layer-0 window to the full screen frame) CANNOT WORK on
+    /// a notched Mac: Chrome/YouTube fullscreen bounds are (0,33 W×visibleH) — the
+    /// content stops BELOW the notch strip — which is byte-identical to a *maximized*
+    /// (non-fullscreen) window over visibleFrame. Layer-0 geometry is fundamentally
+    /// ambiguous, so tolerance tweaks are futile (ground-truthed on this machine).
+    ///
+    /// The reliable signal: while a fullscreen Space is frontmost, the Dock owns an
+    /// on-screen "Fullscreen Backdrop" window (deep-negative layer) whose bounds equal
+    /// the FULL screen frame. It's absent on the desktop. Backdrops from OTHER spaces
+    /// appear mid-Space-slide at offset x — the bounds==THIS-screen's-frame gate drops
+    /// those. The old layer-0 exact-full-frame match is kept as a cheap secondary OR
+    /// for apps that truly cover the notch.
+    ///
+    /// v3 (name-free): `kCGWindowName` is NOT readable from this app process (no
+    /// Screen-Recording permission), so the v2 `name == "Fullscreen Backdrop"` test
+    /// never matched in-app. Layers ARE always readable. On the DESKTOP the Dock owns
+    /// exactly ONE deep-negative-layer window covering the screen (the wallpaper,
+    /// layer -2147483624); on a FULLSCREEN Space it owns TWO (wallpaper + the
+    /// backdrop at -2147483622). So: count Dock windows covering this screen's full
+    /// frame in the deep-negative band; ≥2 ⇒ fullscreen. The name test is kept only
+    /// as a fast path for the day the app ever gains the permission.
+    ///
+    /// `(signal, deepCount)` — the signal (if any) says the notch screen is showing a
+    /// fullscreen Space: `"backdrop"`, `"layer0"`, or nil. deepCount (Dock deep-layer
+    /// is surfaced so fsLog can print it and make the next live test self-diagnosing.
+    private func detect() -> (String?, Int) {
+        guard let screen = panel?.screen ?? NSScreen.main else { return (nil, 0) }
+        // CGWindow bounds are global TOP-LEFT origin; NSScreen.frame is global
+        // BOTTOM-LEFT. Flip about the PRIMARY display's height (origin 0,0) — the
+        // classic multi-display coordinate bug lives here.
+        let primaryH = (NSScreen.screens.first { $0.frame.origin == .zero }
+                        ?? NSScreen.screens.first)?.frame.height ?? screen.frame.height
+        let f = screen.frame
+        let want = CGRect(x: f.origin.x, y: primaryH - f.maxY,
+                          width: f.width, height: f.height)
+        let mine = ProcessInfo.processInfo.processIdentifier
+        // The backdrop lives among desktop elements, so DON'T exclude them (v1's mask
+        // filtered out the very signal we need).
+        guard let info = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
+        else { return (nil, 0) }
+        let tol: CGFloat = 2
+        func coversScreen(_ w: [String: Any]) -> Bool {
+            guard let bDict = w[kCGWindowBounds as String] as? NSDictionary,
+                  let b = CGRect(dictionaryRepresentation: bDict) else { return false }
+            return abs(b.minX - want.minX) <= tol && abs(b.minY - want.minY) <= tol
+                && abs(b.width - want.width) <= tol && abs(b.height - want.height) <= tol
+        }
+        // Primary: Dock-owned deep-negative-layer windows covering THIS screen's full
+        // frame. The deep band (< -1,000,000) excludes normal Dock UI (layers 18/20/25
+        // in the probe). Desktop = 1 (wallpaper); fullscreen = 2 (wallpaper + backdrop).
+        var deep = 0
+        var namedBackdrop = false
+        for w in info where (w[kCGWindowOwnerName as String] as? String) == "Dock" {
+            guard let layer = w[kCGWindowLayer as String] as? Int, layer < -1_000_000,
+                  coversScreen(w) else { continue }
+            deep += 1
+            if (w[kCGWindowName as String] as? String) == "Fullscreen Backdrop" {
+                namedBackdrop = true   // fast path if the app ever gains the permission
+            }
+        }
+        if namedBackdrop || deep >= 2 { return ("backdrop", deep) }
+        // Secondary: a foreign layer-0 window that truly covers the WHOLE frame
+        // (notch strip included). Deliberately NOT a visibleFrame-shaped match —
+        // that would false-positive on maximized windows (per the ground truth).
+        for w in info {
+            guard (w[kCGWindowLayer as String] as? Int) == 0 else { continue }
+            if let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid_t(mine) == pid { continue }
+            if coversScreen(w) { return ("layer0", deep) }
+        }
+        return (nil, deep)
+    }
+
+    /// Re-run the detector and publish to `state.frontmostIsFullscreen` ONLY on an
+    /// actual value change (no re-render churn every poll tick). `-FullscreenHideForce`
+    /// pins it true so hiding can be eyeballed without entering fullscreen.
+    private func refreshFullscreenState(_ reason: String) {
+        let forced = UserDefaults.standard.bool(forKey: "FullscreenHideForce")
+        // The window sweep runs every tick (it must — the signal changes with the
+        // frontmost Space). Force short-circuits it; otherwise detect() decides.
+        let (rawSignal, deep) = forced ? ("force", 0) : detect()
+        let signal = forced ? "force" : rawSignal
+        let detected = signal != nil
+        fsLog("decide=\(detected) signal=\(signal ?? "none") deep=\(deep) forced=\(forced) reason=\(reason) published=\(state.frontmostIsFullscreen)")
+        guard state.frontmostIsFullscreen != detected else { return }
+        state.frontmostIsFullscreen = detected
+        fsLog("PUBLISH frontmostIsFullscreen -> \(detected)")
+    }
+
+    /// `-FullscreenHideDebug`: append one line per detector decision to a readable
+    /// file (macOS 26 redacts NSLog args in the unified log, so file logging only).
+    private func fsLog(_ msg: String) {
+        guard UserDefaults.standard.bool(forKey: "FullscreenHideDebug") else { return }
+        let line = "\(Self.fsLogStamp.string(from: Date())) \(msg)\n"
+        let url = URL(fileURLWithPath: "/tmp/notch-fullscreen.log")
+        guard let data = line.data(using: .utf8) else { return }
+        if let fh = try? FileHandle(forWritingTo: url) {
+            defer { try? fh.close() }
+            _ = try? fh.seekToEnd()
+            try? fh.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+    private static let fsLogStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
     /// Block-observer tokens auto-unregister on dealloc — must be retained.
     private var observerTokens: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
@@ -66,10 +192,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let autoResumeLock = NSLock()
     private var autoResumeSnapshot = true
 
+    /// Drives the `-LiquidNavDebug` auto-loop (nav show→hide) for goo tuning.
+    private var liquidNavDebugTimer: Timer?
+    /// Drives the `-LiquidIslandDebug` auto-loop (ear show/hide + panel close/open,
+    /// alternating) for tuning the two island morphs.
+    private var liquidIslandDebugTimer: Timer?
+    /// Drives the `-LiquidAgentDebug` auto-loop (agent pill show/hide) for tuning
+    /// the LiquidAgent bud-and-pinch with a synthetic injected pill.
+    private var liquidAgentDebugTimer: Timer?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
         state.onQuit = { NSApp.terminate(nil) }
+        // The ear's single-owner reducer watches the media pipeline from launch.
+        earReveal.bind(to: media)
         state.onExpandRequest = { [weak self] in self?.expand() }
         state.onHoverChange = { [weak self] inside in self?.hoverIsland(inside) }
         // Songs/Albums jumps need Accessibility. Once the one-time system
@@ -98,10 +235,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let x: CGFloat
             if self.state.isExpanded {
                 let onMirror = self.state.currentTab == .mirror
-                // Settings pages use their own fixed size regardless of the
-                // tab they were opened from — must match NotchView, or the
-                // hover rect outgrows the rendered island and the nav strip
-                // (bottom of the rect) lands below the actual nav bar.
+                // LOCKSTEP with NotchView.expandedSize — every branch below
+                // must mirror it exactly. Mini fork: settings pages use the
+                // roomier fixed settingsIslandSize on this display.
                 if self.state.showingSettings {
                     s = NotchMetrics.settingsIslandSize
                 } else if self.state.currentTab == .tray {
@@ -110,14 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else if self.state.currentTab == .terminal {
                     s = NotchMetrics.terminalIslandSize
                 } else if self.state.currentTab == .agents {
-                    s = NotchMetrics.agentsIslandSize
+                    s = NotchView.hugSize(cap: NotchMetrics.agentsIslandSize,
+                                          natural: self.state.tabHugHeight)
                 } else if self.state.currentTab == .servers {
-                    s = NotchMetrics.serversIslandSize
+                    s = NotchView.hugSize(cap: NotchMetrics.serversIslandSize,
+                                          natural: self.state.tabHugHeight)
                 } else if self.state.currentTab == .calendar {
                     s = self.metrics.calendarExpandedSize(monthMode: self.state.calendarMonthMode)
                 } else {
-                    s = self.metrics.expandedSize(zoomed: onMirror,
-                                                  large: onMirror && self.state.mirrorBig)
+                    let mirrorLive = onMirror && self.mirror.wantsRunning
+                    s = self.metrics.expandedSize(zoomed: mirrorLive,
+                                                  large: mirrorLive && self.state.mirrorBig)
                 }
                 // Center on the ACTUAL island width so hover hit-testing tracks
                 // the rendered island (terminal is wider than the standard
@@ -125,11 +264,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 x = self.metrics.expandedLeadingPad(width: s.width)
                 // The panel floats below the notch — the interactive rect
                 // bridges notch, gap, and panel so crossing the gap doesn't
-                // read as leaving the island.
-                s.height += self.metrics.notchHeight + NotchMetrics.islandGap * 2
-                    + NotchMetrics.navIslandHeight
+                // read as leaving the island. (notch→nav gap + nav bar +
+                // nav→content gap.)
+                s.height += self.metrics.notchHeight + NotchMetrics.islandGap
+                    + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
             } else {
-                s = self.metrics.collapsedSize(withMedia: (self.media.nowPlaying != nil && !self.media.earHidden) || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
+                // LOCKSTEP: the collapsed bar renders off the SETTLED reveal
+                // signal (EarRevealModel), so the hover rect must too.
+                s = self.metrics.collapsedSize(withMedia: self.earReveal.earVisible || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
                                                toast: self.state.toast != nil,
                                                withAgent: self.agentSessions.hasActivePill)
                 x = self.metrics.islandLeadingPad(expanded: false, collapsed: s)
@@ -144,6 +286,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return NSRect(x: x, y: y, width: s.width, height: s.height)
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
+        // Pin = parkable island: the panel window becomes user-movable (the
+        // WindowDragGesture in NotchView needs it) and stays wherever it is
+        // dropped. Unpinning — including the collapse path, which always
+        // unpins — snaps the window back to its exact notch-home frame, so
+        // the one-fixed-window geometry holds whenever the island is docked.
+        state.$pinned
+            .removeDuplicates()
+            .sink { [weak self] pinned in
+                guard let self else { return }
+                self.panel.isMovable = pinned
+                if !pinned, let m = self.metrics {
+                    self.panel.setFrame(m.windowFrame, display: true)
+                    self.state.parked = false
+                }
+            }
+            .store(in: &cancellables)
+        // Parked = pinned + genuinely away from home. Window moves flip it;
+        // the unpin snap-home above clears it. 2pt tolerance so AppKit frame
+        // rounding can't strand a docked island in parked layout.
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            guard let self, let m = self.metrics else { return }
+            let d = hypot(self.panel.frame.origin.x - m.windowFrame.origin.x,
+                          self.panel.frame.origin.y - m.windowFrame.origin.y)
+            let parked = self.state.pinned && d > 2
+            if self.state.parked != parked { self.state.parked = parked }
+        })
         host.onEarHover = { [weak self] over in self?.setEarHover(over) }
         // A click in the notch/pill zone opens the panel when hover-to-expand
         // is off — and ALSO while the pill is hidden (Chrome frontmost /
@@ -175,6 +345,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.contentView = host
         panel.orderFrontRegardless()
 
+        // Liquid-nav tuning harness (`-LiquidNavDebug 1`): force the panel open
+        // and auto-loop the nav show/hide so the goo morph (slowed 8× in
+        // NotchView) can be screenshotted frame-by-frame. No-op otherwise.
+        startLiquidNavDebugIfNeeded()
+
+        // Liquid-island tuning harness (`-LiquidIslandDebug 1`): auto-loop the
+        // ear reveal + panel close/open (slowed 6× in NotchView). No-op otherwise.
+        startLiquidIslandDebugIfNeeded()
+
+        // Liquid agent-pill tuning harness (`-LiquidAgentDebug 1`): auto-loop the
+        // pill show/hide with a synthetic pill (slowed 6× in NotchView). No-op
+        // otherwise; `-LiquidAgentFreeze <e>` holds it collapsed for stills.
+        startLiquidAgentDebugIfNeeded()
+
         // Esc collapses while the panel has focus — except on the Terminal
         // tab, where Esc must reach the shell (vim/less would be unusable
         // otherwise). Collapse there still works via mouse-leave, pin, or
@@ -196,6 +380,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return event
         }
+
+        // Nothing re-synced after a sleep. Tabs whose data is event-driven or
+        // loaded on a visibility edge showed pre-sleep state after the lid
+        // opened — a calendar list containing meetings that already ended, with
+        // no timestamp or spinner to say it was old. Stats and Servers already
+        // self-heal via setPolling's eager first tick, so they are left alone.
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.calendarModel.refreshAuthorization()
+            self.calendarModel.load()
+            self.toggles.refreshAll()
+            self.media.refresh()
+        })
 
         observerTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -282,7 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
         agentSessions.onNotchResume = { [weak self] sid in
-            self?.terminalSessions.resume(id: sid)
+            self?.terminalSessions.resume(id: sid) ?? false
         }
         agentSessions.onResumeFired = { [weak self] project, name, notify in
             guard let self else { return }
@@ -292,7 +491,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     title: "Limits reset — \(project)",
                     subtitle: name.map { "\($0) is waiting for you" } ?? "waiting for you",
                     color: .orange))
-                NSSound(named: "Glass")?.play()
             } else {
                 self.state.showToast(NotchToast(
                     icon: "bolt.fill",
@@ -318,7 +516,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                             title: "Needs you — \(session.project)",
                                             subtitle: session.name,
                                             color: .orange))
-            NSSound(named: "Glass")?.play()
         }
 
         pomodoro.onPhaseEnd = { [weak self] ended in
@@ -375,6 +572,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.spaceWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+            // Entering/leaving fullscreen always switches Spaces — re-check now
+            // and again after the new Space's windows have settled (the poll is
+            // the ultimate safety net if both fire before the switch lands).
+            self.refreshFullscreenState("space-change")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.refreshFullscreenState("space-change+0.6")
+            }
+        })
+
+        // A plain app activation (⌘-Tab into a fullscreen app, etc.) can flip the
+        // fullscreen state without a Space change on some paths — re-check on it too.
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.refreshFullscreenState("app-activate")
         })
 
         // Belt-and-suspenders hover: tracking areas can stop delivering in
@@ -409,6 +622,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // baseline, which would fire one spurious blink when permission lands).
         spacePoll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
+            // Safety-net fullscreen re-check (publishes only on real change).
+            self.refreshFullscreenState("poll")
             let wallpaper = self.currentWallpaperID()
             guard wallpaper != "?" else { return }
             if self.lastWallpaper.isEmpty {
@@ -440,6 +655,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         spacePoll?.tolerance = 0.1
+
+        // Seed the fullscreen state at launch (honors -FullscreenHideForce for V2).
+        refreshFullscreenState("startup")
     }
 
     private func setupToasts() {
@@ -559,6 +777,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var swipeX: CGFloat = 0
     private var swipeY: CGFloat = 0
+    /// True while a swipe that BEGAN over an open settings page is in flight:
+    /// the whole gesture then belongs to settings back-navigation (page → root
+    /// → closed), never to the tab ratchet underneath the overlay.
+    private var settingsSwipe = false
     /// Live volume swipe: the player volume captured (asynchronously) when
     /// the gesture began, offset by the fingers as they move.
     private var volumeBase: Double?
@@ -598,6 +820,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeY = 0
             tabSwipeActive = false
             tabSteps = 0
+            settingsSwipe = state.isExpanded && state.showingSettings
             volumeBase = nil
             volumeSwipeEnded = false
             lastSentVolume = nil
@@ -616,6 +839,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeX += event.scrollingDeltaX
             swipeY += event.scrollingDeltaY
             if state.isExpanded {
+                // Settings owns the gesture: each span of horizontal travel
+                // (either direction) steps back one level — sub-page → root →
+                // closed — the swipe-out the user asked for.
+                if settingsSwipe {
+                    if !tabSwipeActive, abs(swipeX) > 8,
+                       abs(swipeX) > abs(swipeY) * 1.5 {
+                        tabSwipeActive = true
+                    }
+                    guard tabSwipeActive else { return }
+                    let steps = Int((abs(swipeX) / Self.tabSwipeSpan).rounded(.towardZero))
+                    if steps != tabSteps {
+                        for _ in 0..<max(0, steps - tabSteps) { settingsBack() }
+                        tabSteps = steps
+                    }
+                    return
+                }
                 if !tabSwipeActive, abs(swipeX) > 8,
                    abs(swipeX) > abs(swipeY) * 1.5 {
                     tabSwipeActive = true
@@ -641,6 +880,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     state.tabSwipeProgress = 0
                     tabSwipeActive = false
                     tabSteps = 0
+                    settingsSwipe = false
+                }
+                if settingsSwipe {
+                    // Lifting past half a span commits one more back-step.
+                    guard tabSwipeActive else { return }
+                    let residual = abs(swipeX) / Self.tabSwipeSpan - CGFloat(tabSteps)
+                    if residual > 0.5 { settingsBack() }
+                    return
                 }
                 guard tabSwipeActive else { return }
                 // Lifting past half a span commits one more step.
@@ -667,10 +914,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.tabSwipeProgress = 0
             tabSwipeActive = false
             tabSteps = 0
+            settingsSwipe = false
             volumeReadToken += 1
         default:
             break
         }
+    }
+
+    /// One settings back-step with a haptic tick: sub-page → root → closed.
+    /// No-ops once settings is already closed (a long swipe just exits).
+    private func settingsBack() {
+        guard let route = state.settingsRoute else { return }
+        state.settingsRoute = route == .root ? nil : .root
+        haptic()
     }
 
     /// Moves the current tab by `delta`, wrapping at the ends, with a
@@ -726,6 +982,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(tray)
             .environmentObject(calendarModel)
             .environmentObject(mirror)
+            .environmentObject(earReveal)
             .environmentObject(toggles)
             .environmentObject(stats)
             .environmentObject(pomodoro)
@@ -766,6 +1023,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func expand() {
+        // Freeze harness for the ear pins the panel COLLAPSED so hover can't
+        // open it out from under a deterministic capture.
+        if UserDefaults.standard.object(forKey: "LiquidEarFreeze") != nil { return }
         guard !state.isExpanded else { return }
         state.isExpanded = true
         media.refresh()
@@ -779,8 +1039,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func collapse() {
+        // Freeze harness for the close morph pins the panel EXPANDED.
+        if UserDefaults.standard.object(forKey: "LiquidCloseFreeze") != nil { return }
         guard state.isExpanded else { return }
         stopMouseWatch()
+        // Latch the on-screen panel size BEFORE the mirror reverts (S11): a
+        // live/zoomed Mirror shrinks to standard the instant mirror.stop() flips
+        // wantsRunning below, which would start the close morph's Surface Return
+        // from the standard rect and snap. Only Mirror's size is volatile through
+        // a close; every other tab stays put, so .zero (use the live size) there.
+        if state.currentTab == .mirror, mirror.wantsRunning {
+            state.closePanelSize = metrics.expandedSize(zoomed: true,
+                                                        large: state.mirrorBig)
+        } else {
+            state.closePanelSize = .zero
+        }
         state.isExpanded = false
         state.pinned = false
         state.navHovered = false
@@ -791,24 +1064,197 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         media.setProgressPolling(false)
     }
 
+    /// `-LiquidNavDebug 1`: a self-driving harness for tuning the Goo Merge
+    /// liquid nav. Forces the panel expanded and auto-loops the nav show→hide so
+    /// the morph (slowed 8× in NotchView while this flag is on) can be captured
+    /// frame-by-frame with `screencapture`. Off by default — never runs unless
+    /// the launch arg / user default is set.
+    private func startLiquidNavDebugIfNeeded() {
+        let defaults = UserDefaults.standard
+        // A long, unique ASCII marker so `strings` can PROVE this code shipped in
+        // the running binary — the short "LiquidNavDebug" key is ≤15 bytes and
+        // Swift inlines it as a small string, invisible to `strings`. Also prints
+        // to Console at launch as a live "the new build is running" signal.
+        NSLog("SurfaceBulgeLiquidNavHarness_v02_engaged")
+
+        // `-LiquidNavFreeze <e>`: pin the morph at a STATIC reveal value with no
+        // animation, so each beat-sheet frame is deterministic. NotchView reads
+        // the same key for `renderNavT`; here we just hold the panel open.
+        if defaults.object(forKey: "LiquidNavFreeze") != nil {
+            state.isExpanded = true
+            state.navHovered = true
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidNavDebug") else { return }
+        var shown = false
+        let toggle: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.state.isExpanded = true      // hold it open; nothing collapses us
+            shown.toggle()
+            self.state.navHovered = shown     // drives navShown → the navT morph
+        }
+        // First reveal is DELAYED past view mount: toggling navHovered before
+        // NotchView's onChange observers exist is silently missed, and the loop
+        // then looks dead for a full period (18 s) — the first cycle never ran.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { toggle() }
+        // Period exceeds the slowed morph (0.85·8 ≈ 6.8 s show / 0.70·8 ≈ 5.6 s
+        // hide) plus a settle hold, so each direction finishes before reversing.
+        liquidNavDebugTimer = Timer.scheduledTimer(withTimeInterval: 9.0,
+                                                   repeats: true) { _ in toggle() }
+    }
+
+    /// `-LiquidIslandDebug 1`: a self-driving harness for the two island morphs.
+    /// It cycles ear-show → ear-hide → panel-open → panel-close forever (each
+    /// slowed 6× in NotchView), forcing the panel/ear state so mouse drift can't
+    /// disturb it, so both morphs can be captured frame-by-frame. Off by default.
+    private func startLiquidIslandDebugIfNeeded() {
+        let defaults = UserDefaults.standard
+        // Long ASCII marker so `strings` can PROVE this shipped in the running
+        // binary (short keys inline invisibly) + a live Console launch signal.
+        NSLog("SurfaceReturnLiquidIslandHarness_v01_engaged")
+
+        // `-LiquidEarFreeze <e>`: hold the panel COLLAPSED so the frozen ear
+        // (rendered by NotchView) can be captured deterministically.
+        if defaults.object(forKey: "LiquidEarFreeze") != nil {
+            state.isExpanded = false
+            state.liquidEarDebugForced = true
+            return
+        }
+        // `-LiquidCloseFreeze <e>`: hold the panel EXPANDED (NotchView renders the
+        // frozen close value over it).
+        if defaults.object(forKey: "LiquidCloseFreeze") != nil {
+            state.isExpanded = true
+            panel.orderFront(nil)
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidIslandDebug") else { return }
+        // Four beats, one per timer tick. Each forces exactly the state its morph
+        // needs; the mouse-watch is suppressed while this timer lives.
+        var beat = 0
+        let step: () -> Void = { [weak self] in
+            guard let self else { return }
+            switch beat % 4 {
+            case 0:                                   // ear reveals (collapsed)
+                self.state.isExpanded = false
+                self.state.liquidEarDebugForced = true
+            case 1:                                   // ear hides
+                self.state.liquidEarDebugForced = false
+            case 2:                                   // panel opens
+                self.state.liquidEarDebugForced = false
+                self.state.isExpanded = true
+                self.panel.orderFront(nil)
+            default:                                  // panel closes
+                self.state.isExpanded = false
+            }
+            beat += 1
+        }
+        // Delay the first beat past view mount (toggling @Published before
+        // NotchView's onChange observers exist is silently missed — the nav
+        // harness hit this exact bug).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { step() }
+        // Period exceeds the slowest slowed morph (0.85·6 ≈ 5.1 s) plus a settle.
+        liquidIslandDebugTimer = Timer.scheduledTimer(withTimeInterval: 6.5,
+                                                      repeats: true) { _ in step() }
+    }
+
+    /// `-LiquidAgentDebug 1`: a self-driving harness for the agent-pill liquid.
+    /// It injects a SYNTHETIC collapsed pill (never touching the real agent
+    /// sessions) and loops show → hide forever while the island stays collapsed,
+    /// so the LiquidAgent bud-and-pinch (slowed 6× in NotchView) can be captured
+    /// frame-by-frame. `-LiquidAgentFreeze <e>` instead holds it shown so the
+    /// frozen morph value renders deterministically. Off by default.
+    private func startLiquidAgentDebugIfNeeded() {
+        let defaults = UserDefaults.standard
+        // Long ASCII marker so `strings` can PROVE this shipped in the running
+        // binary (short keys inline invisibly).
+        NSLog("LiquidAgentPillHarness_v01_engaged")
+
+        // Freeze: hold the pill "present" and collapsed; NotchView renders the
+        // frozen agentT over it. The synthetic pill must be set so the goo mounts.
+        if defaults.object(forKey: "LiquidAgentFreeze") != nil {
+            state.isExpanded = false
+            state.liquidAgentDebugPill = .working(2)
+            return
+        }
+
+        guard defaults.bool(forKey: "LiquidAgentDebug") else { return }
+        // Two beats: inject the pill (reveal) → clear it (absorb). Cycle a couple
+        // of states across reveals so the tinted glyph dot is exercised too.
+        let pills: [AgentSessionsModel.CollapsedPill] = [.working(2), .waiting(1), .complete(3)]
+        var beat = 0
+        let step: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.state.isExpanded = false
+            if beat % 2 == 0 {
+                self.state.liquidAgentDebugPill = pills[(beat / 2) % pills.count]
+            } else {
+                self.state.liquidAgentDebugPill = nil
+            }
+            beat += 1
+        }
+        // Delay past view mount (toggling @Published before NotchView's onChange
+        // observers exist is silently missed — the nav harness hit this bug).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { step() }
+        // Period exceeds the slowed show (0.60·6 ≈ 3.6 s) plus a settle.
+        liquidAgentDebugTimer = Timer.scheduledTimer(withTimeInterval: 4.5,
+                                                     repeats: true) { _ in step() }
+    }
+
     /// Collapse the moment the cursor leaves the visible island bounds.
     private func startMouseWatch() {
         let check: () -> Void = { [weak self] in
             guard let self, self.state.isExpanded else { return }
+            // The debug harness owns nav state while looping — don't let a stray
+            // cursor override navHovered or collapse the panel out from under it.
+            // Freeze mode (`-LiquidNavFreeze`) likewise holds the panel open.
+            if self.liquidNavDebugTimer != nil { return }
+            if self.liquidIslandDebugTimer != nil { return }
+            if self.liquidAgentDebugTimer != nil { return }
+            if UserDefaults.standard.object(forKey: "LiquidNavFreeze") != nil { return }
             // Proper view→window→screen conversion handles the hosting
             // view's flipped coordinate system.
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
-            let visible = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
+            let target = self.panel.convertToScreen(inWindow).insetBy(dx: -6, dy: -6)
+            // Never let the collapse rect trail the rendered panel on a shrink.
+            let visible = self.collapseRect(target: target)
             let mouse = NSEvent.mouseLocation
-            // The nav dock sits at the TOP of the island stack, right under
-            // the notch; it shows while the cursor is up there (notch or nav
-            // strip — screen coords are bottom-up, so that's near maxY) or a
-            // swipe is in flight.
-            let navHeight = self.metrics.notchHeight + NotchMetrics.islandGap
-                + NotchMetrics.navIslandHeight + 16
-            let navZone = NSRect(x: visible.minX, y: visible.maxY - navHeight,
-                                 width: visible.width, height: navHeight)
-            let inNav = navZone.contains(mouse)
+            // The nav dock rides the TOP of the island, but the bar itself is
+            // rendered `notchHeight + gap` BELOW the rect's top edge (the rect
+            // bridges the notch + gap). So the trigger band must span the notch,
+            // the gap, the full nav bar, AND a buffer into the content — else
+            // the cursor over the bar's lower half falls outside and it retracts
+            // out from under the pointer. Screen coords are bottom-up, so the
+            // band hangs off the maxY (top) edge.
+            // Bottom-nav mode mirrors the trigger bands to the island's BOTTOM
+            // edge (screen coords are bottom-up: bottom = minY).
+            let navBottom = self.settings.navAtBottom
+            let navZoneHeight = navBottom
+                ? NotchMetrics.navContentGap + NotchMetrics.navIslandHeight + 28
+                : self.metrics.notchHeight
+                    + NotchMetrics.islandGap
+                    + NotchMetrics.navIslandHeight + 28
+            let stayZone = NSRect(x: visible.minX,
+                                  y: navBottom ? visible.minY : visible.maxY - navZoneHeight,
+                                  width: visible.width,
+                                  height: navZoneHeight)
+            // Hysteresis (user-tuned): REVEALING demands the cursor actually
+            // reach the island's border strip (top strip normally, bottom strip
+            // in bottom-nav mode) — the old single zone fired a good 60pt
+            // early, while still over content. Once revealed, the generous zone
+            // keeps it out so using the nav buttons never retracts the bar
+            // mid-reach.
+            let enterH = navBottom
+                ? NotchMetrics.navContentGap + NotchMetrics.navIslandHeight + 10
+                : self.metrics.notchHeight + NotchMetrics.islandGap + 10
+            let enterZone = NSRect(x: visible.minX,
+                                   y: navBottom ? visible.minY : visible.maxY - enterH,
+                                   width: visible.width,
+                                   height: enterH)
+            let inNav = self.state.navHovered
+                ? stayZone.contains(mouse)
+                : enterZone.contains(mouse)
             if self.state.navHovered != inNav { self.state.navHovered = inNav }
             // While the user is actively typing in a terminal (the panel is
             // key and a terminal view holds focus), the cursor drifting off
@@ -833,6 +1279,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         globalMouseMonitor = nil
         localMouseMonitor = nil
+        // Reset the hold so the next expand starts clean.
+        heldCollapseRect = .zero
+        heldCollapseUntil = .distantPast
+    }
+
+    /// The rect the collapse test uses, smoothed so it never trails the rendered
+    /// panel on a SHRINK. A grow (or the first sighting) is adopted immediately —
+    /// the cursor is already inside the larger area. A shrink holds the previous,
+    /// larger rect for islandShrinkSettle so the down-spring can't collapse the
+    /// panel under a cursor resting in the still-visible band; once the hold
+    /// elapses the render has caught up and the smaller target is adopted.
+    private func collapseRect(target: NSRect) -> NSRect {
+        let now = Date()
+        if target.height >= heldCollapseRect.height {
+            heldCollapseRect = target
+            heldCollapseUntil = .distantPast
+        } else if heldCollapseUntil == .distantPast {
+            // First frame of a new shrink — start the hold, keep the larger rect.
+            heldCollapseUntil = now.addingTimeInterval(islandShrinkSettle)
+        } else if now >= heldCollapseUntil {
+            // Hold elapsed — adopt the settled (smaller) target.
+            heldCollapseRect = target
+            heldCollapseUntil = .distantPast
+        }
+        // else: within an active hold — keep the larger heldCollapseRect.
+        return heldCollapseRect
     }
 
     /// Pill mode: center the collapsed pill in the EMPTY stretch of the menu

@@ -71,9 +71,14 @@ final class TerminalSessionsModel: ObservableObject {
     /// usage-limit reset: clear any half-typed line (Ctrl-U, `\u{15}`) then type
     /// `continue` + Return straight to the PTY. The clear rides in the same write
     /// so a leftover partial prompt is never submitted as `<partial>continue`.
-    func resume(id: UUID) {
-        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return }
+    /// Returns whether it actually injected — `false` when the session is gone or
+    /// its shell has died, so the caller can toast notify-only instead of a false
+    /// green "Resumed" (H5).
+    @discardableResult
+    func resume(id: UUID) -> Bool {
+        guard let session = sessions.first(where: { $0.id == id }), session.isAlive else { return false }
         session.view.send(txt: "\u{15}continue\r")
+        return true
     }
 
     /// Terminate a session's shell and drop it, reselecting a neighbour.
@@ -91,12 +96,30 @@ final class TerminalSessionsModel: ObservableObject {
     /// SIGHUP every live shell and close its PTY — called from
     /// `applicationWillTerminate` so quitting leaves no orphaned shells.
     func shutdown() {
+        // SIGHUP lets zsh run its exit path, which is what HUPs its own jobs.
+        // An immediate SIGKILL pre-empts that — the shell dies before it can
+        // signal anything, so every background job survives the quit and gets
+        // reparented to launchd. Match `closeSession`, which does this right.
         for session in sessions {
             signal(session.view, SIGHUP)
+            session.view.terminate()   // closes the PTY fds + SIGTERM
+        }
+        // Bounded backstop: give the shells a moment to leave on their own,
+        // then SIGKILL only the ones still alive. `applicationWillTerminate`
+        // may block briefly, so keep this short.
+        let deadline = Date().addingTimeInterval(0.25)
+        while Date() < deadline, sessions.contains(where: { isAlive($0.view) }) {
+            usleep(20_000)
+        }
+        for session in sessions where isAlive(session.view) {
             signal(session.view, SIGKILL)
-            session.view.terminate()
         }
         sessions.removeAll()
+    }
+
+    private func isAlive(_ view: LocalProcessTerminalView) -> Bool {
+        let pid = view.process.shellPid
+        return pid > 0 && kill(pid, 0) == 0
     }
 
     private func signal(_ view: LocalProcessTerminalView, _ sig: Int32) {

@@ -9,11 +9,29 @@ import SwiftUI
 struct AgentsTab: View {
     @EnvironmentObject var agents: AgentSessionsModel
     @EnvironmentObject var state: NotchState
+    @EnvironmentObject var terminals: TerminalSessionsModel
 
     /// One shared clock so every row's "time-in-state" and context freshness
     /// advance together without a timer per row.
     @State private var now = Date()
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Measured natural heights (usage header, row stack) so the island can
+    /// hug the content instead of renting the whole 300pt panel (the reported
+    /// "big empty space"). Reported up via TabHugHeightKey.
+    @State private var usageH: CGFloat = 0
+    @State private var rowsH: CGFloat = 0
+
+    private var hasUsage: Bool { !(agents.usage?.isEmpty ?? true) }
+    /// nil = "not measured yet" — hugSize then holds the CAP rather than a tiny
+    /// pre-measurement value. usageH/rowsH start at 0, so reporting the populated
+    /// height before the GeometryReaders land published ~0, which hugSize floored
+    /// to 120 and the spring-animated panel visibly dipped cap→120→real. Report
+    /// nil until both readers that feed the height have reported.
+    private var naturalHeight: CGFloat? {
+        if agents.sessions.isEmpty { return 150 }  // empty state: known constant
+        guard rowsH > 0, (!hasUsage || usageH > 0) else { return nil }
+        return (hasUsage ? usageH + 8 : 0) + rowsH
+    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -22,10 +40,19 @@ struct AgentsTab: View {
             // written them at least once).
             if let usage = agents.usage, !usage.isEmpty {
                 UsageHeader(usage: usage, now: now)
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { usageH = g.size.height }
+                            .onChange(of: g.size.height) { usageH = $0 }
+                    })
             }
             sessionList
         }
-        .onReceive(timer) { now = $0 }
+        .preference(key: TabHugHeightKey.self, value: naturalHeight)
+        // The tab is faded to opacity 0, never unmounted, so this 1 Hz clock
+        // kept re-laying-out an invisible list of rows — per-row date math and
+        // token formatting once a second with the notch closed.
+        .onReceive(timer) { if state.isExpanded && state.currentTab == .agents { now = $0 } }
         .onAppear { agents.acknowledgeCompletes() }
     }
 
@@ -38,6 +65,13 @@ struct AgentsTab: View {
             // simply doesn't scroll. maxHeight:.infinity bounds the scroll region.
             ScrollView(showsIndicators: true) {
                 VStack(spacing: 6) { rows }
+                    // Natural row-stack height (inside the scroll content, so
+                    // it's unclamped by the viewport) for the hug sizing.
+                    .background(GeometryReader { g in
+                        Color.clear
+                            .onAppear { rowsH = g.size.height }
+                            .onChange(of: g.size.height) { rowsH = $0 }
+                    })
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -49,15 +83,50 @@ struct AgentsTab: View {
         }
     }
 
+    /// An empty list is only "nothing is running" when discovery actually
+    /// worked. Otherwise say what broke, because the offered remedy (launch a
+    /// terminal) cannot help — the new session would not appear either.
+    private var emptyHeadline: String {
+        switch agents.discovery {
+        case .ok:                    return "No Claude Code sessions running"
+        case .sessionsDirMissing:    return "Can't see Claude Code sessions"
+        case .sessionsDirUnreadable: return "Can't read Claude Code sessions"
+        }
+    }
+
+    private var emptyDetail: String? {
+        switch agents.discovery {
+        case .ok:                          return nil
+        case .sessionsDirMissing:          return "~/.claude/sessions doesn't exist — needs Claude Code 2.x"
+        case .sessionsDirUnreadable(let e): return e
+        }
+    }
+
     private var emptyState: some View {
         VStack(spacing: 10) {
             Spacer()
             Image(systemName: "sparkles")
                 .font(.system(size: 26))
                 .foregroundStyle(.white.opacity(0.25))
-            Text("No Claude Code sessions running")
+            Text(emptyHeadline)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+            if let detail = emptyDetail {
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Neutral launch button (not an accent fill — green/amber/orange are
+            // reserved for session state in this tab). Opens the notch's own
+            // terminal so a `claude` started there comes back as a .notch row.
+            LaunchButton(icon: "plus", label: "Launch Terminal") {
+                state.currentTab = .terminal
+                terminals.newSession()
+            }
+            .help("New terminal in the notch — start a Claude session")
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -201,24 +270,32 @@ private struct AgentRow: View {
                 }
 
                 // State label + time-in-state, or output tokens on hover.
-                HStack(spacing: 5) {
-                    if hovered {
-                        Text("↑ \(tokenString(session.outputTokens)) out")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .monospacedDigit()
-                    } else {
-                        Text(session.state.label)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(session.state.tint.opacity(0.9))
-                        Text("· \(timeInState)")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white.opacity(0.4))
-                            .monospacedDigit()
+                // Second line: on a waiting row, the FULL pending command (wraps,
+                // wins over the hover→tokens flip so you can always read what
+                // you're approving); otherwise state + time-in-state, or output
+                // tokens on hover.
+                if session.state == .waiting, let pending = session.pendingTool {
+                    approvePreview(pending)
+                } else {
+                    HStack(spacing: 5) {
+                        if hovered {
+                            Text("↑ \(tokenString(session.outputTokens)) out")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.5))
+                                .monospacedDigit()
+                        } else {
+                            Text(session.state.label)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(session.state.tint.opacity(0.9))
+                            Text("· \(timeInState)")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.4))
+                                .monospacedDigit()
+                        }
+                        terminalTag
+                        Spacer(minLength: 4)
+                        contextLabel
                     }
-                    terminalTag
-                    Spacer(minLength: 4)
-                    contextLabel
                 }
 
                 contextMeter
@@ -234,14 +311,29 @@ private struct AgentRow: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .help(session.cwd)
+        // Right-click anywhere on the row to enable/disable auto-resume — the
+        // reliable, always-there path (no hover, no cap-state guessing) the dim
+        // ⚡ bolt never gave.
+        .contextMenu { autoResumeMenu }
+        // Leaving the island (row unmount: collapse / tab switch / re-sort) drops
+        // any in-flight "Cancel?" confirm back to the armed pill. The pending work
+        // is only an auto-revert now, but cancel it anyway so it can't fire against
+        // a torn-down row; resetting resumeCancelling keeps the arm and re-renders
+        // the countdown on return. (Cancelling is a deliberate two-tap; leaving is
+        // not one of the taps, so it must never cancel.)
+        .onDisappear {
+            resumeCancelWork?.cancel()
+            resumeCancelWork = nil
+            resumeCancelling = false
+        }
     }
 
     // Working-state pulse target (animates between 0.35 and 1).
     @State private var pulse: Double = 1
 
-    /// The session's terminal identity — a small mono tty tag (`⌗ ttys003`) or
-    /// `notch` for a session hosted in the island's own Terminal tab. Nothing for
-    /// a headless / unknown host (`.none`).
+    /// The session's terminal identity — only `notch` for a session hosted in the
+    /// island's own Terminal tab. The raw `ttys###` tags were dropped as noise;
+    /// external and headless hosts now show nothing here.
     @ViewBuilder
     private var terminalTag: some View {
         if let tag = terminalTagText {
@@ -254,10 +346,35 @@ private struct AgentRow: View {
         }
     }
 
+    /// Replaces the "Waiting · 12s" state line on a `.waiting` row with the pending
+    /// tool call, showing the ENTIRE command: `Bash · <command>` — tool name in
+    /// orange semibold, the full command (or path / host) in dim mono, wrapping
+    /// across as many lines as it needs so you can read exactly what you're about
+    /// to approve. The Agents list scrolls inside the fixed island panel, so a
+    /// taller waiting row grows the scroll content, never the island's outer
+    /// geometry. Built by Text concatenation so it wraps as one paragraph.
+    @ViewBuilder
+    private func approvePreview(_ pending: (name: String, detail: String)) -> some View {
+        let head = Text(pending.name)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(.orange)
+        let detail = pending.detail.isEmpty
+            ? Text("")
+            : Text(" · ").font(.system(size: 9)).foregroundColor(.white.opacity(0.4))
+              + Text(pending.detail).font(.system(size: 9, design: .monospaced))
+                  .foregroundColor(.white.opacity(0.62))
+        (head + detail)
+            .lineSpacing(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var terminalTagText: (symbol: String, text: String)? {
         switch session.host {
         case .notch:                       return ("sparkle", "notch")
-        case .terminalApp, .other:         return session.tty.map { ("terminal", $0) }
+        // ttys### tags removed as visual noise — a Terminal.app/other host now
+        // carries no tag (Open still works off the resolved tty under the hood).
+        case .terminalApp, .other:         return nil
         case .none:                        return nil
         }
     }
@@ -294,7 +411,7 @@ private struct AgentRow: View {
                         .background(Capsule().fill(.green))
                 }
                 .buttonStyle(.plain)
-                .help("Approve — send Return to accept the prompt")
+                .help(approveHelp)
             }
             if canOpen, hovered || session.needsAttention {
                 Button { open() } label: {
@@ -313,9 +430,48 @@ private struct AgentRow: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.75), value: resumeCancelling)
     }
 
+    /// Approve tooltip — names the exact pending call (full command, ≤2000 chars).
+    /// The row already shows the whole command wrapped; this mirrors it on hover.
+    private var approveHelp: String {
+        if let p = session.pendingTool, !p.detail.isEmpty {
+            return "Approve: \(p.name) \(p.detail)"
+        }
+        return "Approve — send Return to accept the prompt"
+    }
+
     private var openHelp: String {
         if case .other(let app) = session.host { return "Open \(app)" }
         return "Jump to this session's terminal"
+    }
+
+    // MARK: Auto-resume right-click menu
+
+    /// Enable/disable auto-resume for this session. Primary control now — a
+    /// right-click is always available, unlike the hover ⚡ (which only appeared
+    /// on a capped/banner hover and read as a dead glyph). Enabling force-arms via
+    /// the same path as the bolt (`armManually`): it needs a known reset window
+    /// (a live cap or the session's own limit banner), so it's offered only then;
+    /// otherwise the item explains why. Disabling cancels the arm for this window.
+    @ViewBuilder
+    private var autoResumeMenu: some View {
+        if !hostAutoTypeable {
+            Text("Auto-resume needs a Terminal.app or notch session")
+        } else if session.autoResumeArmed || session.autoResumeOptedIn {
+            Button(role: .destructive) { agents.setAutoResume(session.id, enabled: false) } label: {
+                Label("Disable auto-resume", systemImage: "bolt.slash.fill")
+            }
+            if let at = session.autoResumeAt {
+                Text("Resumes at \(Self.clock.string(from: at))")
+            } else {
+                Text("On — resumes when this session hits its limit")
+            }
+        } else {
+            // Always enabled: opting in is remembered and arms the moment a limit
+            // hits, so this is never a dead/greyed item.
+            Button { agents.setAutoResume(session.id, enabled: true) } label: {
+                Label("Enable auto-resume", systemImage: "bolt.fill")
+            }
+        }
     }
 
     // MARK: Auto-resume chip
@@ -331,8 +487,9 @@ private struct AgentRow: View {
     /// Trailing auto-resume affordance. On auto-typeable hosts: a dim ⚡ when not
     /// armed (display-only, revealed on hover like the other inactive controls);
     /// an amber countdown capsule when armed (always visible — a countdown must be
-    /// seen). Clicking the armed capsule flips to a ~5 s "undo" grace before the
-    /// cancel actually reaches the model. Hidden entirely on `.other`/`.none`.
+    /// seen). The amber pill is the ON state; the FIRST tap only asks ("Cancel?"),
+    /// a second deliberate tap cancels — a single tap can never drop the arm.
+    /// Hidden entirely on `.other`/`.none`.
     @ViewBuilder
     private var autoResumeChip: some View {
         if hostAutoTypeable {
@@ -342,15 +499,25 @@ private struct AgentRow: View {
                 }
                 .buttonStyle(.plain)
                 .help(resumeCancelling
-                      ? "Auto-resume cancelled — click to undo"
-                      : "Auto-resumes at \(Self.clock.string(from: fireAt)) — click to cancel")
+                      ? "Tap again to cancel auto-resume — or wait to keep it"
+                      : "Auto-resume is on — resumes at \(Self.clock.string(from: fireAt)). Tap to cancel.")
                 .transition(.scale.combined(with: .opacity))
-            } else if hovered {
-                Image(systemName: "bolt.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.35))
-                    .frame(width: 20, height: 22)
-                    .help("Auto-resume — arms if this session is cut off by the usage limit")
+            } else if hovered, agents.isCapped || session.hasLimitBanner {
+                // A REAL button now (was a dead display-only glyph). Surfaced when
+                // the account is at its ceiling OR this session is sitting on a
+                // live limit banner — either way a tap arms it to continue when
+                // the window resets. Manual arming bypasses the auto-arm shape/pct
+                // gates, so it works even on a finished session the user wants to
+                // keep going.
+                Button { agents.setAutoResume(session.id, enabled: true) } label: {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Self.amber.opacity(0.8))
+                        .frame(width: 20, height: 22)
+                }
+                .buttonStyle(.plain)
+                .transition(.scale.combined(with: .opacity))
+                .help("Enable auto-resume — continue this session when the limit window resets")
             }
         }
     }
@@ -369,49 +536,43 @@ private struct AgentRow: View {
         .overlay(Capsule().stroke(Self.amber.opacity(0.55), lineWidth: 1))
     }
 
+    /// The confirm state after the first tap: a clear red "Cancel?" so the tap
+    /// reads as destructive (not "activate"). A second tap here commits; anything
+    /// else (wait/leave/tap elsewhere) reverts to the armed pill.
     private var cancellingCapsule: some View {
         HStack(spacing: 3) {
-            Image(systemName: "arrow.uturn.backward").font(.system(size: 8, weight: .bold))
-            Text("undo").font(.system(size: 9, weight: .medium))
+            Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+            Text("Cancel?").font(.system(size: 9, weight: .semibold))
         }
-        .foregroundStyle(.white.opacity(0.6))
+        .foregroundStyle(.red)
         .padding(.horizontal, 7)
         .frame(height: 22)
-        .background(Capsule().fill(.white.opacity(0.1)))
+        .background(Capsule().fill(.red.opacity(0.14)))
+        .overlay(Capsule().stroke(.red.opacity(0.55), lineWidth: 1))
     }
 
-    /// First click on the armed capsule ⇒ show "undo" and start a 5 s grace; the
-    /// model stays armed the whole time. Grace lapses ⇒ tell the model to cancel.
-    /// Click again within grace ⇒ just cancel the pending work, back to armed.
+    /// The amber pill is the "auto-resume is ON" STATUS — a single tap must never
+    /// disable it. The old design (tap → 5 s timer → cancel) was a trap: users tap
+    /// the pill to *engage* the feature (the pill IS the engaged state), and the
+    /// timer then dropped the arm on leave/forget — "I activated it, came back, it
+    /// was gone." So now a tap only ARMS a confirm; the arm stays live. A second
+    /// deliberate tap actually cancels. The pending work item is an auto-REVERT
+    /// (back to armed), never an auto-cancel, so waiting, leaving, or a stray tap
+    /// can only ever KEEP the arm — cancelling always takes two intentional taps.
     private func toggleResumeCancel() {
+        resumeCancelWork?.cancel()
+        resumeCancelWork = nil
         if resumeCancelling {
-            resumeCancelWork?.cancel()
-            resumeCancelWork = nil
+            // Second, deliberate tap → actually cancel (reaches the model now).
             resumeCancelling = false
+            agents.cancelAutoResume(session.id)
         } else {
-            let id = session.id
-            // Too close to fire time for the undo grace to be safe: the wall-clock
-            // fire timer would beat a 5 s-delayed cancel and resume anyway. Cancel
-            // NOW (a brief "cancelled" flash instead of an undo window).
-            if let fireAt = session.autoResumeAt, fireAt.timeIntervalSince(now) < 6 {
-                agents.cancelAutoResume(id)
-                resumeCancelling = true
-                let flash = DispatchWorkItem {
-                    resumeCancelling = false
-                    resumeCancelWork = nil
-                }
-                resumeCancelWork = flash
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: flash)
-                return
-            }
+            // First tap → ask. Nothing is cancelled; auto-revert to armed shortly
+            // so a stray tap doesn't leave the pill stuck in the confirm state.
             resumeCancelling = true
-            let work = DispatchWorkItem {
-                agents.cancelAutoResume(id)
-                resumeCancelling = false
-                resumeCancelWork = nil
-            }
-            resumeCancelWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+            let revert = DispatchWorkItem { resumeCancelling = false; resumeCancelWork = nil }
+            resumeCancelWork = revert
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: revert)
         }
     }
 
@@ -437,7 +598,7 @@ private struct AgentRow: View {
     private func open() {
         switch session.host {
         case .terminalApp:
-            agents.focus(session) { missed in if missed { missedToast() } }
+            agents.focus(session) { outcomeToast($0) }
         case .notch(let sid):
             state.currentTab = .terminal
             terminals.selectedID = sid
@@ -453,7 +614,7 @@ private struct AgentRow: View {
     private func approve() {
         switch session.host {
         case .terminalApp:
-            agents.approve(session) { missed in if missed { missedToast() } }
+            agents.approve(session) { outcomeToast($0) }
         case .notch(let sid):
             terminals.sendReturn(to: sid)
         case .other, .none:
@@ -461,9 +622,28 @@ private struct AgentRow: View {
         }
     }
 
-    private func missedToast() {
-        state.showToast(NotchToast(icon: "terminal", title: "Terminal tab not found",
-                                   color: .gray))
+    /// Name the actual failure. A denied Automation grant used to arrive here
+    /// as "Terminal tab not found", which sent the user hunting for a stale
+    /// session instead of to System Settings.
+    private func outcomeToast(_ outcome: AgentTerminalControl.Outcome) {
+        switch outcome {
+        case .ok:
+            return
+        case .notAuthorized:
+            state.showToast(NotchToast(icon: "hand.raised",
+                                       title: "Automation is blocked",
+                                       subtitle: "Allow Terminal under Privacy & Security › Automation",
+                                       color: .orange))
+        case .appNotRunning:
+            state.showToast(NotchToast(icon: "terminal", title: "Terminal isn't running",
+                                       color: .gray))
+        case .timedOut:
+            state.showToast(NotchToast(icon: "clock", title: "Terminal didn't respond",
+                                       color: .orange))
+        case .noTTY, .notFound:
+            state.showToast(NotchToast(icon: "terminal", title: "Terminal tab not found",
+                                       color: .gray))
+        }
     }
 
     /// Best-effort activate a recognized non-scriptable host app (iTerm2, Code…).

@@ -196,6 +196,7 @@ struct MediaTab: View {
     /// not scrubbing. Shown live; the actual seek fires on release.
     @State private var scrubFraction: Double?
     @State private var progressHover = false
+    @State private var volumeHover = false
 
     var body: some View {
         if let np = media.nowPlaying {
@@ -242,11 +243,13 @@ struct MediaTab: View {
                         .frame(height: 4)
                     Capsule().fill(media.accent)
                         .frame(width: max(4, geo.size.width * volume / 100), height: 4)
-                    // Knob so the slider reads as a slider.
+                    // Knob appears on hover, like the progress bar's — the
+                    // resting look stays clean.
                     Circle().fill(.white)
                         .frame(width: 10, height: 10)
                         .shadow(color: .black.opacity(0.4), radius: 1, y: 0.5)
                         .offset(x: max(0, geo.size.width * volume / 100 - 5))
+                        .opacity(volumeHover ? 1 : 0)
                 }
                 .frame(height: geo.size.height)
                 .contentShape(Rectangle().inset(by: -8))
@@ -257,8 +260,10 @@ struct MediaTab: View {
                         }
                         .onEnded { _ in media.setPlayerVolume(volume) }
                 )
+                .onHover { volumeHover = $0 }
             }
             .frame(height: 10)
+            .animation(.easeOut(duration: 0.12), value: volumeHover)
             Image(systemName: "speaker.wave.2.fill")
                 .font(.system(size: 8))
                 .foregroundStyle(.white.opacity(0.4))
@@ -294,10 +299,20 @@ struct MediaTab: View {
                                 EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
                                               barWidth: 2.5, maxHeight: 26,
                                               color: media.accent,
-                                              animating: np.isPlaying && state.isExpanded,
+                                              animating: np.isPlaying && state.isExpanded
+                                                  && spectrum.failure == nil,
                                               levels: np.isPlaying && !spectrum.levels.isEmpty
                                                   ? spectrum.levels : nil)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .overlay(alignment: .center) {
+                                        // Name the reason instead of faking a
+                                        // waveform over a tap that isn't running.
+                                        if let why = spectrum.failure {
+                                            Text(why)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.white.opacity(0.4))
+                                        }
+                                    }
                             }
                         }
                         .buttonStyle(.plain)
@@ -396,33 +411,36 @@ struct MediaTab: View {
     }
 
     private var placeholder: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "music.note")
-                .font(.system(size: 26))
-                .foregroundStyle(.white.opacity(0.25))
+        // The launch button row is the anchor: it sits at the vertical center
+        // of the tab's content area (the maxHeight fill centers the row's
+        // intrinsic frame). The caption floats directly above it via an
+        // overlay whose own height drives the offset, so the 14 pt gap holds
+        // no matter how the panel height shifts.
+        HStack(spacing: 10) {
+            LaunchButton(icon: "music.note", label: "Music") {
+                media.launchAndPlay(.music)
+            }
+            if FileManager.default.fileExists(atPath: "/Applications/Spotify.app") {
+                LaunchButton(icon: "waveform", label: "Spotify") {
+                    media.launchAndPlay(.spotify)
+                }
+            }
+            LaunchButton(icon: "play.rectangle.fill", label: "YouTube") {
+                if let url = URL(string: "https://www.youtube.com") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+        .overlay(alignment: .top) {
             Text("Nothing Playing")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.6))
-            HStack(spacing: 10) {
-                LaunchButton(icon: "music.note", label: "Music") {
-                    media.launchAndPlay(.music)
-                }
-                if FileManager.default.fileExists(atPath: "/Applications/Spotify.app") {
-                    LaunchButton(icon: "waveform", label: "Spotify") {
-                        media.launchAndPlay(.spotify)
-                    }
-                }
-                LaunchButton(icon: "play.rectangle.fill", label: "YouTube") {
-                    if let url = URL(string: "https://www.youtube.com") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-            }
-            .padding(.top, 4)
-            Spacer()
+                // Park the caption 14 pt above the button row — matching the
+                // old 10 pt VStack gap + 4 pt top padding — measured from its
+                // own bottom edge so it never overlaps the buttons.
+                .alignmentGuide(.top) { dims in dims.height + 14 }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var artwork: some View {
@@ -734,7 +752,7 @@ private struct InstrumentalDots: View {
     }
 }
 
-private struct LaunchButton: View {
+struct LaunchButton: View {
     let icon: String
     let label: String
     let action: () -> Void
@@ -959,8 +977,18 @@ private struct TrayTile: View {
     @EnvironmentObject var settings: SettingsStore
     let url: URL
 
-    @State private var thumbnail: NSImage?
+    @EnvironmentObject private var state: NotchState
+    @State private var thumb: ThumbState?
     @State private var hovered = false
+    /// A dropped file can be deleted, renamed or on an ejected volume. The
+    /// shelf used to render it with a full-colour Finder icon forever, so a
+    /// dead tile was indistinguishable from a live one and Open / Reveal /
+    /// AirDrop were silent no-ops.
+    private var unreachable: Bool { thumb == .missing || thumb == .denied }
+
+    private func reload() {
+        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
+    }
 
     /// Visual tile edge = the grid cell (tile-size setting) minus the 8pt of
     /// surrounding spacing the grid reserves.
@@ -970,8 +998,8 @@ private struct TrayTile: View {
         VStack(spacing: 4) {
             ZStack(alignment: .topTrailing) {
                 Group {
-                    if let thumbnail {
-                        Image(nsImage: thumbnail)
+                    if case .image(let img) = thumb {
+                        Image(nsImage: img)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     } else {
@@ -982,6 +1010,16 @@ private struct TrayTile: View {
                     }
                 }
                 .frame(width: side, height: side)
+                .saturation(unreachable ? 0 : 1)
+                .opacity(unreachable ? 0.45 : 1)
+                .overlay(alignment: .bottomLeading) {
+                    if unreachable {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .padding(3)
+                    }
+                }
                 .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
@@ -1005,7 +1043,8 @@ private struct TrayTile: View {
             }
             Text(url.lastPathComponent)
                 .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(hovered ? 0.9 : 0.55))
+                .foregroundStyle(.white.opacity(unreachable ? 0.35 : (hovered ? 0.9 : 0.55)))
+                .strikethrough(unreachable)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: side + 8)
@@ -1014,19 +1053,22 @@ private struct TrayTile: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .onDrag { NSItemProvider(object: url as NSURL) }
-        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .onTapGesture(count: 2) { if !unreachable { NSWorkspace.shared.open(url) } }
+        .help(unreachable ? "\(url.path) — file is missing" : url.path)
         .contextMenu {
-            Button("Open") { NSWorkspace.shared.open(url) }
+            // Everything but Remove is a no-op on a file that isn't there.
+            Button("Open") { NSWorkspace.shared.open(url) }.disabled(unreachable)
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
-            }
-            Button("AirDrop") { tray.airDrop([url]) }
+            }.disabled(unreachable)
+            Button("AirDrop") { tray.airDrop([url]) }.disabled(unreachable)
             Divider()
             Button("Remove") { tray.remove(url) }
         }
-        .onAppear {
-            TrayThumbnails.shared.load(url, side: side) { thumbnail = $0 }
-        }
+        .onAppear { reload() }
+        // Re-check when the tab becomes visible again: a file can come back
+        // (volume remounted, download finished) and the tile must catch up.
+        .onChange(of: state.currentTab) { if $0 == .tray { reload() } }
     }
 }
 
@@ -1061,26 +1103,12 @@ struct CalendarTab: View {
     }
 
     private var connectPrompt: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "calendar")
-                .font(.system(size: 28))
-                .foregroundStyle(.white.opacity(0.3))
-            Text("Connect your Calendar")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
-            Button { calendarModel.connect() } label: {
-                Text("Allow Access")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(.orange))
-                    .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
+        PermissionGate(icon: "calendar",
+                       feature: "Calendar",
+                       state: calendarModel.permission,
+                       pane: .calendars,
+                       request: { calendarModel.connect() },
+                       retry: { calendarModel.refreshAuthorization() })
     }
 
     // MARK: List / month toggle
@@ -1341,12 +1369,10 @@ struct MirrorTab: View {
     @EnvironmentObject var state: NotchState
 
     var body: some View {
+        // No onAppear auto-start: the tab DEFAULTS to the Show Mirror
+        // placeholder at standard size — clicking the button is the only
+        // intent that starts the camera (and expands the panel).
         content
-            .onAppear {
-                // Once permission is granted, opening the tab IS the intent —
-                // no extra click needed each time.
-                mirror.resumeIfAuthorized()
-            }
     }
 
     @ViewBuilder
@@ -1378,39 +1404,40 @@ struct MirrorTab: View {
                     .buttonStyle(.plain)
                     .padding(8)
                 }
+        } else if mirror.denied || mirror.unavailable {
+            // Error states have no button to anchor on, so keep the icon +
+            // message centered between spacers as before.
+            // Both states are now recoverable: the gate always offers either a
+            // Settings deep-link or a retry, so a denial can no longer strand
+            // the tab with no way back.
+            PermissionGate(icon: "web.camera",
+                           feature: "Camera",
+                           state: mirror.permission,
+                           pane: .camera,
+                           request: { mirror.start() },
+                           retry: { mirror.retry() })
         } else {
-            VStack(spacing: 10) {
-                Spacer()
-                Image(systemName: "web.camera")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.white.opacity(0.3))
-                if mirror.denied {
-                    Text("Camera access denied — enable it in\nSystem Settings → Privacy → Camera")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .multilineTextAlignment(.center)
-                } else if mirror.unavailable {
-                    Text("No camera available")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .multilineTextAlignment(.center)
-                } else {
-                    Text("Check yourself before a call")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Button { mirror.start() } label: {
-                        Text("Show Mirror")
-                            .font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(.orange))
-                            .foregroundStyle(.black)
-                    }
-                    .buttonStyle(.plain)
-                }
-                Spacer()
+            // Same composition as the media tab's placeholder: the "Show
+            // Mirror" button is the anchor, centered in the content area, with
+            // the caption floating 14 pt above it (its own height drives the
+            // offset). The web.camera icon is dropped — at the panel's real
+            // height it clipped past the top edge.
+            Button { mirror.start() } label: {
+                Text("Show Mirror")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(.orange))
+                    .foregroundStyle(.black)
             }
-            .frame(maxWidth: .infinity)
+            .buttonStyle(.plain)
+            .overlay(alignment: .top) {
+                Text("Check yourself before a call")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .alignmentGuide(.top) { dims in dims.height + 14 }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -1429,51 +1456,74 @@ struct StatsTab: View {
         HStack(spacing: 6) {
             if vis("cpu") {
                 StatTile(title: "CPU",
-                         center: pct(stats.cpu),
+                         center: stats.cpu < 0 ? "—" : pct(stats.cpu),
                          detail: nil,
-                         fraction: stats.cpu)
+                         fraction: max(stats.cpu, 0),
+                         unavailableReason: stats.unavailable["cpu"])
             }
             if vis("memory") {
                 StatTile(title: "Memory",
                          center: pct(stats.memUsed / stats.memTotal),
                          detail: "\(gb(stats.memUsed)) / \(gb(stats.memTotal)) GB",
-                         fraction: stats.memUsed / stats.memTotal)
+                         fraction: stats.memUsed / stats.memTotal,
+                         unavailableReason: stats.unavailable["memory"])
             }
             if vis("gpu") {
                 StatTile(title: "GPU",
                          center: stats.gpu < 0 ? "—" : pct(stats.gpu),
                          detail: nil,
-                         fraction: max(stats.gpu, 0))
+                         fraction: max(stats.gpu, 0),
+                         unavailableReason: stats.unavailable["gpu"])
             }
             if vis("disk") {
                 StatTile(title: "Disk",
                          center: stats.diskTotal > 0
                             ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
-                         detail: "\(gb(stats.diskFree)) GB free",
+                         detail: "\(gbDecimal(stats.diskFree)) GB free",
                          fraction: stats.diskTotal > 0
-                            ? 1 - stats.diskFree / stats.diskTotal : 0)
+                            ? 1 - stats.diskFree / stats.diskTotal : 0,
+                         unavailableReason: stats.unavailable["disk"])
             }
             if vis("fan") {
                 StatTile(title: "Fan",
                          center: stats.fanRPM < 0 ? "—"
                             : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
                          detail: stats.fanRPM >= 1 ? "rpm" : nil,
-                         fraction: stats.fanRPM < 0 ? 0 : min(stats.fanRPM / 6000, 1))
+                         fraction: fanFraction,
+                         unavailableReason: stats.unavailable["fan"])
             }
             if vis("battery") {
                 StatTile(title: "Battery",
                          center: stats.batteryLevel < 0 ? "—" : pct(stats.batteryLevel),
                          detail: stats.batteryCharging ? "charging ⚡" : nil,
                          fraction: max(stats.batteryLevel, 0),
-                         invertSeverity: true)
+                         invertSeverity: true,
+                         unavailableReason: stats.unavailable["battery"])
             }
         }
         .padding(.top, 4)
     }
 
+    /// Normalized against the fan's own rated range (SMC `F0Mn`/`F0Mx`) rather
+    /// than a hardcoded 6000, which on this machine (min 2317, max 6550) made
+    /// the ring sit ~39% full at idle and saturate before the fan did.
+    private var fanFraction: Double {
+        guard stats.fanRPM > 0 else { return 0 }
+        guard stats.fanMax > stats.fanMin else { return min(stats.fanRPM / 6000, 1) }
+        let span = stats.fanMax - stats.fanMin
+        return min(max((stats.fanRPM - stats.fanMin) / span, 0), 1)
+    }
+
     private func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+    /// RAM, which is conventionally binary — 32 GiB reads as the "32" users expect.
     private func gb(_ bytes: Double) -> String {
         String(format: "%.0f", bytes / 1_073_741_824)
+    }
+    /// Storage, which macOS reports in decimal GB everywhere the user can check
+    /// it — Finder, About This Mac, `df -H`, `diskutil`. Using the binary
+    /// divisor here made the tile read ~50 GB short of Finder.
+    private func gbDecimal(_ bytes: Double) -> String {
+        String(format: "%.0f", bytes / 1_000_000_000)
     }
 }
 
@@ -1483,6 +1533,12 @@ private struct StatTile: View {
     let detail: String?
     let fraction: Double
     var invertSeverity = false
+    /// Why this metric has no value, when it has none. A tile showing "—" used
+    /// to paint the same 0.02 stub as a genuine 0% — and for Battery, where
+    /// severity is inverted, "no data" came out RED, spending the app's most
+    /// urgent colour on "I don't know".
+    var unavailableReason: String? = nil
+    private var isUnavailable: Bool { unavailableReason != nil || center == "—" }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -1490,7 +1546,9 @@ private struct StatTile: View {
                 Circle()
                     .stroke(.white.opacity(0.12), lineWidth: 3.5)
                 Circle()
-                    .trim(from: 0, to: max(0.02, min(fraction, 1)))
+                    // No trim stub when there is nothing to show: an empty
+                    // track reads as "no data", a 2% arc reads as "almost zero".
+                    .trim(from: 0, to: isUnavailable ? 0 : max(0.02, min(fraction, 1)))
                     .stroke(ringColor,
                             style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
@@ -1525,6 +1583,7 @@ private struct StatTile: View {
     }
 
     private var ringColor: Color {
+        if isUnavailable { return .white.opacity(0.18) }
         let severity = invertSeverity ? 1 - fraction : fraction
         if severity > 0.85 { return .red }
         if severity > 0.6 { return .yellow }
@@ -1545,7 +1604,11 @@ struct TogglesTab: View {
             if vis("darkMode") || vis("keepAwake") || vis("hideDesktop") {
                 HStack(spacing: 6) {
                     if vis("darkMode") {
-                        ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
+                        // The glyph reports the appearance that is currently
+                        // ON — moon in dark mode, sun in light — rather than
+                        // being a fixed moon that says nothing either way.
+                        ToggleCard(icon: toggles.darkMode ? "moon.fill" : "sun.max.fill",
+                                   label: "Dark Mode", active: false) {
                             toggles.toggleDarkMode()
                         }
                     }
@@ -1795,31 +1858,65 @@ struct EqualizerBars: View {
     var levels: [Float]? = nil
 
     @State private var t: Double = 0
-    private let timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common).autoconnect()
+    /// Smoothed per-bar heights, eased toward their targets every frame so raw
+    /// spectrum samples don't make the bars jump.
+    @State private var displayed: [CGFloat] = []
+    private let timer = Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        HStack(spacing: barWidth) {
-            ForEach(0..<barCount, id: \.self) { i in
-                Capsule()
-                    .fill(color)
-                    .frame(width: barWidth, height: height(i))
-                    .frame(height: maxHeight, alignment: .center)
+        let gap = barWidth
+        let w = CGFloat(barCount) * barWidth + CGFloat(max(0, barCount - 1)) * gap
+        // Draw the bars in a Canvas with a FIXED frame. Only the pixels inside
+        // redraw each tick — the view's geometry never changes — so the refresh
+        // can't yank the bars out of the island's own move animation. (The old
+        // HStack rebuilt a row of Capsule views every tick and carried its own
+        // `.animation`, so the bars escaped the parent transaction and arrived
+        // early or lagged as the panel slid.) Motion is smoothed by easing the
+        // heights toward their targets here at 30fps instead of via `.animation`
+        // — no display link, so it keeps ticking inside the non-key overlay panel.
+        return Canvas { ctx, size in
+            for i in 0..<barCount {
+                let h = max(barWidth, i < displayed.count ? displayed[i] : maxHeight * 0.25)
+                let x = CGFloat(i) * (barWidth + gap)
+                let rect = CGRect(x: x, y: (size.height - h) / 2, width: barWidth, height: h)
+                ctx.fill(Path(roundedRect: rect, cornerRadius: barWidth / 2), with: .color(color))
             }
         }
-        .onReceive(timer) { _ in
-            if animating, levels == nil { t += 1.0 / 20.0 }
-        }
-        .animation(.linear(duration: 0.09), value: levels)
+        .frame(width: w, height: maxHeight)
+        .onReceive(timer) { _ in step() }
     }
 
-    private func height(_ i: Int) -> CGFloat {
+    private func step() {
+        let rest = maxHeight * 0.25
+        if displayed.count != barCount {
+            displayed = Array(repeating: rest, count: barCount)
+        }
+        // Idle (paused, no live samples): settle flat once, then stop redrawing.
+        let live = animating || !(levels?.isEmpty ?? true)
+        guard live else {
+            if displayed.contains(where: { abs($0 - rest) > 0.25 }) {
+                displayed = Array(repeating: rest, count: barCount)
+            }
+            return
+        }
+        if levels == nil { t += 1.0 / 30.0 }
+        // Ease toward the target — snap up fast on transients, fall a touch
+        // slower, so the bars feel lively but never jitter.
+        for i in 0..<barCount {
+            let target = targetHeight(i, rest: rest)
+            let s: CGFloat = target > displayed[i] ? 0.5 : 0.22
+            displayed[i] += (target - displayed[i]) * s
+        }
+    }
+
+    private func targetHeight(_ i: Int, rest: CGFloat) -> CGFloat {
         if let levels, !levels.isEmpty {
             // Map bars onto the history, newest sample on the right.
             let idx = levels.count - 1 - ((barCount - 1 - i) * levels.count) / barCount
             let level = levels[max(0, min(levels.count - 1, idx))]
             return max(barWidth, maxHeight * CGFloat(level))
         }
-        guard animating else { return maxHeight * 0.25 }
+        guard animating else { return rest }
         let speed = 2.2 + Double(i % 4) * 0.35
         let phase = Double(i) * 0.9
         let v = (sin(t * speed + phase) + 1) / 2

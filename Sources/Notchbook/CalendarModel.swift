@@ -57,6 +57,36 @@ final class CalendarModel: ObservableObject {
         return status == .authorized
     }
 
+    /// The real authorization state, not a Bool. `denied`, `restricted` and
+    /// write-only used to render as "Connect your Calendar" with a button that
+    /// the system answers instantly and silently — a permanent dead end.
+    var permission: PermissionState {
+        switch status {
+        case .notDetermined: return .notDetermined
+        case .denied:        return .denied
+        case .restricted:    return .restricted
+        default: break
+        }
+        if #available(macOS 14.0, *) {
+            switch status {
+            case .fullAccess: return .granted
+            case .writeOnly:
+                return .insufficient("Notchbook can add events but not read them.")
+            default: return .denied
+            }
+        }
+        return status == .authorized ? .granted : .denied
+    }
+
+    /// Re-read the live TCC state. Nothing did this after init, so granting or
+    /// revoking access while the app ran left the tab wrong until relaunch.
+    func refreshAuthorization() {
+        let fresh = EKEventStore.authorizationStatus(for: .event)
+        guard fresh != status else { return }
+        status = fresh
+        if hasAccess { load() }
+    }
+
     func connect() {
         let done: (Bool) -> Void = { [weak self] granted in
             DispatchQueue.main.async {
@@ -69,6 +99,25 @@ final class CalendarModel: ObservableObject {
         } else {
             store.requestAccess(to: .event) { granted, _ in done(granted) }
         }
+    }
+
+    private var visibleTimer: Timer?
+
+    /// Called when the Calendar tab becomes visible or hidden. Loading only on
+    /// a tab CHANGE meant a notch left parked on Calendar showed the event list
+    /// from whenever the user last switched tabs — including meetings that had
+    /// already ended — because the panel is always mounted, so onAppear never
+    /// re-fires on expand. The 60 s tick keeps a long-open panel rolling.
+    func setVisible(_ visible: Bool) {
+        visibleTimer?.invalidate()
+        visibleTimer = nil
+        guard visible else { return }
+        refreshAuthorization()      // a grant/revoke while we were hidden
+        load()
+        visibleTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.load()
+        }
+        visibleTimer?.tolerance = 10
     }
 
     func load() {
