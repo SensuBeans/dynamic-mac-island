@@ -84,16 +84,51 @@ final class ServersModel: ObservableObject {
     /// be stale, and toggling against stale state inverts the user's intent. The
     /// button knows the state it rendered, so it calls the matching action.
     func start(_ name: String) {
-        mutate { reg in
+        setError(name, nil)
+        mutate { [weak self] reg in
             guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
             LocalStarter.start(&reg, &e)
+            // The exit status of the launch line means nothing: the real work is
+            // backgrounded with `&`, so zsh exits 0 even when the binary does not
+            // exist. Confirm by watching the port, and if it never binds, surface
+            // the last line of the log — which readLog could already produce and
+            // nothing ever called.
+            guard e.port > 0 else { return }
+            for _ in 0..<16 {
+                usleep(500_000)
+                if LocalStarter.portLive(e.port) { return }
+            }
+            let tail = LocalStarter.readLog(name, limit: 2048)
+                .split(separator: "\n").last.map(String.init)?
+                .trimmingCharacters(in: .whitespaces)
+            self?.setError(name, tail?.isEmpty == false ? tail! : "didn't start — no log output")
         }
     }
 
     func stop(_ name: String) {
-        mutate { reg in
+        setError(name, nil)
+        mutate { [weak self] reg in
             guard let e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
-            LocalStarter.stop(e)
+            switch LocalStarter.stop(e) {
+            case .stopped, .notRunning:
+                break
+            case .notOurs(let pid, let cmd):
+                self?.setError(name, "port :\(e.port) is held by \(cmd) (pid \(pid)) — not stopped")
+            case .refusedToDie(let pid):
+                self?.setError(name, "pid \(pid) ignored SIGTERM and SIGKILL")
+            }
+        }
+    }
+
+    /// Why a row's last action failed, keyed by server name. Before this, a
+    /// failed launch was byte-identical to one that was never attempted: no
+    /// spinner, no error, no log view, the dot just stayed gray.
+    @Published private(set) var lastError: [String: String] = [:]
+
+    private func setError(_ name: String, _ message: String?) {
+        DispatchQueue.main.async { [weak self] in
+            if let message { self?.lastError[name] = message }
+            else { self?.lastError.removeValue(forKey: name) }
         }
     }
 

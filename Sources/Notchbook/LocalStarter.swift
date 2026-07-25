@@ -155,30 +155,57 @@ enum LocalStarter {
     /// not a pid check, so a server started from a terminal still reads as
     /// running. Non-blocking connect + poll so a wedged listener can't stall the
     /// poll loop; 300 ms matches the old Python probe.
+    /// Dual-stack. This probed 127.0.0.1 only, which made every IPv6-bound dev
+    /// server read as permanently down: node's `listen(port, 'localhost')` —
+    /// the most common form on macOS, and what vite does — resolves ::1 first
+    /// and binds IPv6-only. The row then showed a gray dot and offered ▶, which
+    /// launched a second instance that could not bind and died silently.
+    /// The 300 ms budget is shared across both families, not spent per family.
     static func portLive(_ port: Int) -> Bool {
         guard port > 0, port < 65536 else { return false }
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let deadline = Date().addingTimeInterval(0.3)
+        if probe(port, family: AF_INET, deadline: deadline) { return true }
+        return probe(port, family: AF_INET6, deadline: deadline)
+    }
+
+    private static func probe(_ port: Int, family: Int32, deadline: Date) -> Bool {
+        let remaining = Int32(max(0, deadline.timeIntervalSinceNow * 1000))
+        guard remaining > 0 else { return false }
+        let fd = socket(family, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
         let flags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
 
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(UInt16(port).bigEndian)
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-
-        let rc = withUnsafePointer(to: &addr) { p in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let rc: Int32
+        if family == AF_INET {
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = in_port_t(UInt16(port).bigEndian)
+            addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+            rc = withUnsafePointer(to: &addr) { p in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        } else {
+            var addr6 = sockaddr_in6()
+            addr6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            addr6.sin6_family = sa_family_t(AF_INET6)
+            addr6.sin6_port = in_port_t(UInt16(port).bigEndian)
+            addr6.sin6_addr = in6addr_loopback
+            rc = withUnsafePointer(to: &addr6) { p in
+                p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
             }
         }
         if rc == 0 { return true }
         guard errno == EINPROGRESS else { return false }
 
         var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        guard poll(&pfd, 1, 300) == 1 else { return false }
+        guard poll(&pfd, 1, remaining) == 1 else { return false }
         var soErr: Int32 = 0
         var len = socklen_t(MemoryLayout<Int32>.size)
         guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 else { return false }
@@ -262,9 +289,89 @@ enum LocalStarter {
     /// probe, so the tab will happily show a server someone started from a
     /// terminal, and stop has to be able to stop that too. The wart is that it
     /// will also kill an unrelated process that happens to hold the port.
-    static func stop(_ entry: Entry) {
-        guard entry.port > 0 else { return }
-        shell("lsof -ti tcp:\(entry.port) -sTCP:LISTEN | xargs kill 2>/dev/null")
+    enum StopResult: Equatable {
+        case stopped
+        case notRunning
+        case refusedToDie(pid_t)
+        case notOurs(pid_t, String)
+    }
+
+    /// SIGTERM the listener, but only when it is ours, then verify and escalate.
+    ///
+    /// This used to be a bare `lsof … | xargs kill` with no ownership check, no
+    /// verification and no feedback: it would happily SIGTERM an unrelated
+    /// process that happened to hold the port, and a server that ignores SIGTERM
+    /// stayed up while the row kept showing green.
+    @discardableResult
+    static func stop(_ entry: Entry) -> StopResult {
+        guard entry.port > 0 else { return .notRunning }
+        switch owner(of: entry) {
+        case .free:
+            return .notRunning
+        case .stranger(let pid, let cmd):
+            return .notOurs(pid, cmd)
+        case .unknown:
+            shell("lsof -ti tcp:\(entry.port) -sTCP:LISTEN | xargs kill 2>/dev/null")
+        case .ours(let pid):
+            kill(pid, SIGTERM)
+        }
+        // Verify rather than assume, and escalate once if it refuses.
+        for _ in 0..<12 {
+            usleep(250_000)
+            if !portLive(entry.port) { return .stopped }
+        }
+        if let pid = listenerPid(entry.port) {
+            kill(pid, SIGKILL)
+            for _ in 0..<8 {
+                usleep(250_000)
+                if !portLive(entry.port) { return .stopped }
+            }
+            return .refusedToDie(pid)
+        }
+        return .stopped
+    }
+
+    /// Who owns the port, as far as we can tell.
+    enum Owner: Equatable {
+        case ours(pid_t)        // the pid we recorded, still alive and listening
+        case stranger(pid_t, String)  // someone else is on this port
+        case unknown            // live, but we couldn't resolve a pid
+        case free
+    }
+
+    /// The pid `start()` recorded, if it is still alive. The launcher had been
+    /// writing these files since the daemon was dropped and nothing ever read
+    /// them — which is why a green dot could not distinguish "your server" from
+    /// "a stranger on your port", and why ■ would SIGTERM that stranger.
+    static func recordedPid(_ name: String) -> pid_t? {
+        guard let raw = try? String(contentsOfFile: pidsDir + "/\(name).pid", encoding: .utf8),
+              let pid = pid_t(raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0, kill(pid, 0) == 0
+        else { return nil }
+        return pid
+    }
+
+    /// The pid actually listening on a port, via lsof.
+    static func listenerPid(_ port: Int) -> pid_t? {
+        let r = Subprocess.run("/usr/sbin/lsof",
+                               ["-ti", "tcp:\(port)", "-sTCP:LISTEN"], timeout: 3)
+        guard r.ok else { return nil }
+        return r.out.split(separator: "\n").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }.first
+    }
+
+    /// Resolve ownership so the UI can tell the three states apart, and so stop()
+    /// refuses to kill something that isn't ours.
+    static func owner(of entry: Entry) -> Owner {
+        guard entry.port > 0, portLive(entry.port) else { return .free }
+        guard let live = listenerPid(entry.port) else { return .unknown }
+        if let mine = recordedPid(entry.name), mine == live { return .ours(live) }
+        let cmd = Subprocess.run("/bin/ps", ["-o", "command=", "-p", "\(live)"], timeout: 3)
+            .out.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A server we started in a PREVIOUS run is still ours by path: the pid
+        // file is gone but the command line points at this project. This is what
+        // lets a relaunched app re-adopt a server it orphaned on quit.
+        if !entry.path.isEmpty, cmd.contains(entry.path) { return .ours(live) }
+        return .stranger(live, cmd.isEmpty ? "another process" : cmd)
     }
 
     static func readLog(_ name: String, limit: Int = 16384) -> String {

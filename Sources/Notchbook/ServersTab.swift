@@ -148,6 +148,7 @@ private struct ServerRow: View {
     @State private var hovered = false
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 10) {
             Circle()
                 .fill(server.running ? Color.green : .white.opacity(0.18))
@@ -165,12 +166,26 @@ private struct ServerRow: View {
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(.white.opacity(0.1)))
-                Text(":\(server.port)")
+                // ":0" is not a port — it is the `?? 0` fallback for an entry
+                // that has never been assigned one, and it read like a bug next
+                // to rows showing real numbers.
+                Text(server.port > 0 ? ":\(server.port)" : "—")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.4))
             }
             Spacer(minLength: 4)
             actions
+        }
+        // A launch that never bound its port used to leave the row identical to
+        // one that was never started. Say what the log said.
+        if let why = servers.lastError[server.name] {
+            Text(why)
+                .font(.system(size: 9))
+                .foregroundStyle(.orange.opacity(0.9))
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .padding(.leading, 2)
+        }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
