@@ -646,6 +646,20 @@ final class AgentSessionsModel: ObservableObject {
             parserByID[p.id] = p
         }
 
+        // Subagent transcripts carry the parent's sessionId but never increment
+        // messageCount, so the loop above skips them and their fresh timestamps
+        // were read by nothing. That made a session doing pure subagent work
+        // look frozen — "Working 4m…" against a stopped clock — and after
+        // idleMax it flipped to a dimmed "Idle" while the process was busy.
+        // Index them separately and use them for the activity clock ONLY, so a
+        // subagent's model/usage/stop_reason still can't contaminate the parent.
+        var sidechainTsByID: [String: Date] = [:]
+        for p in parsers.values where !p.id.isEmpty && p.messageCount == 0 && p.sawSidechain {
+            guard let ts = p.newestEntryTs else { continue }
+            if let existing = sidechainTsByID[p.id], existing >= ts { continue }
+            sidechainTsByID[p.id] = ts
+        }
+
         // TERMINAL-DRIVEN: a row exists iff there's a LIVE session file (a running
         // Claude process). A closed terminal deletes its `<pid>.json` on exit — no
         // live file ⇒ no row, dropped on the very next tick. We deliberately do NOT
@@ -661,7 +675,9 @@ final class AgentSessionsModel: ObservableObject {
         for id in ids {
             guard let meta = metas[id] else { continue }   // live session file required
             let p = parserByID[id]
-            let lastActivity = p?.newestEntryTs
+            // Newest of the parent transcript and any subagent burst.
+            let lastActivity = [p?.newestEntryTs, sidechainTsByID[id]]
+                .compactMap { $0 }.max()
             let age = lastActivity.map { now.timeIntervalSince($0) } ?? .infinity
             liveIDs.insert(id)
 
@@ -1594,7 +1610,10 @@ final class AgentSessionsModel: ObservableObject {
 
         // Sidechain (subagent) counts as activity above, but must NOT set
         // lastMsg / latestAssistant / messageCount or flip the parent's state.
-        guard !isSidechain else { return }
+        guard !isSidechain else {
+            p.sawSidechain = true
+            return
+        }
 
         p.messageCount += 1
 
@@ -1983,12 +2002,36 @@ final class AgentSessionsModel: ObservableObject {
         if entry == nil, baseId.hasPrefix("claude-haiku-4-5") {
             entry = ("Haiku 4.5", 200_000)   // dated haiku variants
         }
-        guard let (name, window) = entry else { return (rawId, nil) }
+        guard let (name, window) = entry else {
+            // Unknown id — every model rename used to land here and return the
+            // raw string with a nil window, which renders `claude-opus-5[1m]`
+            // in an 8.5pt capsule AND silently drops the context meter, because
+            // the meter's `if let` has no else. Degrade legibly instead:
+            // the `[1m]` suffix is self-describing, so trust it for the window,
+            // and title-case the id for the badge.
+            return (prettyModelName(baseId),
+                    is1MSuffix ? 1_000_000
+                               : (observedContextTokens > 200_000 ? 1_000_000 : 200_000))
+        }
 
         if has1MVariant.contains(baseId), is1MSuffix || observedContextTokens > 200_000 {
             return (name, 1_000_000)
         }
         return (name, window)
+    }
+
+    /// "claude-opus-5" -> "Opus 5". Best-effort, for ids the catalog predates.
+    private static func prettyModelName(_ baseId: String) -> String {
+        let stripped = baseId.hasPrefix("claude-") ? String(baseId.dropFirst(7)) : baseId
+        let words = stripped.split(separator: "-").map(String.init)
+        guard !words.isEmpty else { return "Claude" }
+        // Join a trailing version run with dots: ["opus","4","8"] -> "Opus 4.8".
+        var head: [String] = [], version: [String] = []
+        for w in words {
+            if Int(w) != nil { version.append(w) } else if version.isEmpty { head.append(w) }
+        }
+        let name = head.map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        return version.isEmpty ? name : "\(name) \(version.joined(separator: "."))"
     }
 
     // MARK: - Date parsing
@@ -2024,6 +2067,11 @@ private final class FileParser {
     var outputTokens = 0
     var messageCount = 0
     var maxContextTokens = 0       // latches the 1M inference
+    /// True once this file has yielded a subagent entry. Claude Code 2.1.219+
+    /// writes subagent turns to their OWN files under `<session>/subagents/…`,
+    /// each carrying the PARENT's sessionId — so a parent doing pure subagent
+    /// work has a transcript that never advances while a sibling file does.
+    var sawSidechain = false
     var contextTokens = 0          // latest assistant occupancy
 
     // Latest-state drivers.
