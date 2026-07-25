@@ -1508,9 +1508,13 @@ struct NotchView: View {
             // Ambient glow: the album cover, blown up and heavily blurred,
             // tints the panel with the artwork's palette on every tab.
             // While music plays it breathes with the song's loudness. The
-            // glow-intensity setting scales the whole layer's opacity.
+            // glow-intensity choice (Subtle/Normal/Vivid) applies on the
+            // Media tab only; every other tab is pinned to Subtle so the
+            // artwork never upstages the page being read.
             if let art = media.artwork, settings.ambientGlow {
                 let pulse = ambientPulse
+                let intensity = state.currentTab == .media
+                    ? settings.glowIntensity : 0.6
                 ZStack {
                     ambientLayer(art, side: size.width)
                         .scaleEffect(1.6 + 0.25 * pulse)
@@ -1524,11 +1528,14 @@ struct NotchView: View {
                 }
                 .blur(radius: 46)
                 .saturation(1.5 + 0.5 * pulse)
-                .opacity((0.32 + 0.2 * pulse) * settings.glowIntensity)
+                .opacity((0.32 + 0.2 * pulse) * intensity)
                 .frame(width: size.width, height: size.height)
                 .allowsHitTesting(false)
                 .animation(.linear(duration: 0.14), value: colorPhase)
                 .animation(.easeOut(duration: 0.16), value: pulse)
+                // Tab switches crossfade the intensity change — no pop when
+                // entering/leaving Media.
+                .animation(.easeInOut(duration: 0.35), value: state.currentTab)
             }
             expandedContent
                 .frame(width: size.width, height: size.height, alignment: .top)
