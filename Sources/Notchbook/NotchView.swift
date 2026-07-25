@@ -1050,6 +1050,8 @@ struct NotchView: View {
     /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
     private struct AgentPillLabel: View {
         let pill: AgentSessionsModel.CollapsedPill
+        /// Drives the one-second entry pulse and then stops. Not a ticker.
+        @State private var entered = false
 
         private var count: Int {
             switch pill {
@@ -1071,26 +1073,33 @@ struct NotchView: View {
             HStack(spacing: 3) {
                 switch pill {
                 case .working:
-                    // Drawn in a Canvas with a fixed frame, driven by a
-                    // TimelineView. The previous form was a `.repeatForever`
-                    // opacity animation on a plain Circle, which kept a live
-                    // animator inside the notch's view graph: every frame it
-                    // invalidated the parent and SwiftUI re-solved the WHOLE
-                    // tree — nav chips, width probes, clip shapes — to move one
-                    // 7pt dot. A Canvas leaf redraws only its own pixels and
-                    // cannot invalidate anything above it.
-                    TimelineView(.periodic(from: .now, by: 1.0 / 20.0)) { ctx in
-                        Canvas { gc, size in
-                            let t = ctx.date.timeIntervalSinceReferenceDate
-                            // Same 0.75 s ease-in-out cadence, autoreversing.
-                            let phase = (sin(t * .pi / 0.75) + 1) / 2
-                            let opacity = 0.3 + 0.7 * phase
-                            gc.fill(Path(ellipseIn: CGRect(origin: .zero, size: size)),
-                                    with: .color(tint.opacity(opacity)))
-                        }
+                    // A STATIC dot after a brief entry pulse — nothing here may
+                    // tick at steady state.
+                    //
+                    // Two earlier shapes both got this wrong. `.repeatForever`
+                    // kept a live animator in the view graph; replacing it with
+                    // a 20 Hz TimelineView Canvas cut the redraw cost but kept
+                    // the update rate, and the update is what hurts: each tick
+                    // schedules a view-graph pass through the single hosting
+                    // view, which relayouts the whole current tab — mounted at
+                    // opacity 0 behind the closed notch. Twenty of those a
+                    // second is the entire C4 burn.
+                    //
+                    // Apple's own island signals background state with colour
+                    // and glyph, not perpetual motion (visual advice §9-1).
+                    Circle()
+                        .fill(tint)
                         .frame(width: 7, height: 7)
-                    }
-                    .frame(width: 7, height: 7)
+                        .opacity(entered ? 1 : 0.35)
+                        .onAppear {
+                            // Bounded: 4 half-cycles at 0.25 s = 1 s, then it
+                            // settles and schedules nothing further.
+                            withAnimation(.easeInOut(duration: 0.25)
+                                .repeatCount(4, autoreverses: true)) {
+                                entered = true
+                            }
+                        }
+                        .onDisappear { entered = false }
                 case .waiting:
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9, weight: .bold))
