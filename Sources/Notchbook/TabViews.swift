@@ -1604,7 +1604,11 @@ struct TogglesTab: View {
             if vis("darkMode") || vis("keepAwake") || vis("hideDesktop") {
                 HStack(spacing: 6) {
                     if vis("darkMode") {
-                        ToggleCard(icon: "moon.fill", label: "Dark Mode", active: false) {
+                        // The glyph reports the appearance that is currently
+                        // ON — moon in dark mode, sun in light — rather than
+                        // being a fixed moon that says nothing either way.
+                        ToggleCard(icon: toggles.darkMode ? "moon.fill" : "sun.max.fill",
+                                   label: "Dark Mode", active: false) {
                             toggles.toggleDarkMode()
                         }
                     }

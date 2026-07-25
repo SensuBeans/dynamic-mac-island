@@ -140,6 +140,9 @@ final class TogglesModel: ObservableObject {
         // Read the real Finder setting (missing key means icons are shown).
         let finder = UserDefaults(suiteName: "com.apple.finder")
         desktopIconsHidden = (finder?.object(forKey: "CreateDesktop") as? Bool) == false
+        // Seed the appearance too, so the Dark Mode glyph is already correct on
+        // the very first render rather than after the first refresh tick.
+        darkMode = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
         readVolume()
     }
 
