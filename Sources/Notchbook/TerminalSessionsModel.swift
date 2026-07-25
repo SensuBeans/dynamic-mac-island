@@ -96,12 +96,30 @@ final class TerminalSessionsModel: ObservableObject {
     /// SIGHUP every live shell and close its PTY — called from
     /// `applicationWillTerminate` so quitting leaves no orphaned shells.
     func shutdown() {
+        // SIGHUP lets zsh run its exit path, which is what HUPs its own jobs.
+        // An immediate SIGKILL pre-empts that — the shell dies before it can
+        // signal anything, so every background job survives the quit and gets
+        // reparented to launchd. Match `closeSession`, which does this right.
         for session in sessions {
             signal(session.view, SIGHUP)
+            session.view.terminate()   // closes the PTY fds + SIGTERM
+        }
+        // Bounded backstop: give the shells a moment to leave on their own,
+        // then SIGKILL only the ones still alive. `applicationWillTerminate`
+        // may block briefly, so keep this short.
+        let deadline = Date().addingTimeInterval(0.25)
+        while Date() < deadline, sessions.contains(where: { isAlive($0.view) }) {
+            usleep(20_000)
+        }
+        for session in sessions where isAlive(session.view) {
             signal(session.view, SIGKILL)
-            session.view.terminate()
         }
         sessions.removeAll()
+    }
+
+    private func isAlive(_ view: LocalProcessTerminalView) -> Bool {
+        let pid = view.process.shellPid
+        return pid > 0 && kill(pid, 0) == 0
     }
 
     private func signal(_ view: LocalProcessTerminalView, _ sig: Int32) {

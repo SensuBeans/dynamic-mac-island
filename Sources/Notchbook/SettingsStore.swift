@@ -198,7 +198,9 @@ final class SettingsStore: ObservableObject {
         mirrorFlip = defaults.bool(forKey: "mirror.flip")
         mirrorRememberBig = defaults.bool(forKey: "mirror.rememberBig")
 
-        statsRefreshRate = defaults.double(forKey: "stats.refreshRate")
+        // Clamped at the boundary: a corrupt or wrong-typed plist value reads
+        // back as 0, which would turn the Stats poll into a main-thread spin.
+        statsRefreshRate = min(10, max(0.5, defaults.double(forKey: "stats.refreshRate")))
         statsHiddenTiles = defaults.stringArray(forKey: "stats.hiddenTiles") ?? []
 
         agentsAutoResume = defaults.bool(forKey: "agents.autoResume")

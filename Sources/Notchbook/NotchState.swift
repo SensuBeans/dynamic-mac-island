@@ -112,6 +112,7 @@ final class NotchState: ObservableObject {
                                       forKey: "hiddenTabs")
         }
     }
+            recomputeVisibleTabs()
     /// User-defined order of ALL tabs, drives the nav dock and the swipe cycle.
     /// Persisted; new tabs added in a later build are appended in canonical
     /// order on load. Reorder it by dragging a chip in the nav dock.
@@ -122,6 +123,7 @@ final class NotchState: ObservableObject {
     }
     /// Mirror at double size ("twice as big") — toggled from the mirror
     /// overlay, reset whenever the mirror is left.
+            recomputeVisibleTabs()
     @Published var mirrorBig = false
     /// Calendar tab view mode: false = 7-day list (default), true = mini month
     /// grid. Lives here (not just view-local) because AppDelegate.islandRect and
@@ -197,7 +199,13 @@ final class NotchState: ObservableObject {
 
     /// Tabs shown in the nav dock and reachable by swipe, in canonical order.
     /// Never empty — if every tab were hidden, media stays as a floor.
-    var visibleTabs: [NotchTab] {
+    ///
+    /// Stored, not computed: this is read several times per layout pass (nav
+    /// chips, width probe, tab bar), so as a computed property it allocated a
+    /// filtered array on every access, on the main thread, at frame rate.
+    @Published private(set) var visibleTabs: [NotchTab] = [.media]
+
+    fileprivate func recomputeVisibleTabs() {
         let visible = tabOrder.filter { !hiddenTabs.contains($0) }
         return visible.isEmpty ? [.media] : visible
     }
@@ -269,6 +277,8 @@ final class NotchState: ObservableObject {
             .dropFirst()
             .sink { [weak self] _ in self?.scheduleSave() }
     }
+        // didSet does not fire during init, so seed the stored list by hand.
+        recomputeVisibleTabs()
 
     private func scheduleSave() {
         saveWork?.cancel()

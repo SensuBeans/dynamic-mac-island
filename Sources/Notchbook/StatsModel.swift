@@ -12,7 +12,11 @@ final class StatsModel: ObservableObject {
     @Published var gpu: Double = -1                // 0…1, -1 = unavailable
     @Published var diskFree: Double = 0
     @Published var diskTotal: Double = 0
-    @Published var fanRPM: Double = -1             // -1 = unavailable
+    @Published var fanRPM: Double = -1             // -1 = unavailable, 0 = stopped
+    /// Fan 0's rated range, read once from SMC. nil until the first successful
+    /// read; the gauge falls back to a plain 0…max scale while it is nil.
+    @Published var fanMin: Double = 0
+    @Published var fanMax: Double = 0
     @Published var batteryLevel: Double = -1       // 0…1
     @Published var batteryCharging = false
 
@@ -49,6 +53,10 @@ final class StatsModel: ObservableObject {
         } else {
             timer?.invalidate()
             timer = nil
+            // Drop the tick baseline. Keeping it means the first poll after the
+            // next expand diffs against a snapshot from however long the notch
+            // was closed and paints that average as the current CPU load.
+            prevTicks = nil
         }
     }
 
@@ -58,7 +66,10 @@ final class StatsModel: ObservableObject {
         if !hiddenTiles.contains("disk") { pollDisk() }
         if !hiddenTiles.contains("gpu") { pollGPU() }
         if !hiddenTiles.contains("battery") { pollBattery() }
-        if !hiddenTiles.contains("fan") { fanRPM = smc?.fanRPM() ?? -1 }
+        if !hiddenTiles.contains("fan") {
+            fanRPM = smc?.fanRPM() ?? -1
+            if fanMax == 0, let r = smc?.fanRange() { fanMin = r.min; fanMax = r.max }
+        }
     }
 
     private func pollCPU() {
@@ -151,10 +162,15 @@ final class StatsModel: ObservableObject {
 final class SMC {
     private var conn: io_connect_t = 0
 
+    /// Mirrors AppleSMC's `SMCKeyData_keyInfo_t`. C pads this to 12 bytes after
+    /// the trailing `UInt8`; Swift would lay it out as 9 and shrink `KeyData`
+    /// to 76, which makes every `IOConnectCallStructMethod` fail with
+    /// `kIOReturnBadArgument`. The explicit tail padding restores the ABI.
     private struct KeyInfo {
         var dataSize: UInt32 = 0
         var dataType: UInt32 = 0
         var dataAttributes: UInt8 = 0
+        private var pad: (UInt8, UInt8, UInt8) = (0, 0, 0)
     }
 
     private struct KeyData {
@@ -175,6 +191,11 @@ final class SMC {
     }
 
     init?() {
+        // The struct passed to AppleSMC is ABI-fixed at 80 bytes. If a future
+        // edit drops the KeyInfo padding this trips immediately in debug rather
+        // than silently returning nil from every read for the app's lifetime.
+        assert(MemoryLayout<KeyData>.size == 80,
+               "AppleSMC SMCKeyData_t ABI is 80 bytes, got \(MemoryLayout<KeyData>.size)")
         let service = IOServiceGetMatchingService(kIOMainPortDefault,
                                                   IOServiceMatching("AppleSMC"))
         guard service != 0 else { return nil }
@@ -187,8 +208,17 @@ final class SMC {
         IOServiceClose(conn)
     }
 
-    func fanRPM() -> Double? {
-        guard let data = read(fourCC("F0Ac")) else { return nil }
+    func fanRPM() -> Double? { value("F0Ac") }
+
+    /// Fan 0's min/max rated RPM. Static per machine, so the caller reads it
+    /// once and uses it to normalize the gauge instead of a hardcoded ceiling.
+    func fanRange() -> (min: Double, max: Double)? {
+        guard let lo = value("F0Mn"), let hi = value("F0Mx"), hi > lo else { return nil }
+        return (lo, hi)
+    }
+
+    private func value(_ key: String) -> Double? {
+        guard let data = read(fourCC(key)) else { return nil }
         switch data.keyInfo.dataType {
         case fourCC("flt "):
             let raw = withUnsafeBytes(of: data.bytes) { $0.load(as: UInt32.self) }
@@ -210,7 +240,7 @@ final class SMC {
         var query = KeyData()
         query.key = key
         query.data8 = 9  // kSMCGetKeyInfo
-        guard var info = call(query), info.result == 0 else { return nil }
+        guard let info = call(query), info.result == 0 else { return nil }
         var readReq = KeyData()
         readReq.key = key
         readReq.keyInfo = info.keyInfo

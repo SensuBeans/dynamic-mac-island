@@ -1466,7 +1466,7 @@ struct StatsTab: View {
                 StatTile(title: "Disk",
                          center: stats.diskTotal > 0
                             ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
-                         detail: "\(gb(stats.diskFree)) GB free",
+                         detail: "\(gbDecimal(stats.diskFree)) GB free",
                          fraction: stats.diskTotal > 0
                             ? 1 - stats.diskFree / stats.diskTotal : 0)
             }
@@ -1475,7 +1475,7 @@ struct StatsTab: View {
                          center: stats.fanRPM < 0 ? "—"
                             : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
                          detail: stats.fanRPM >= 1 ? "rpm" : nil,
-                         fraction: stats.fanRPM < 0 ? 0 : min(stats.fanRPM / 6000, 1))
+                         fraction: fanFraction)
             }
             if vis("battery") {
                 StatTile(title: "Battery",
@@ -1808,10 +1808,27 @@ struct EqualizerBars: View {
     var color: Color = .orange
     var animating = true
     /// Real audio levels (0…1, newest last). When present, the bars render
+    /// Normalized against the fan's own rated range (SMC `F0Mn`/`F0Mx`) rather
+    /// than a hardcoded 6000, which on this machine (min 2317, max 6550) made
+    /// the ring sit ~39% full at idle and saturate before the fan did.
+    private var fanFraction: Double {
+        guard stats.fanRPM > 0 else { return 0 }
+        guard stats.fanMax > stats.fanMin else { return min(stats.fanRPM / 6000, 1) }
+        let span = stats.fanMax - stats.fanMin
+        return min(max((stats.fanRPM - stats.fanMin) / span, 0), 1)
+    }
+
     /// this history instead of the synthetic sine animation.
+    /// RAM, which is conventionally binary — 32 GiB reads as the "32" users expect.
     var levels: [Float]? = nil
 
     @State private var t: Double = 0
+    /// Storage, which macOS reports in decimal GB everywhere the user can check
+    /// it — Finder, About This Mac, `df -H`, `diskutil`. Using the binary
+    /// divisor here made the tile read ~50 GB short of Finder.
+    private func gbDecimal(_ bytes: Double) -> String {
+        String(format: "%.0f", bytes / 1_000_000_000)
+    }
     /// Smoothed per-bar heights, eased toward their targets every frame so raw
     /// spectrum samples don't make the bars jump.
     @State private var displayed: [CGFloat] = []
