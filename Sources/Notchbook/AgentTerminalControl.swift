@@ -14,7 +14,20 @@ enum AgentTerminalControl {
 
     /// Result of a control attempt, so the caller can surface a "tab not found"
     /// toast instead of a silent no-op.
-    enum Outcome { case ok, notFound, noTTY }
+    enum Outcome {
+        case ok
+        case notFound
+        case noTTY
+        /// Automation (Apple Events) is denied for Terminal. Previously this
+        /// collapsed into `notFound`, so a permission problem was reported to
+        /// the user as "Terminal tab not found" — pointing them at a missing
+        /// tab that was plainly on screen instead of at System Settings.
+        case notAuthorized
+        /// The target app is not running (AppleScript -600).
+        case appNotRunning
+        /// The Apple Event hung and we gave up rather than wedging the queue.
+        case timedOut
+    }
 
     /// The session process's controlling terminal → `/dev/ttysNNN`. Fallback for
     /// when the model hasn't resolved the tty yet; the syscall path in
@@ -52,9 +65,16 @@ enum AgentTerminalControl {
 
     private static func run(script: String, pid: Int, ttyPath: String?) -> Outcome {
         guard let tty = ttyPath ?? tty(forPID: pid) else { return .noTTY }
-        let out = runOSA(script: script, arg: tty)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return out == "ok" ? .ok : .notFound
+        let r = Subprocess.osascript(script, [tty], timeout: 5)
+        if r.out.trimmingCharacters(in: .whitespacesAndNewlines) == "ok" { return .ok }
+        if r.timedOut { return .timedOut }
+        // osascript reports the interesting failures only on stderr, which this
+        // used to send to /dev/null.
+        if r.err.contains("-1743") || r.err.localizedCaseInsensitiveContains("not authorized") {
+            return .notAuthorized
+        }
+        if r.err.contains("-600") { return .appNotRunning }
+        return .notFound
     }
 
     // MARK: - AppleScript
@@ -131,21 +151,8 @@ enum AgentTerminalControl {
 
     // MARK: - Process helpers
 
-    @discardableResult
-    private static func runOSA(script: String, arg: String) -> String? {
-        runProcess("/usr/bin/osascript", ["-e", script, arg])
-    }
-
     private static func runProcess(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: launchPath)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do { try task.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        return String(data: data, encoding: .utf8)
+        let r = Subprocess.run(launchPath, args, timeout: 5)
+        return r.ok ? r.out : nil
     }
 }

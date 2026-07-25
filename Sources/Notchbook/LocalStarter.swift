@@ -321,15 +321,14 @@ enum LocalStarter {
 
     /// One detached login shell. Login (`-l`) because npm/python live on a PATH
     /// the app doesn't inherit when launched from Finder.
+    /// Runs a command in a login shell and hands back its output. The exit
+    /// status alone is not a launch verdict: start() backgrounds the real work
+    /// with `&`, so zsh exits 0 even when the server binary does not exist —
+    /// callers must confirm by probing the port. What this does give them is
+    /// stderr, which used to go to /dev/null and took every diagnosable failure
+    /// (`cd: no such file or directory`, a missing runtime) with it.
     @discardableResult
-    static func shell(_ command: String) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", command]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
-        p.waitUntilExit()          // the work itself is backgrounded by `&`
-        return p.terminationStatus == 0
+    static func shell(_ command: String) -> Subprocess.Result {
+        Subprocess.loginShell(command)
     }
 }

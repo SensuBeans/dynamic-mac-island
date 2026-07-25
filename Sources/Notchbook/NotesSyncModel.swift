@@ -281,20 +281,18 @@ final class NotesSyncModel: ObservableObject {
     }
 
     private static func run(_ source: String) -> ScriptResult {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", source]
-        let o = Pipe(), e = Pipe()
-        p.standardOutput = o
-        p.standardError = e
-        do { try p.run() } catch { return ScriptResult(out: nil, err: "\(error)", ok: false) }
-        p.waitUntilExit()
-        let out = String(data: o.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let err = String(data: e.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return ScriptResult(out: (out?.isEmpty ?? true) ? nil : out,
-                            err: (err?.isEmpty ?? true) ? nil : err,
-                            ok: p.terminationStatus == 0)
+        // Draining before waiting (which this already did) fixes the stdout
+        // deadlock, but the two reads were sequential: >64 KiB on stderr while
+        // stdout was still being drained wedged both sides permanently, and a
+        // wedged script blocks the serial scriptQueue for the rest of the run.
+        // Subprocess drains both concurrently and bounds the wait.
+        let r = Subprocess.osascript(source, timeout: 30)
+        let out = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        let err = r.timedOut
+            ? "Notes did not respond within 30s"
+            : r.err.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ScriptResult(out: out.isEmpty ? nil : out,
+                            err: err.isEmpty ? nil : err,
+                            ok: r.ok)
     }
 }

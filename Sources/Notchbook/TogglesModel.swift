@@ -73,6 +73,11 @@ final class KeyboardBacklight {
 
 /// Quick system controls: dark mode, keep-awake, desktop icons, volume.
 final class TogglesModel: ObservableObject {
+    /// Why the last Controls action failed, or nil if it worked. Every action
+    /// here shells out to a helper that can be missing or TCC-blocked, and
+    /// until this existed all of those failures were invisible.
+    @Published var lastActionFailed: String?
+
     @Published var keepAwake = false {
         didSet {
             guard keepAwake != oldValue else { return }
@@ -123,7 +128,28 @@ final class TogglesModel: ObservableObject {
         // spawned caffeinate exits with us instead of keeping the Mac awake
         // until reboot.
         p.arguments = ["-dis", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
-        try? p.run()
+        // This one stays a long-lived Process rather than going through
+        // Subprocess: it is meant to outlive the call and is terminated by
+        // stopCaffeinate(). What it was missing is failure handling — if the
+        // spawn threw, the toggle still lit up and the Mac still slept.
+        do {
+            try p.run()
+        } catch {
+            lastActionFailed = "caffeinate failed to start"
+            caffeinate = nil
+            keepAwake = false          // don't claim an assertion we don't hold
+            return
+        }
+        // Same lie if caffeinate dies later (killed, or the assertion refused).
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self, self.keepAwake, self.caffeinate === p else { return }
+                self.lastActionFailed = "keep awake stopped unexpectedly"
+                self.caffeinate = nil
+                self.keepAwake = false
+            }
+        }
+        lastActionFailed = nil
         caffeinate = p
     }
 
@@ -184,11 +210,38 @@ final class TogglesModel: ObservableObject {
               "set volume output muted not (output muted of (get volume settings))")
     }
 
+    /// Locks to the login window.
+    ///
+    /// This used to spawn `CGSession -suspend`, but macOS 26 ships no
+    /// `User.menu` at all, so the binary does not exist and the spawn failure
+    /// went into a `try?` — the button had been a silent no-op for the whole
+    /// life of that OS. `SACLockScreenImmediate` is what the Apple-menu item
+    /// itself calls; the key-event path is the fallback if that ever goes too.
     func lockScreen() {
-        // pmset displaysleepnow only sleeps the display — the Mac stays
-        // unlocked. CGSession -suspend actually locks to the login window.
-        shell("/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
-              "-suspend")
+        typealias LockFn = @convention(c) () -> Int32
+        if let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/A/login",
+                               RTLD_LAZY),
+           let sym = dlsym(handle, "SACLockScreenImmediate") {
+            let rc = unsafeBitCast(sym, to: LockFn.self)()
+            if rc == 0 { lastActionFailed = nil; return }
+            lastActionFailed = "lock screen failed (\(rc))"
+        }
+        if postLockHotkey() { lastActionFailed = nil; return }
+        lastActionFailed = "Lock Screen is unavailable on this macOS"
+    }
+
+    /// Control-Command-Q, the system lock shortcut. Needs Accessibility.
+    private func postLockHotkey() -> Bool {
+        guard let src = CGEventSource(stateID: .hidSystemState) else { return false }
+        let q: CGKeyCode = 0x0C
+        guard let down = CGEvent(keyboardEventSource: src, virtualKey: q, keyDown: true),
+              let up = CGEvent(keyboardEventSource: src, virtualKey: q, keyDown: false)
+        else { return false }
+        down.flags = [.maskCommand, .maskControl]
+        up.flags = [.maskCommand, .maskControl]
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
     }
 
     /// Screenshot capture mode (settings-driven).
@@ -204,10 +257,18 @@ final class TogglesModel: ObservableObject {
         }
     }
 
-    private func shell(_ launchPath: String, _ args: String...) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: launchPath)
-        p.arguments = args
-        try? p.run()
+    /// Runs a helper tool and reports whether it actually worked. The old
+    /// version was `try? p.run()` with no wait and no status, so a missing
+    /// binary or a denied Automation grant produced a button that did nothing,
+    /// forever, looking exactly like the buttons that work.
+    @discardableResult
+    private func shell(_ launchPath: String, _ args: String...) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: launchPath) else {
+            lastActionFailed = "\(URL(fileURLWithPath: launchPath).lastPathComponent) is not available on this macOS"
+            return false
+        }
+        let r = Subprocess.run(launchPath, args, timeout: 10)
+        if !r.ok { lastActionFailed = r.failureReason }
+        return r.ok
     }
 }

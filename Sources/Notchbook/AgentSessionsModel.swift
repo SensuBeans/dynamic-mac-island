@@ -461,23 +461,25 @@ final class AgentSessionsModel: ObservableObject {
     /// round-trips can take a beat. Reuses the already-resolved tty, falling back
     /// to a `ps` lookup only when it's nil. `missed(true)` on the main queue when
     /// the tab couldn't be found, so the caller can surface a toast.
-    func focus(_ session: AgentSession, missed: @escaping (Bool) -> Void = { _ in }) {
-        guard let pid = session.pid else { missed(false); return }
+    func focus(_ session: AgentSession,
+               missed: @escaping (AgentTerminalControl.Outcome) -> Void = { _ in }) {
+        guard let pid = session.pid else { missed(.ok); return }
         let ttyPath = session.tty.map { "/dev/\($0)" }
         controlQueue.async {
             let outcome = AgentTerminalControl.focus(pid: pid, ttyPath: ttyPath)
-            DispatchQueue.main.async { missed(outcome == .notFound) }
+            DispatchQueue.main.async { missed(outcome) }
         }
     }
 
     /// Accept the session's pending permission prompt by sending Return to its
     /// Terminal.app tab (host `.terminalApp`). `missed(true)` when the tab is gone.
-    func approve(_ session: AgentSession, missed: @escaping (Bool) -> Void = { _ in }) {
-        guard let pid = session.pid else { missed(false); return }
+    func approve(_ session: AgentSession,
+                 missed: @escaping (AgentTerminalControl.Outcome) -> Void = { _ in }) {
+        guard let pid = session.pid else { missed(.ok); return }
         let ttyPath = session.tty.map { "/dev/\($0)" }
         controlQueue.async {
             let outcome = AgentTerminalControl.approve(pid: pid, ttyPath: ttyPath)
-            DispatchQueue.main.async { missed(outcome == .notFound) }
+            DispatchQueue.main.async { missed(outcome) }
         }
     }
 

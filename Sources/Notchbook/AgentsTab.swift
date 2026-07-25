@@ -568,7 +568,7 @@ private struct AgentRow: View {
     private func open() {
         switch session.host {
         case .terminalApp:
-            agents.focus(session) { missed in if missed { missedToast() } }
+            agents.focus(session) { outcomeToast($0) }
         case .notch(let sid):
             state.currentTab = .terminal
             terminals.selectedID = sid
@@ -584,7 +584,7 @@ private struct AgentRow: View {
     private func approve() {
         switch session.host {
         case .terminalApp:
-            agents.approve(session) { missed in if missed { missedToast() } }
+            agents.approve(session) { outcomeToast($0) }
         case .notch(let sid):
             terminals.sendReturn(to: sid)
         case .other, .none:
@@ -592,9 +592,28 @@ private struct AgentRow: View {
         }
     }
 
-    private func missedToast() {
-        state.showToast(NotchToast(icon: "terminal", title: "Terminal tab not found",
-                                   color: .gray))
+    /// Name the actual failure. A denied Automation grant used to arrive here
+    /// as "Terminal tab not found", which sent the user hunting for a stale
+    /// session instead of to System Settings.
+    private func outcomeToast(_ outcome: AgentTerminalControl.Outcome) {
+        switch outcome {
+        case .ok:
+            return
+        case .notAuthorized:
+            state.showToast(NotchToast(icon: "hand.raised",
+                                       title: "Automation is blocked",
+                                       subtitle: "Allow Terminal under Privacy & Security › Automation",
+                                       color: .orange))
+        case .appNotRunning:
+            state.showToast(NotchToast(icon: "terminal", title: "Terminal isn't running",
+                                       color: .gray))
+        case .timedOut:
+            state.showToast(NotchToast(icon: "clock", title: "Terminal didn't respond",
+                                       color: .orange))
+        case .noTTY, .notFound:
+            state.showToast(NotchToast(icon: "terminal", title: "Terminal tab not found",
+                                       color: .gray))
+        }
     }
 
     /// Best-effort activate a recognized non-scriptable host app (iTerm2, Code…).
