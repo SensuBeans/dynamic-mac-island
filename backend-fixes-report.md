@@ -11,9 +11,14 @@ Baseline `564b6f5` · 2026-07-25 · 20 files, +970/−180 across six commits, al
 | `20054b8` | 3 — lifecycle gating |
 | `bee3716` | — repair (see §4, a defect I introduced) |
 | `bb4ca9b` | 4 — pill animator (**did not achieve its goal**, see §3) |
+| `3697e74` | 5 — Servers correctness |
+| `c6f8b12` | 6 — Agents (model catalog, sidechain keep-alive) |
 
-**Status: waves 1–3 complete and verified. Wave 4 attempted, negative result.
-Waves 5–6 not started.** §6 lists exactly what remains.
+**Status: waves 1–3 and 5 complete and verified. Wave 4 attempted, negative
+result. Wave 6 partial.** §6 lists exactly what remains.
+
+Every commit from `bee3716` onward was verified by building `HEAD` in a detached
+worktree, not just the working tree — the check whose absence caused §4.
 
 ---
 
@@ -50,6 +55,13 @@ Each row was reproduced before fixing and re-probed after, per the prompt's meth
 | M8 | Polling continued behind the Settings overlay | `showingSettings` is now in every predicate. |
 | H26 | No wake-from-sleep handling | `didWakeNotification` observer (narrowed form, per verification). |
 | M19 | Agents 1 Hz clock ran while closed | Ticks only when that tab is visible. |
+| **H2** | `portLive` IPv4-only → IPv6 servers read as down | Dual-stack, one shared 300 ms budget. Verified against a real `IPV6_V6ONLY` listener: `portLive(8997)` **false → true**; IPv4 and no-listener cases unchanged. |
+| **H1/H4** | Green dot could not tell your server from a stranger; ■ SIGTERMed the stranger | `owner(of:)` reads the pid files the launcher already wrote and nothing read, falling back to matching the project path in the listener's argv. **Verified on both live cases: the orphaned foglamp server (recorded 1099, listening 1099) resolves `.ours` — so a relaunched app re-adopts what it orphaned — and a squatter on a registered port resolves `.stranger`, which `stop()` refuses to kill.** |
+| M11 | `stop()` fire-and-forget | SIGTERM → poll 3 s → SIGKILL → poll → `refusedToDie`. |
+| **H3** | Failed launch invisible | Exit status is meaningless (work is backgrounded with `&`), so the port is polled for 8 s and the last log line is published — wiring up `readLog`, which was fully written with no caller. The row renders it. |
+| §9-14 | `:0` rendered as a port | Em dash. |
+| **H22** | Model catalog stale → raw id **and no context meter** | Unknown ids degrade legibly; `[1m]` trusted for the window. Verified: `claude-opus-5[1m]` → "Opus 5" / 1M (was raw id / nil). Live on this machine. |
+| **H23** | Subagent work never advanced the parent's clock → row died mid-run | Sidechain-only parsers indexed separately; `lastActivity` takes the newest of parent and subagent. Verified against this session's own subagent transcripts, which carry the parent sessionId. |
 
 **Design note.** Waves 2–3 replaced three divergent gating handlers with one
 `applyGating(expanded:tab:settingsShowing:)`. That is the systemic fix for pattern
@@ -186,9 +198,9 @@ checks below will look broken until you do.
 
 | item | status |
 |---|---|
-| **Wave 5 — Servers** (H1 orphan reconciliation, H2 IPv6 `portLive`, H3 launch-failure surfacing, H4 ownership check, M9–M12) | **not started** |
-| **Wave 6 — Agents** (H22 model catalog, H23 sidechain keep-alive, M20–M24) | **not started** |
-| **Wave 6 — Notes re-audit** (H17, H18, M34–M36 against the rewritten file) | **not started** — C1 done (§2) |
+| Wave 5 — M9 log rotation, M10 port/favorite leak on remove, M12 name-collision feedback | **not done** |
+| **Wave 6 — Agents M20–M24** (parse-then-discard, cold-adopt spike, parser eviction, auto-resume resilience) | **not done**. M20's fix must now change: subagent transcripts can no longer be rejected at adoption because H23's keep-alive depends on them — parse them for timestamps only. **3,303 subagent transcripts are on disk here**, so M20/M22 are the live cost. |
+| **Wave 6 — Notes re-audit** (H17 flush-on-quit, H18 whitespace round-trip, M34–M36 against the rewritten file) | **not done** — C1 done (§2) |
 | C4 root cause | **open** — see §3 |
 | M37 break hint | deferred — blocked on the parallel TimerTab work |
 | M29 PTY parsing on the main queue | deferred — SwiftTerm does not expose the queue through `LocalProcessTerminalView.init`; needs a subclass |
