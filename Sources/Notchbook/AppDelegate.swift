@@ -372,6 +372,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         observerTokens.append(NotificationCenter.default.addObserver(
+        // Nothing re-synced after a sleep. Tabs whose data is event-driven or
+        // loaded on a visibility edge showed pre-sleep state after the lid
+        // opened — a calendar list containing meetings that already ended, with
+        // no timestamp or spinner to say it was old. Stats and Servers already
+        // self-heal via setPolling's eager first tick, so they are left alone.
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.calendarModel.refreshAuthorization()
+            self.calendarModel.load()
+            self.toggles.refreshAll()
+            self.media.refresh()
+        })
+
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.rebuildMetrics() })

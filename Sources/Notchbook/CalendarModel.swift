@@ -101,6 +101,25 @@ final class CalendarModel: ObservableObject {
         }
     }
 
+    private var visibleTimer: Timer?
+
+    /// Called when the Calendar tab becomes visible or hidden. Loading only on
+    /// a tab CHANGE meant a notch left parked on Calendar showed the event list
+    /// from whenever the user last switched tabs — including meetings that had
+    /// already ended — because the panel is always mounted, so onAppear never
+    /// re-fires on expand. The 60 s tick keeps a long-open panel rolling.
+    func setVisible(_ visible: Bool) {
+        visibleTimer?.invalidate()
+        visibleTimer = nil
+        guard visible else { return }
+        refreshAuthorization()      // a grant/revoke while we were hidden
+        load()
+        visibleTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.load()
+        }
+        visibleTimer?.tolerance = 10
+    }
+
     func load() {
         guard hasAccess else { return }
         let start = Date()

@@ -49,7 +49,10 @@ struct AgentsTab: View {
             sessionList
         }
         .preference(key: TabHugHeightKey.self, value: naturalHeight)
-        .onReceive(timer) { now = $0 }
+        // The tab is faded to opacity 0, never unmounted, so this 1 Hz clock
+        // kept re-laying-out an invisible list of rows — per-row date math and
+        // token formatting once a second with the notch closed.
+        .onReceive(timer) { if state.isExpanded && state.currentTab == .agents { now = $0 } }
         .onAppear { agents.acknowledgeCompletes() }
     }
 

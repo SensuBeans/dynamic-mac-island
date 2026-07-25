@@ -73,6 +73,53 @@ final class KeyboardBacklight {
 
 /// Quick system controls: dark mode, keep-awake, desktop icons, volume.
 final class TogglesModel: ObservableObject {
+    private var pollTimer: Timer?
+
+    /// Called when the Controls tab becomes visible. Volume and desktop-icon
+    /// state were read once in init and never again, so the sliders showed
+    /// launch-time values for the rest of the session — and dragging one from
+    /// a stale position jumped the system to a value the user never chose.
+    /// The brightness sliders had the same problem via onAppear, which cannot
+    /// re-fire because the expanded panel is never unmounted.
+    func setPolling(_ active: Bool) {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        guard active else { return }
+        refreshAll()
+        // Only the cheap reads run on the tick. They are C calls and plist
+        // lookups (microseconds), so pressing F1/F2 or toggling dark mode moves
+        // the UI live. readVolume() is deliberately NOT here: it is a ~100 ms
+        // synchronous NSAppleScript on the main thread, and running that twice
+        // a second would trade a staleness bug for a stutter.
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshCheap()
+        }
+        pollTimer?.tolerance = 0.1
+    }
+
+    /// Everything this tab displays, including the expensive volume read. Runs
+    /// on the visibility edge only.
+    func refreshAll() {
+        refreshCheap()
+        readVolume()
+    }
+
+    private func refreshCheap() {
+        let finder = UserDefaults(suiteName: "com.apple.finder")
+        desktopIconsHidden = (finder?.object(forKey: "CreateDesktop") as? Bool) == false
+        darkMode = UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        displayLevel = readDisplayBrightness()
+        keyboardLevel = readKeyboardBrightness()
+    }
+
+    /// Live values the Controls sliders bind to, so they show the system's
+    /// state rather than an echo of this app's last write.
+    @Published var displayLevel: Double = 0
+    @Published var keyboardLevel: Double = 0
+    /// Dark Mode and Mute were hardcoded `active: false` in the view — two of
+    /// the six tiles were permanently stateless while the others lit up.
+    @Published var darkMode = false
+
     /// Why the last Controls action failed, or nil if it worked. Every action
     /// here shells out to a helper that can be missing or TCC-blocked, and
     /// until this existed all of those failures were invisible.

@@ -764,11 +764,8 @@ struct NotchView: View {
             }
         }
         .onChange(of: state.isExpanded) { expanded in
-            editorFocused = expanded && state.currentTab == .notes
-            media.setProgressPolling(expanded && state.currentTab == .media)
-            stats.setPolling(expanded && state.currentTab == .stats)
-            servers.setPolling(expanded && state.currentTab == .servers)
-            spectrum.setActive(spectrumShouldBeActive)
+            applyGating(expanded: expanded, tab: state.currentTab,
+                        settingsShowing: state.showingSettings)
             // No mirror auto-restart on expand: the tab DEFAULTS to the
             // "Show Mirror" placeholder at standard size — the camera runs
             // only after the user's click (collapse stops it and clears the
@@ -779,7 +776,11 @@ struct NotchView: View {
             // it and hand focus/polling back when it closes. Resume ONLY a
             // camera that was live before the overlay: the opt-in placeholder
             // must never auto-start on settings close.
-            editorFocused = state.isExpanded && !showing && state.currentTab == .notes
+            // The settings overlay hides the tab's content, so the tab's work
+            // should stop too — this handler used to leave stats/servers/media
+            // polling behind an overlay that showed none of their output.
+            applyGating(expanded: state.isExpanded, tab: state.currentTab,
+                        settingsShowing: showing)
             if state.currentTab == .mirror {
                 if showing {
                     mirrorPausedForSettings = mirror.wantsRunning
@@ -791,17 +792,32 @@ struct NotchView: View {
             }
         }
         .onChange(of: state.currentTab) { tab in
-            editorFocused = state.isExpanded && tab == .notes
-            media.setProgressPolling(state.isExpanded && tab == .media)
-            stats.setPolling(state.isExpanded && tab == .stats)
-            servers.setPolling(state.isExpanded && tab == .servers)
-            spectrum.setActive(spectrumShouldBeActive)
-            if tab == .calendar { calendarModel.load() }
+            applyGating(expanded: state.isExpanded, tab: tab,
+                        settingsShowing: state.showingSettings)
             if tab != .mirror {
                 mirror.stop()
                 if !settings.mirrorRememberBig { state.mirrorBig = false }
             }
         }
+    }
+
+    /// The single place that decides which per-tab work is allowed to run.
+    ///
+    /// This used to be three handlers that each applied their own subset: none
+    /// of them accounted for the settings overlay, and eight of the eleven
+    /// models were never mentioned at all, so their timers and observers ran
+    /// forever regardless of what was on screen.
+    private func applyGating(expanded: Bool, tab: NotchTab, settingsShowing: Bool) {
+        // Visible = expanded AND not buried under the settings overlay.
+        let live = expanded && !settingsShowing
+        editorFocused = live && tab == .notes
+        media.setProgressPolling(live && tab == .media)
+        media.setYouTubePolling(live && tab == .media)
+        stats.setPolling(live && tab == .stats)
+        servers.setPolling(live && tab == .servers)
+        calendarModel.setVisible(live && tab == .calendar)
+        toggles.setPolling(live && tab == .toggles)
+        spectrum.setActive(spectrumShouldBeActive)
     }
 
     /// One oversized square copy of the artwork for the ambient background —

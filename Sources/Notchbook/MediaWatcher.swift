@@ -138,12 +138,31 @@ final class MediaWatcher: ObservableObject {
         }
     }
 
+    /// True while the Media tab is actually on screen. The Chrome tab-walk is
+    /// only worth 3 s cadence then; the rest of the time a slow tick is enough
+    /// to notice a YouTube session for the collapsed ear.
+    private var youtubeHot = false
+
+    /// Visibility gate, matching setProgressPolling. Ungated, this spawned an
+    /// osascript against Chrome every 3 s forever — ~960 process launches an
+    /// hour with the notch closed, each one walking every tab of every window.
+    func setYouTubePolling(_ hot: Bool) {
+        guard hot != youtubeHot else { return }
+        youtubeHot = hot
+        guard youtubeEnabled else { return }
+        startYouTubeTimer()
+        if hot { pollYouTube() }   // don't make an opening tab wait a tick
+    }
+
     private func startYouTubeTimer() {
-        guard youtubeTimer == nil else { return }
-        youtubeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        youtubeTimer?.invalidate()
+        // 3 s while visible, 30 s when cold: the collapsed ear still discovers
+        // a YouTube session, at a tenth of the cost.
+        let interval: TimeInterval = youtubeHot ? 3 : 30
+        youtubeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.pollYouTube()
         }
-        youtubeTimer?.tolerance = 1
+        youtubeTimer?.tolerance = youtubeHot ? 1 : 10
     }
 
     /// Turn YouTube detection on/off from settings. Off: stop polling and drop
@@ -160,6 +179,10 @@ final class MediaWatcher: ObservableObject {
     }
 
     private func pollYouTube() {
+        // Spawning osascript to ask a browser that isn't running is pure waste.
+        guard !NSRunningApplication
+            .runningApplications(withBundleIdentifier: "com.google.Chrome").isEmpty
+        else { return }
         guard youtubeEnabled else { return }
         let current = nowPlaying
         if autoSwitchYouTube {
