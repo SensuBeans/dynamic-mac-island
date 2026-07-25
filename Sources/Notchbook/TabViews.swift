@@ -304,6 +304,15 @@ struct MediaTab: View {
                                               levels: np.isPlaying && !spectrum.levels.isEmpty
                                                   ? spectrum.levels : nil)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .overlay(alignment: .center) {
+                                        // Name the reason instead of faking a
+                                        // waveform over a tap that isn't running.
+                                        if let why = spectrum.failure {
+                                            Text(why)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.white.opacity(0.4))
+                                        }
+                                    }
                             }
                         }
                         .buttonStyle(.plain)
@@ -551,15 +560,6 @@ struct MediaTab: View {
             }
             .frame(height: 10)
             Text("-" + timeString(max(0, media.duration - shownElapsed)))
-                                    .overlay(alignment: .center) {
-                                        // Name the reason instead of faking a
-                                        // waveform over a tap that isn't running.
-                                        if let why = spectrum.failure {
-                                            Text(why)
-                                                .font(.system(size: 9))
-                                                .foregroundStyle(.white.opacity(0.4))
-                                        }
-                                    }
         }
         .font(.system(size: 10))
         .monospacedDigit()
@@ -980,6 +980,15 @@ private struct TrayTile: View {
     @EnvironmentObject private var state: NotchState
     @State private var thumb: ThumbState?
     @State private var hovered = false
+    /// A dropped file can be deleted, renamed or on an ejected volume. The
+    /// shelf used to render it with a full-colour Finder icon forever, so a
+    /// dead tile was indistinguishable from a live one and Open / Reveal /
+    /// AirDrop were silent no-ops.
+    private var unreachable: Bool { thumb == .missing || thumb == .denied }
+
+    private func reload() {
+        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
+    }
 
     /// Visual tile edge = the grid cell (tile-size setting) minus the 8pt of
     /// surrounding spacing the grid reserves.
@@ -989,8 +998,8 @@ private struct TrayTile: View {
         VStack(spacing: 4) {
             ZStack(alignment: .topTrailing) {
                 Group {
-                    if let thumbnail {
-                        Image(nsImage: thumbnail)
+                    if case .image(let img) = thumb {
+                        Image(nsImage: img)
                             .resizable()
                             .aspectRatio(contentMode: .fill)
                     } else {
@@ -1001,6 +1010,16 @@ private struct TrayTile: View {
                     }
                 }
                 .frame(width: side, height: side)
+                .saturation(unreachable ? 0 : 1)
+                .opacity(unreachable ? 0.45 : 1)
+                .overlay(alignment: .bottomLeading) {
+                    if unreachable {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .padding(3)
+                    }
+                }
                 .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.06)))
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
@@ -1290,20 +1309,11 @@ struct CalendarTab: View {
         let first = cal.firstWeekday - 1
         return Array(syms[first...] + syms[..<first])
     }
-    /// A dropped file can be deleted, renamed or on an ejected volume. The
-    /// shelf used to render it with a full-colour Finder icon forever, so a
-    /// dead tile was indistinguishable from a live one and Open / Reveal /
-    /// AirDrop were silent no-ops.
-    private var unreachable: Bool { thumb == .missing || thumb == .denied }
 
     private func stepMonth(_ delta: Int) {
         let cal = Calendar.current
         if let m = cal.date(byAdding: .month, value: delta, to: visibleMonth) {
             visibleMonth = m
-    private func reload() {
-        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
-    }
-
             calendarModel.loadMonth(containing: m)
         }
     }
@@ -1320,16 +1330,6 @@ struct CalendarTab: View {
                 .fill(eventColor(event))
                 .frame(width: 3, height: 30)
             VStack(alignment: .leading, spacing: 1) {
-                .saturation(unreachable ? 0 : 1)
-                .opacity(unreachable ? 0.45 : 1)
-                .overlay(alignment: .bottomLeading) {
-                    if unreachable {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.orange)
-                            .padding(3)
-                    }
-                }
                 Text(event.title ?? "Untitled")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.9))
@@ -1405,6 +1405,8 @@ struct MirrorTab: View {
                     .padding(8)
                 }
         } else if mirror.denied || mirror.unavailable {
+            // Error states have no button to anchor on, so keep the icon +
+            // message centered between spacers as before.
             // Both states are now recoverable: the gate always offers either a
             // Settings deep-link or a retry, so a denial can no longer strand
             // the tab with no way back.
@@ -1454,7 +1456,7 @@ struct StatsTab: View {
         HStack(spacing: 6) {
             if vis("cpu") {
                 StatTile(title: "CPU",
-                         center: pct(stats.cpu),
+                         center: stats.cpu < 0 ? "—" : pct(stats.cpu),
                          detail: nil,
                          fraction: max(stats.cpu, 0),
                          unavailableReason: stats.unavailable["cpu"])
@@ -1502,9 +1504,26 @@ struct StatsTab: View {
         .padding(.top, 4)
     }
 
+    /// Normalized against the fan's own rated range (SMC `F0Mn`/`F0Mx`) rather
+    /// than a hardcoded 6000, which on this machine (min 2317, max 6550) made
+    /// the ring sit ~39% full at idle and saturate before the fan did.
+    private var fanFraction: Double {
+        guard stats.fanRPM > 0 else { return 0 }
+        guard stats.fanMax > stats.fanMin else { return min(stats.fanRPM / 6000, 1) }
+        let span = stats.fanMax - stats.fanMin
+        return min(max((stats.fanRPM - stats.fanMin) / span, 0), 1)
+    }
+
     private func pct(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+    /// RAM, which is conventionally binary — 32 GiB reads as the "32" users expect.
     private func gb(_ bytes: Double) -> String {
         String(format: "%.0f", bytes / 1_073_741_824)
+    }
+    /// Storage, which macOS reports in decimal GB everywhere the user can check
+    /// it — Finder, About This Mac, `df -H`, `diskutil`. Using the binary
+    /// divisor here made the tile read ~50 GB short of Finder.
+    private func gbDecimal(_ bytes: Double) -> String {
+        String(format: "%.0f", bytes / 1_000_000_000)
     }
 }
 
@@ -1514,6 +1533,12 @@ private struct StatTile: View {
     let detail: String?
     let fraction: Double
     var invertSeverity = false
+    /// Why this metric has no value, when it has none. A tile showing "—" used
+    /// to paint the same 0.02 stub as a genuine 0% — and for Battery, where
+    /// severity is inverted, "no data" came out RED, spending the app's most
+    /// urgent colour on "I don't know".
+    var unavailableReason: String? = nil
+    private var isUnavailable: Bool { unavailableReason != nil || center == "—" }
 
     var body: some View {
         VStack(spacing: 3) {
@@ -1558,6 +1583,7 @@ private struct StatTile: View {
     }
 
     private var ringColor: Color {
+        if isUnavailable { return .white.opacity(0.18) }
         let severity = invertSeverity ? 1 - fraction : fraction
         if severity > 0.85 { return .red }
         if severity > 0.6 { return .yellow }
@@ -1824,27 +1850,10 @@ struct EqualizerBars: View {
     var color: Color = .orange
     var animating = true
     /// Real audio levels (0…1, newest last). When present, the bars render
-    /// Normalized against the fan's own rated range (SMC `F0Mn`/`F0Mx`) rather
-    /// than a hardcoded 6000, which on this machine (min 2317, max 6550) made
-    /// the ring sit ~39% full at idle and saturate before the fan did.
-    private var fanFraction: Double {
-        guard stats.fanRPM > 0 else { return 0 }
-        guard stats.fanMax > stats.fanMin else { return min(stats.fanRPM / 6000, 1) }
-        let span = stats.fanMax - stats.fanMin
-        return min(max((stats.fanRPM - stats.fanMin) / span, 0), 1)
-    }
-
     /// this history instead of the synthetic sine animation.
-    /// RAM, which is conventionally binary — 32 GiB reads as the "32" users expect.
     var levels: [Float]? = nil
 
     @State private var t: Double = 0
-    /// Storage, which macOS reports in decimal GB everywhere the user can check
-    /// it — Finder, About This Mac, `df -H`, `diskutil`. Using the binary
-    /// divisor here made the tile read ~50 GB short of Finder.
-    private func gbDecimal(_ bytes: Double) -> String {
-        String(format: "%.0f", bytes / 1_000_000_000)
-    }
     /// Smoothed per-bar heights, eased toward their targets every frame so raw
     /// spectrum samples don't make the bars jump.
     @State private var displayed: [CGFloat] = []
@@ -1853,12 +1862,6 @@ struct EqualizerBars: View {
     var body: some View {
         let gap = barWidth
         let w = CGFloat(barCount) * barWidth + CGFloat(max(0, barCount - 1)) * gap
-    /// Why this metric has no value, when it has none. A tile showing "—" used
-    /// to paint the same 0.02 stub as a genuine 0% — and for Battery, where
-    /// severity is inverted, "no data" came out RED, spending the app's most
-    /// urgent colour on "I don't know".
-    var unavailableReason: String? = nil
-    private var isUnavailable: Bool { unavailableReason != nil || center == "—" }
         // Draw the bars in a Canvas with a FIXED frame. Only the pixels inside
         // redraw each tick — the view's geometry never changes — so the refresh
         // can't yank the bars out of the island's own move animation. (The old
@@ -1901,7 +1904,6 @@ struct EqualizerBars: View {
             displayed[i] += (target - displayed[i]) * s
         }
     }
-        if isUnavailable { return .white.opacity(0.18) }
 
     private func targetHeight(_ i: Int, rest: CGFloat) -> CGFloat {
         if let levels, !levels.isEmpty {

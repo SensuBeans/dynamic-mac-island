@@ -371,7 +371,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return event
         }
 
-        observerTokens.append(NotificationCenter.default.addObserver(
         // Nothing re-synced after a sleep. Tabs whose data is event-driven or
         // loaded on a visibility edge showed pre-sleep state after the lid
         // opened — a calendar list containing meetings that already ended, with
@@ -387,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.media.refresh()
         })
 
+        observerTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
         ) { [weak self] _ in self?.rebuildMetrics() })

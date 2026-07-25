@@ -108,22 +108,22 @@ final class NotchState: ObservableObject {
     /// Tabs the user has hidden from the nav dock and tab-swipe cycle.
     @Published var hiddenTabs: Set<NotchTab> {
         didSet {
+            recomputeVisibleTabs()
             UserDefaults.standard.set(hiddenTabs.map(\.rawValue),
                                       forKey: "hiddenTabs")
         }
     }
-            recomputeVisibleTabs()
     /// User-defined order of ALL tabs, drives the nav dock and the swipe cycle.
     /// Persisted; new tabs added in a later build are appended in canonical
     /// order on load. Reorder it by dragging a chip in the nav dock.
     @Published var tabOrder: [NotchTab] {
         didSet {
             UserDefaults.standard.set(tabOrder.map(\.rawValue), forKey: "tabOrder")
+            recomputeVisibleTabs()
         }
     }
     /// Mirror at double size ("twice as big") — toggled from the mirror
     /// overlay, reset whenever the mirror is left.
-            recomputeVisibleTabs()
     @Published var mirrorBig = false
     /// Calendar tab view mode: false = 7-day list (default), true = mini month
     /// grid. Lives here (not just view-local) because AppDelegate.islandRect and
@@ -207,7 +207,8 @@ final class NotchState: ObservableObject {
 
     fileprivate func recomputeVisibleTabs() {
         let visible = tabOrder.filter { !hiddenTabs.contains($0) }
-        return visible.isEmpty ? [.media] : visible
+        let next = visible.isEmpty ? [.media] : visible
+        if next != visibleTabs { visibleTabs = next }
     }
 
     /// Commit a new order for the visible tabs (from a nav-dock drag). Hidden
@@ -272,13 +273,13 @@ final class NotchState: ObservableObject {
         } else {
             pages = Array(repeating: "", count: desired)
         }
+        // didSet does not fire during init, so seed the stored list by hand.
+        recomputeVisibleTabs()
         if hiddenTabs.contains(currentTab) { currentTab = visibleTabs[0] }
         cancellable = $pages
             .dropFirst()
             .sink { [weak self] _ in self?.scheduleSave() }
     }
-        // didSet does not fire during init, so seed the stored list by hand.
-        recomputeVisibleTabs()
 
     private func scheduleSave() {
         saveWork?.cancel()
