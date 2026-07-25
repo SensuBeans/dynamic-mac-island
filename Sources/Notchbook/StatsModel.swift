@@ -6,7 +6,7 @@ import Combine
 /// System stats like the Stats menu-bar app: CPU, memory, GPU, disk, fan,
 /// battery. Polled every 2 s, only while the Stats tab is visible.
 final class StatsModel: ObservableObject {
-    @Published var cpu: Double = 0                 // 0…1
+    @Published var cpu: Double = -1                // 0…1, -1 = no sample yet
     @Published var memUsed: Double = 0             // bytes
     let memTotal = Double(ProcessInfo.processInfo.physicalMemory)
     @Published var gpu: Double = -1                // 0…1, -1 = unavailable
@@ -19,6 +19,11 @@ final class StatsModel: ObservableObject {
     @Published var fanMax: Double = 0
     @Published var batteryLevel: Double = -1       // 0…1
     @Published var batteryCharging = false
+    /// Per-tile reason a metric is missing, keyed by tile id. Every poll below
+    /// used to `return` silently on failure and leave the last good value in
+    /// place, so a source that died mid-session looked exactly like one that
+    /// was updating to a stable number.
+    @Published var unavailable: [String: String] = [:]
 
     /// Settings-driven poll interval (seconds). Changing it while polling
     /// restarts the timer at the new cadence.
@@ -68,6 +73,8 @@ final class StatsModel: ObservableObject {
         if !hiddenTiles.contains("battery") { pollBattery() }
         if !hiddenTiles.contains("fan") {
             fanRPM = smc?.fanRPM() ?? -1
+            unavailable["fan"] = smc == nil ? "No AppleSMC service on this Mac"
+                : (fanRPM < 0 ? "SMC has no F0Ac key (no fan?)" : nil)
             if fanMax == 0, let r = smc?.fanRange() { fanMin = r.min; fanMax = r.max }
         }
     }
@@ -81,7 +88,10 @@ final class StatsModel: ObservableObject {
                 host_statistics(hostPort, HOST_CPU_LOAD_INFO, $0, &size)
             }
         }
-        guard kr == KERN_SUCCESS else { return }
+        guard kr == KERN_SUCCESS else {
+            cpu = -1; unavailable["cpu"] = "host_statistics failed (\(kr))"; return
+        }
+        unavailable["cpu"] = nil
         // cpu_ticks are natural_t (UInt32) and wrap; subtract with wrapping `&-`
         // in UInt32 *before* widening, else the underflow traps after long uptimes.
         let t = (user: info.cpu_ticks.0, system: info.cpu_ticks.1,
@@ -104,7 +114,10 @@ final class StatsModel: ObservableObject {
                 host_statistics64(hostPort, HOST_VM_INFO64, $0, &size)
             }
         }
-        guard kr == KERN_SUCCESS else { return }
+        guard kr == KERN_SUCCESS else {
+            unavailable["memory"] = "host_statistics64 failed (\(kr))"; return
+        }
+        unavailable["memory"] = nil
         let page = Double(vm_kernel_page_size)
         memUsed = (Double(vm.active_count) + Double(vm.wire_count)
             + Double(vm.compressor_page_count)) * page
@@ -113,7 +126,10 @@ final class StatsModel: ObservableObject {
     private func pollDisk() {
         guard let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys:
             [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
-        else { return }
+        else {
+            diskTotal = 0; unavailable["disk"] = "Couldn't read the boot volume"; return
+        }
+        unavailable["disk"] = nil
         diskFree = Double(v.volumeAvailableCapacityForImportantUsage ?? 0)
         diskTotal = Double(v.volumeTotalCapacity ?? 0)
     }
@@ -122,7 +138,9 @@ final class StatsModel: ObservableObject {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault,
                                            IOServiceMatching("IOAccelerator"),
-                                           &iterator) == kIOReturnSuccess else { return }
+                                           &iterator) == kIOReturnSuccess else {
+            gpu = -1; unavailable["gpu"] = "No IOAccelerator service"; return
+        }
         defer { IOObjectRelease(iterator) }
         var entry = IOIteratorNext(iterator)
         while entry != 0 {
@@ -133,26 +151,41 @@ final class StatsModel: ObservableObject {
                let perf = dict["PerformanceStatistics"] as? [String: Any],
                let util = perf["Device Utilization %"] as? Int {
                 gpu = Double(util) / 100
+                unavailable["gpu"] = nil
                 IOObjectRelease(entry)
                 return
             }
             IOObjectRelease(entry)
             entry = IOIteratorNext(iterator)
         }
+        // Fell through every node without finding the key — say so instead of
+        // leaving the last reading frozen on screen.
+        gpu = -1
+        unavailable["gpu"] = "IOAccelerator reports no Device Utilization %"
     }
 
     private func pollBattery() {
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef]
-        else { return }
+        else {
+            batteryLevel = -1; unavailable["battery"] = "No power-source data"; return
+        }
         for ps in list {
             guard let desc = IOPSGetPowerSourceDescription(blob, ps)?
                 .takeUnretainedValue() as? [String: Any],
+                // Take the internal battery specifically. The loop used to run
+                // to the end without breaking, so with a UPS attached the last
+                // source in the list won and the tile showed the UPS's charge.
+                (desc[kIOPSTypeKey] as? String) == kIOPSInternalBatteryType,
                 let current = desc[kIOPSCurrentCapacityKey] as? Int,
                 let max = desc[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
             batteryLevel = Double(current) / Double(max)
             batteryCharging = (desc[kIOPSIsChargingKey] as? Bool) ?? false
+            unavailable["battery"] = nil
+            return
         }
+        batteryLevel = -1
+        unavailable["battery"] = "No internal battery"
     }
 }
 

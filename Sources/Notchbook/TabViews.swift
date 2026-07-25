@@ -299,7 +299,8 @@ struct MediaTab: View {
                                 EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
                                               barWidth: 2.5, maxHeight: 26,
                                               color: media.accent,
-                                              animating: np.isPlaying && state.isExpanded,
+                                              animating: np.isPlaying && state.isExpanded
+                                                  && spectrum.failure == nil,
                                               levels: np.isPlaying && !spectrum.levels.isEmpty
                                                   ? spectrum.levels : nil)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -550,6 +551,15 @@ struct MediaTab: View {
             }
             .frame(height: 10)
             Text("-" + timeString(max(0, media.duration - shownElapsed)))
+                                    .overlay(alignment: .center) {
+                                        // Name the reason instead of faking a
+                                        // waveform over a tap that isn't running.
+                                        if let why = spectrum.failure {
+                                            Text(why)
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.white.opacity(0.4))
+                                        }
+                                    }
         }
         .font(.system(size: 10))
         .monospacedDigit()
@@ -967,7 +977,8 @@ private struct TrayTile: View {
     @EnvironmentObject var settings: SettingsStore
     let url: URL
 
-    @State private var thumbnail: NSImage?
+    @EnvironmentObject private var state: NotchState
+    @State private var thumb: ThumbState?
     @State private var hovered = false
 
     /// Visual tile edge = the grid cell (tile-size setting) minus the 8pt of
@@ -1013,7 +1024,8 @@ private struct TrayTile: View {
             }
             Text(url.lastPathComponent)
                 .font(.system(size: 9))
-                .foregroundStyle(.white.opacity(hovered ? 0.9 : 0.55))
+                .foregroundStyle(.white.opacity(unreachable ? 0.35 : (hovered ? 0.9 : 0.55)))
+                .strikethrough(unreachable)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: side + 8)
@@ -1022,19 +1034,22 @@ private struct TrayTile: View {
         .onHover { hovered = $0 }
         .animation(.easeOut(duration: 0.12), value: hovered)
         .onDrag { NSItemProvider(object: url as NSURL) }
-        .onTapGesture(count: 2) { NSWorkspace.shared.open(url) }
+        .onTapGesture(count: 2) { if !unreachable { NSWorkspace.shared.open(url) } }
+        .help(unreachable ? "\(url.path) — file is missing" : url.path)
         .contextMenu {
-            Button("Open") { NSWorkspace.shared.open(url) }
+            // Everything but Remove is a no-op on a file that isn't there.
+            Button("Open") { NSWorkspace.shared.open(url) }.disabled(unreachable)
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
-            }
-            Button("AirDrop") { tray.airDrop([url]) }
+            }.disabled(unreachable)
+            Button("AirDrop") { tray.airDrop([url]) }.disabled(unreachable)
             Divider()
             Button("Remove") { tray.remove(url) }
         }
-        .onAppear {
-            TrayThumbnails.shared.load(url, side: side) { thumbnail = $0 }
-        }
+        .onAppear { reload() }
+        // Re-check when the tab becomes visible again: a file can come back
+        // (volume remounted, download finished) and the tile must catch up.
+        .onChange(of: state.currentTab) { if $0 == .tray { reload() } }
     }
 }
 
@@ -1069,26 +1084,12 @@ struct CalendarTab: View {
     }
 
     private var connectPrompt: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "calendar")
-                .font(.system(size: 28))
-                .foregroundStyle(.white.opacity(0.3))
-            Text("Connect your Calendar")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white.opacity(0.7))
-            Button { calendarModel.connect() } label: {
-                Text("Allow Access")
-                    .font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                    .background(Capsule().fill(.orange))
-                    .foregroundStyle(.black)
-            }
-            .buttonStyle(.plain)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
+        PermissionGate(icon: "calendar",
+                       feature: "Calendar",
+                       state: calendarModel.permission,
+                       pane: .calendars,
+                       request: { calendarModel.connect() },
+                       retry: { calendarModel.refreshAuthorization() })
     }
 
     // MARK: List / month toggle
@@ -1289,11 +1290,20 @@ struct CalendarTab: View {
         let first = cal.firstWeekday - 1
         return Array(syms[first...] + syms[..<first])
     }
+    /// A dropped file can be deleted, renamed or on an ejected volume. The
+    /// shelf used to render it with a full-colour Finder icon forever, so a
+    /// dead tile was indistinguishable from a live one and Open / Reveal /
+    /// AirDrop were silent no-ops.
+    private var unreachable: Bool { thumb == .missing || thumb == .denied }
 
     private func stepMonth(_ delta: Int) {
         let cal = Calendar.current
         if let m = cal.date(byAdding: .month, value: delta, to: visibleMonth) {
             visibleMonth = m
+    private func reload() {
+        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
+    }
+
             calendarModel.loadMonth(containing: m)
         }
     }
@@ -1310,6 +1320,16 @@ struct CalendarTab: View {
                 .fill(eventColor(event))
                 .frame(width: 3, height: 30)
             VStack(alignment: .leading, spacing: 1) {
+                .saturation(unreachable ? 0 : 1)
+                .opacity(unreachable ? 0.45 : 1)
+                .overlay(alignment: .bottomLeading) {
+                    if unreachable {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .padding(3)
+                    }
+                }
                 Text(event.title ?? "Untitled")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.9))
@@ -1385,27 +1405,15 @@ struct MirrorTab: View {
                     .padding(8)
                 }
         } else if mirror.denied || mirror.unavailable {
-            // Error states have no button to anchor on, so keep the icon +
-            // message centered between spacers as before.
-            VStack(spacing: 10) {
-                Spacer()
-                Image(systemName: "web.camera")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.white.opacity(0.3))
-                if mirror.denied {
-                    Text("Camera access denied — enable it in\nSystem Settings → Privacy → Camera")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .multilineTextAlignment(.center)
-                } else {
-                    Text("No camera available")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .multilineTextAlignment(.center)
-                }
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)
+            // Both states are now recoverable: the gate always offers either a
+            // Settings deep-link or a retry, so a denial can no longer strand
+            // the tab with no way back.
+            PermissionGate(icon: "web.camera",
+                           feature: "Camera",
+                           state: mirror.permission,
+                           pane: .camera,
+                           request: { mirror.start() },
+                           retry: { mirror.retry() })
         } else {
             // Same composition as the media tab's placeholder: the "Show
             // Mirror" button is the anchor, centered in the content area, with
@@ -1448,19 +1456,22 @@ struct StatsTab: View {
                 StatTile(title: "CPU",
                          center: pct(stats.cpu),
                          detail: nil,
-                         fraction: stats.cpu)
+                         fraction: max(stats.cpu, 0),
+                         unavailableReason: stats.unavailable["cpu"])
             }
             if vis("memory") {
                 StatTile(title: "Memory",
                          center: pct(stats.memUsed / stats.memTotal),
                          detail: "\(gb(stats.memUsed)) / \(gb(stats.memTotal)) GB",
-                         fraction: stats.memUsed / stats.memTotal)
+                         fraction: stats.memUsed / stats.memTotal,
+                         unavailableReason: stats.unavailable["memory"])
             }
             if vis("gpu") {
                 StatTile(title: "GPU",
                          center: stats.gpu < 0 ? "—" : pct(stats.gpu),
                          detail: nil,
-                         fraction: max(stats.gpu, 0))
+                         fraction: max(stats.gpu, 0),
+                         unavailableReason: stats.unavailable["gpu"])
             }
             if vis("disk") {
                 StatTile(title: "Disk",
@@ -1468,21 +1479,24 @@ struct StatsTab: View {
                             ? pct(1 - stats.diskFree / stats.diskTotal) : "—",
                          detail: "\(gbDecimal(stats.diskFree)) GB free",
                          fraction: stats.diskTotal > 0
-                            ? 1 - stats.diskFree / stats.diskTotal : 0)
+                            ? 1 - stats.diskFree / stats.diskTotal : 0,
+                         unavailableReason: stats.unavailable["disk"])
             }
             if vis("fan") {
                 StatTile(title: "Fan",
                          center: stats.fanRPM < 0 ? "—"
                             : (stats.fanRPM < 1 ? "off" : "\(Int(stats.fanRPM))"),
                          detail: stats.fanRPM >= 1 ? "rpm" : nil,
-                         fraction: fanFraction)
+                         fraction: fanFraction,
+                         unavailableReason: stats.unavailable["fan"])
             }
             if vis("battery") {
                 StatTile(title: "Battery",
                          center: stats.batteryLevel < 0 ? "—" : pct(stats.batteryLevel),
                          detail: stats.batteryCharging ? "charging ⚡" : nil,
                          fraction: max(stats.batteryLevel, 0),
-                         invertSeverity: true)
+                         invertSeverity: true,
+                         unavailableReason: stats.unavailable["battery"])
             }
         }
         .padding(.top, 4)
@@ -1507,7 +1521,9 @@ private struct StatTile: View {
                 Circle()
                     .stroke(.white.opacity(0.12), lineWidth: 3.5)
                 Circle()
-                    .trim(from: 0, to: max(0.02, min(fraction, 1)))
+                    // No trim stub when there is nothing to show: an empty
+                    // track reads as "no data", a 2% arc reads as "almost zero".
+                    .trim(from: 0, to: isUnavailable ? 0 : max(0.02, min(fraction, 1)))
                     .stroke(ringColor,
                             style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
@@ -1837,6 +1853,12 @@ struct EqualizerBars: View {
     var body: some View {
         let gap = barWidth
         let w = CGFloat(barCount) * barWidth + CGFloat(max(0, barCount - 1)) * gap
+    /// Why this metric has no value, when it has none. A tile showing "—" used
+    /// to paint the same 0.02 stub as a genuine 0% — and for Battery, where
+    /// severity is inverted, "no data" came out RED, spending the app's most
+    /// urgent colour on "I don't know".
+    var unavailableReason: String? = nil
+    private var isUnavailable: Bool { unavailableReason != nil || center == "—" }
         // Draw the bars in a Canvas with a FIXED frame. Only the pixels inside
         // redraw each tick — the view's geometry never changes — so the refresh
         // can't yank the bars out of the island's own move animation. (The old
@@ -1879,6 +1901,7 @@ struct EqualizerBars: View {
             displayed[i] += (target - displayed[i]) * s
         }
     }
+        if isUnavailable { return .white.opacity(0.18) }
 
     private func targetHeight(_ i: Int, rest: CGFloat) -> CGFloat {
         if let levels, !levels.isEmpty {

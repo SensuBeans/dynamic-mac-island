@@ -12,6 +12,12 @@ import os
 /// stays empty and the waveform falls back to its synthetic animation.
 final class AudioSpectrum: ObservableObject {
     @Published private(set) var levels: [Float] = []
+    /// Why the tap isn't running, or nil when it is. Every failure below used
+    /// to be a bare `return`, leaving `levels` empty — and both render sites
+    /// substitute a synthetic sine for empty levels, so a denied or broken tap
+    /// drew convincing bars that had nothing to do with the audio. A silent
+    /// failure that *looks* like success is worse than one that shows "—".
+    @Published private(set) var failure: String?
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -50,13 +56,23 @@ final class AudioSpectrum: ObservableObject {
     }
 
     private func start() {
-        guard #available(macOS 14.2, *) else { return }
+        guard #available(macOS 14.2, *) else {
+            failure = "Live audio needs macOS 14.2 or later"
+            return
+        }
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
         desc.uuid = UUID()
         desc.muteBehavior = .unmuted
         desc.isPrivate = true
         var tap = AudioObjectID(kAudioObjectUnknown)
-        guard AudioHardwareCreateProcessTap(desc, &tap) == noErr else { return }
+        let tapErr = AudioHardwareCreateProcessTap(desc, &tap)
+        guard tapErr == noErr else {
+            // The TCC denial for audio capture surfaces here.
+            failure = tapErr == kAudioHardwareIllegalOperationError
+                ? "Audio Recording access is off"
+                : "Couldn't tap system audio (\(tapErr))"
+            return
+        }
         tapID = tap
 
         let aggDesc: [String: Any] = [
@@ -69,6 +85,7 @@ final class AudioSpectrum: ObservableObject {
         ]
         var agg = AudioObjectID(kAudioObjectUnknown)
         guard AudioHardwareCreateAggregateDevice(aggDesc as CFDictionary, &agg) == noErr else {
+            failure = "Couldn't create the audio device"
             destroyTap()
             return
         }
@@ -79,10 +96,12 @@ final class AudioSpectrum: ObservableObject {
             self?.ingest(inInputData)
         }
         guard err == noErr, ioProcID != nil else {
+            failure = "Couldn't attach to the audio stream"
             stop()
             return
         }
         guard AudioDeviceStart(agg, ioProcID) == noErr else {
+            failure = "Couldn't start the audio stream"
             stop()
             return
         }
@@ -90,6 +109,7 @@ final class AudioSpectrum: ObservableObject {
         // HERE (not before start()) guarantees every failure path above leaves
         // active == false, so a later setActive(true) retries cleanly.
         active = true
+        failure = nil
     }
 
     /// Destroys the process tap and the "Notchbook Audio Tap" aggregate device.

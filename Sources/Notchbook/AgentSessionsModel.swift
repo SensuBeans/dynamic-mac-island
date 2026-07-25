@@ -143,6 +143,23 @@ final class AgentSessionsModel: ObservableObject {
     /// complete, then idle; most-recent activity first within a group.
     @Published private(set) var sessions: [AgentSession] = []
 
+    /// Whether session discovery is working. An empty `sessions` means very
+    /// different things depending on this, and the empty state must say which.
+    enum DiscoveryState: Equatable {
+        case ok
+        case sessionsDirMissing
+        case sessionsDirUnreadable(String)
+    }
+    @Published private(set) var discovery: DiscoveryState = .ok
+
+    /// Called from the io queue; hops to main because it drives the view.
+    private func setDiscovery(_ next: DiscoveryState) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.discovery != next else { return }
+            self.discovery = next
+        }
+    }
+
     /// Account usage limits shown at the top of the Agents tab. `nil` until the
     /// statusline has written the spool file at least once (non-subscribers or a
     /// fresh install never populate it — the header then stays hidden).
@@ -1385,8 +1402,20 @@ final class AgentSessionsModel: ObservableObject {
     /// deletes the file when the terminal closes, so a missing/dead file is the
     /// authoritative "this terminal is gone" signal that drives the row's removal.
     private func readSessionMetas() -> [String: SessionMeta] {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: sessionsURL.path)
-        else { return [:] }
+        // Distinguish "nothing is running" from "we cannot see". A `try?` to
+        // an empty dict made a missing or unreadable directory render as the
+        // confident sentence "No Claude Code sessions running" while the user
+        // was staring at three live Claude terminals.
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: sessionsURL.path)
+            setDiscovery(.ok)
+        } catch {
+            let missing = !FileManager.default.fileExists(atPath: sessionsURL.path)
+            setDiscovery(missing ? .sessionsDirMissing
+                                 : .sessionsDirUnreadable((error as NSError).localizedDescription))
+            return [:]
+        }
         var out: [String: SessionMeta] = [:]
         for name in names where name.hasSuffix(".json") {
             let url = sessionsURL.appendingPathComponent(name)

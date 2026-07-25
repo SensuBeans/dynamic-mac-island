@@ -74,6 +74,40 @@ final class MirrorController: NSObject, ObservableObject {
     /// clicks Show Mirror, then expands the moment intent flips — not on the
     /// slower isRunning, so the growth starts with the click.
     @Published private(set) var wantsRunning = false
+
+    /// Live permission/availability state, recomputed on demand rather than
+    /// latched. `denied` and `unavailable` were only ever cleared inside the
+    /// granted branch of start(), and the view hid the one button that could
+    /// call start() whenever either was true — so a single denial (or one
+    /// moment with no camera attached) bricked the tab until the app relaunched.
+    var permission: PermissionState {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .denied:     return .denied
+        case .restricted: return .restricted
+        case .notDetermined: return .notDetermined
+        default: break
+        }
+        return cameraCount == 0
+            ? .unavailable("No camera is connected.")
+            : .granted
+    }
+
+    private var cameraCount: Int {
+        var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        if #available(macOS 14.0, *) { types.append(.external) }
+        return AVCaptureDevice.DiscoverySession(
+            deviceTypes: types,
+            mediaType: .video, position: .unspecified).devices.count
+    }
+
+    /// Re-evaluate from the system instead of trusting the latched flags, then
+    /// try again if the way is now clear.
+    func retry() {
+        denied = false
+        unavailable = false
+        if case .granted = permission { start() }
+        else if case .notDetermined = permission { start() }
+    }
     /// Serial queue so start/stop can never interleave — a stop racing a
     /// start on a concurrent queue left the session in a broken state.
     private let sessionQueue = DispatchQueue(label: "notchbook.mirror.session")

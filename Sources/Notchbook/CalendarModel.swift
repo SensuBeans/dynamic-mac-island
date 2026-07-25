@@ -57,6 +57,36 @@ final class CalendarModel: ObservableObject {
         return status == .authorized
     }
 
+    /// The real authorization state, not a Bool. `denied`, `restricted` and
+    /// write-only used to render as "Connect your Calendar" with a button that
+    /// the system answers instantly and silently — a permanent dead end.
+    var permission: PermissionState {
+        switch status {
+        case .notDetermined: return .notDetermined
+        case .denied:        return .denied
+        case .restricted:    return .restricted
+        default: break
+        }
+        if #available(macOS 14.0, *) {
+            switch status {
+            case .fullAccess: return .granted
+            case .writeOnly:
+                return .insufficient("Notchbook can add events but not read them.")
+            default: return .denied
+            }
+        }
+        return status == .authorized ? .granted : .denied
+    }
+
+    /// Re-read the live TCC state. Nothing did this after init, so granting or
+    /// revoking access while the app ran left the tab wrong until relaunch.
+    func refreshAuthorization() {
+        let fresh = EKEventStore.authorizationStatus(for: .event)
+        guard fresh != status else { return }
+        status = fresh
+        if hasAccess { load() }
+    }
+
     func connect() {
         let done: (Bool) -> Void = { [weak self] granted in
             DispatchQueue.main.async {

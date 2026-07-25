@@ -899,8 +899,13 @@ struct NotchView: View {
                                 artworkThumb(side: metrics.notchHeight - 10)
                                 Group {
                                     if np.isPlaying {
+                                        // A dead tap must not animate: the
+                                        // synthetic sine is indistinguishable
+                                        // from a live waveform, so a denied
+                                        // permission would look like it works.
                                         EqualizerBars(barCount: 4, maxHeight: 14,
                                                       color: media.accent,
+                                                      animating: spectrum.failure == nil,
                                                       levels: !spectrum.levels.isEmpty
                                                           ? spectrum.levels : nil)
                                     } else {

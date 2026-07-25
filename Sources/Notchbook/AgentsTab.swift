@@ -80,15 +80,42 @@ struct AgentsTab: View {
         }
     }
 
+    /// An empty list is only "nothing is running" when discovery actually
+    /// worked. Otherwise say what broke, because the offered remedy (launch a
+    /// terminal) cannot help — the new session would not appear either.
+    private var emptyHeadline: String {
+        switch agents.discovery {
+        case .ok:                    return "No Claude Code sessions running"
+        case .sessionsDirMissing:    return "Can't see Claude Code sessions"
+        case .sessionsDirUnreadable: return "Can't read Claude Code sessions"
+        }
+    }
+
+    private var emptyDetail: String? {
+        switch agents.discovery {
+        case .ok:                          return nil
+        case .sessionsDirMissing:          return "~/.claude/sessions doesn't exist — needs Claude Code 2.x"
+        case .sessionsDirUnreadable(let e): return e
+        }
+    }
+
     private var emptyState: some View {
         VStack(spacing: 10) {
             Spacer()
             Image(systemName: "sparkles")
                 .font(.system(size: 26))
                 .foregroundStyle(.white.opacity(0.25))
-            Text("No Claude Code sessions running")
+            Text(emptyHeadline)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.5))
+                .multilineTextAlignment(.center)
+            if let detail = emptyDetail {
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // Neutral launch button (not an accent fill — green/amber/orange are
             // reserved for session state in this tab). Opens the notch's own
             // terminal so a `claude` started there comes back as a .notch row.
