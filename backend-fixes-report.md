@@ -92,7 +92,7 @@ rule I did not restructure TimerTab. Re-apply once that work commits.
 
 ---
 
-## 3 · Wave 4 (C4) — attempted, goal not met
+## 3 · C4 — CLOSED (see §3-addendum). Wave 4's attempt, kept for the record
 
 Stating this plainly as the prompt requires: **the CPU burn is not fixed, and my
 mitigation produced no measurable improvement.**
@@ -136,6 +136,61 @@ starting with Agents and Media.
 `bb4ca9b` is kept — a Canvas leaf is architecturally correct and drops the
 invalidation rate from display refresh to 20 Hz — but **it is not a fix for C4 and
 should not be recorded as one.**
+
+
+---
+
+## 3-addendum · C4 closed — `c1de81d`
+
+**Mechanism: a 20 Hz periodic invalidation × an always-mounted tab tree.**
+Wave 4 replaced the pill's `.repeatForever` animation with a TimelineView Canvas
+and the number did not move, because the cost was never the *drawing*. Every
+TimelineView tick schedules a view-graph update through the single hosting view,
+and `expandedContent` mounts the current tab's whole body unconditionally —
+collapse is opacity only. So twenty times a second the app relayed out an entire
+tab nobody could see. That accounts for all three earlier observations: the
+load-correlation (the dot exists only while a session works), the tab-dependence
+(the 23→50% swing on identical code), and why the Canvas swap failed (it cut
+redraw cost and kept the tick rate).
+
+**Fix (prong 1):** the working dot pulses for one second on entry — four
+half-cycles of a bounded `repeatCount` — then holds a static fill and schedules
+nothing further. State changes still animate.
+
+**Result, measured A/B with the two binaries run minutes apart under identical
+conditions** (notch closed, one working session, cumulative-CPU delta × 3 × 30 s):
+
+| binary | windows | mean |
+|---|---|---|
+| pre-fix baseline (V2) | 24.9 / 20.5 / 20.5 | **22.0%** |
+| wave-4, rebuilt and re-run for a same-conditions A/B | 19.3 / 19.6 / 20.5 | **19.8%** |
+| **prong 1 — shipped** | 2.1 / 2.1 / 3.3 | **2.5%** |
+
+**8× reduction against a ≤7% target**, and it lands at the ~4% quiet floor.
+Re-running the old binary mattered: it proved the pill really was in `.working`
+during both runs, so the comparison is valid rather than a measurement of the
+quiet floor. V4 sample corroborates: `NSDisplayCycleFlush` 11→3,
+`ViewGraphRootValueUpdater` 42→20, `LayoutEngineBox` 124→87.
+
+**Prong 2 (unmount the collapsed tab body) was implemented, measured, and then
+reverted.** It worked — 2.5% → 2.2% — but that 0.3-point gain is not worth the
+risk it introduces. The Notes wipe guard (`TabViews.swift`, `editorText`) is
+`guard state.isExpanded`, and it has been sufficient only because the editor
+mounted once at launch *while collapsed*, so its initial empty push was blocked.
+Unmounting makes the editor rebuild on every expand, when `isExpanded` is already
+`true` — precisely when that guard no longer protects it, on a path whose comment
+records that it "once wiped saved notes". I could not verify the outcome without
+physically expanding the notch. Prong 1 already beats the target by 4.5 points, so
+the correct order is: harden the guard with an explicit first-push latch, prove it,
+*then* unmount. Prong 3 was not needed and not started.
+
+The Terminal constraint turned out to be a non-issue: `TerminalSessionsModel`
+already owns the `LocalProcessTerminalView` and `TerminalContainer` only reparents
+it, which is the ownership shape the prong-2 spec asked for.
+
+**Still open:** `EqualizerBars` drives a 30 Hz run-loop timer and is also used in
+the *collapsed* ear, so music playing while the notch is closed should reproduce
+this same class of cost. Not measured — the machine was silent throughout.
 
 ---
 
