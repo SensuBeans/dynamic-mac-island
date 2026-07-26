@@ -249,6 +249,35 @@ enum LocalStarter {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// What actually has to run for an entry, and where. Split out of `start` so
+    /// the detached path and the Terminal Deck path resolve the command the SAME
+    /// way — a server started in a deck pane must be the same server, not a
+    /// second definition of one that drifts.
+    struct LaunchPlan {
+        let cwd: String
+        /// The command itself, without any detaching, redirection or PORT export.
+        let inner: String
+        let port: Int
+    }
+
+    static func plan(_ reg: inout Registry, _ entry: inout Entry) -> LaunchPlan? {
+        let port = ensurePort(&reg, &entry)
+        if !entry.cmd.isEmpty {
+            return LaunchPlan(cwd: entry.path, inner: entry.cmd, port: port)
+        }
+        if entry.kind == "pyserver" {
+            return LaunchPlan(cwd: entry.path, inner: "python3 server.py", port: port)
+        }
+        if entry.kind == "next" {
+            return LaunchPlan(cwd: entry.path, inner: "npm run dev", port: port)
+        }
+        guard let script = staticServerScript else { return nil }
+        return LaunchPlan(
+            cwd: entry.path,
+            inner: "python3 \(q(script)) \(port) \(q(entry.path)) \(q(pickIndex(entry.path)))",
+            port: port)
+    }
+
     static func start(_ reg: inout Registry, _ entry: inout Entry) {
         let port = ensurePort(&reg, &entry)
         if portLive(port) { return }        // already up — never double-launch
@@ -257,22 +286,9 @@ enum LocalStarter {
         try? fm.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: pidsDir, withIntermediateDirectories: true)
 
-        let inner: String
-        let cwd: String
-        if !entry.cmd.isEmpty {
-            inner = entry.cmd
-            cwd = entry.path
-        } else if entry.kind == "pyserver" {
-            inner = "python3 server.py"
-            cwd = entry.path
-        } else if entry.kind == "next" {
-            inner = "npm run dev"
-            cwd = entry.path
-        } else {
-            guard let script = staticServerScript else { return }
-            inner = "python3 \(q(script)) \(port) \(q(entry.path)) \(q(pickIndex(entry.path)))"
-            cwd = entry.path
-        }
+        guard let p = plan(&reg, &entry) else { return }
+        let inner = p.inner
+        let cwd = p.cwd
 
         let log = q(logsDir + "/\(entry.name).log")
         let pid = q(pidsDir + "/\(entry.name).pid")

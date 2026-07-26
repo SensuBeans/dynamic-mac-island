@@ -421,6 +421,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // Which terminal the Servers page starts servers in (Configurations).
+        // Read through the store so flipping the setting takes effect on the very
+        // next start, with no restart and no cached copy to go stale.
+        serversModel.useDeck = { [weak self] in
+            guard let self else { return false }
+            return self.settings.terminalHost == "deck" && DeckBridge.isInstalled
+        }
+
         // Auto-resume: settings gate (thread-safe snapshot), the notch-terminal
         // injection route, and the fire toasts — all wired before start() so the
         // initial scan already sees them.

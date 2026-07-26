@@ -68,10 +68,14 @@ struct ServersTab: View {
                     .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Capsule().fill(.white.opacity(0.14)))
+                    // 0.10 is the island's neutral chip fill, and chip labels top
+                    // out at 0.85 — the same pair "Start favorites" wears right
+                    // beside this button. At 0.14 over full-strength white the Add
+                    // chip was the brightest neutral element on the tab.
+                    .background(Capsule().fill(.white.opacity(0.10)))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.white)
+            .foregroundStyle(.white.opacity(0.85))
             .help("Add a server — pick a project folder")
         }
     }
@@ -188,10 +192,15 @@ private struct ServerRow: View {
         }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: 9)
             .fill(.white.opacity(hovered ? 0.09 : 0.06)))
-        .opacity(server.running ? 1 : 0.82)
+        // Present-but-inactive dims to 0.55 — the value AgentRow uses for an idle
+        // session (AgentsTab: `.opacity(session.state == .idle ? 0.55 : 1)`), and
+        // the ceiling of the island's inactive band. At 0.82 against a 0.06 glass
+        // fill the difference was imperceptible, so a list of stopped servers read
+        // as if everything were running.
+        .opacity(server.running ? 1 : 0.55)
         .contentShape(Rectangle())
         .onHover { hovered = $0 }
         // Tap the row: open if running, else start it.
@@ -226,7 +235,12 @@ private struct ServerRow: View {
             .buttonStyle(.plain)
             .help(server.running ? "Stop" : "Start")
 
-            if server.running && server.port > 0 {
+            // Disclosed on hover, the way AgentsTab reveals its Open button — an
+            // error keeps it up regardless, mirroring that tab's
+            // `hovered || session.needsAttention`. Start/stop stays unconditional:
+            // it is this row's primary control.
+            if server.running, server.port > 0,
+               hovered || servers.lastError[server.name] != nil {
                 Button { servers.open(server) } label: {
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 10, weight: .semibold))

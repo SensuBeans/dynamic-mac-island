@@ -95,6 +95,14 @@ final class SettingsStore: ObservableObject {
     // MARK: Agents
     /// Auto-resume a session cut off mid-turn by the usage limit: at the limit's
     /// reset the notch types `continue` into that session's terminal by itself.
+    // MARK: Configurations
+
+    /// Which terminal the Agents and Servers pages drive: `"terminalApp"` (what
+    /// the island has always used, via Apple Events) or `"deck"` (Terminal Deck,
+    /// driven natively over its `terminaldeck://` bridge). Defaults to
+    /// Terminal.app so nothing changes for anyone who hasn't migrated.
+    @Published var terminalHost: String { didSet { set(terminalHost, "config.terminalHost") } }
+
     @Published var agentsAutoResume: Bool { didSet { set(agentsAutoResume, "agents.autoResume") } }
 
     // MARK: Controls
@@ -150,6 +158,7 @@ final class SettingsStore: ObservableObject {
             "mirror.rememberBig": false,
             "stats.refreshRate": 2.0,
             "agents.autoResume": true,
+            "config.terminalHost": "terminalApp",
             "toggles.screenshotMode": "selection",
         ])
 
@@ -202,6 +211,8 @@ final class SettingsStore: ObservableObject {
         // back as 0, which would turn the Stats poll into a main-thread spin.
         statsRefreshRate = min(10, max(0.5, defaults.double(forKey: "stats.refreshRate")))
         statsHiddenTiles = defaults.stringArray(forKey: "stats.hiddenTiles") ?? []
+
+        terminalHost = defaults.string(forKey: "config.terminalHost") ?? "terminalApp"
 
         agentsAutoResume = defaults.bool(forKey: "agents.autoResume")
 

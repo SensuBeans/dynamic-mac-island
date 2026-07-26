@@ -83,8 +83,30 @@ final class ServersModel: ObservableObject {
     /// Explicit start/stop (NOT toggle): with a 2.5 s poll the `running` flag can
     /// be stale, and toggling against stale state inverts the user's intent. The
     /// button knows the state it rendered, so it calls the matching action.
+    /// Where a started server runs. Injected rather than read from defaults here
+    /// so the model stays testable and the Configurations setting has exactly one
+    /// owner (`SettingsStore`).
+    var useDeck: () -> Bool = { false }
+
     func start(_ name: String) {
         setError(name, nil)
+        // Terminal Deck host: hand the server to a real pane instead of detaching
+        // it. The point of routing servers here is that the output is ON SCREEN
+        // and ⌃C works — a detached child logging to a file is what the deck is
+        // replacing. No port-watch/log-tail follow-up either: the pane IS the
+        // feedback, and the row's own poll flips the dot green when the port binds.
+        if useDeck() {
+            var started = false
+            mutate { reg in
+                guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
+                guard !LocalStarter.portLive(e.port) else { started = true; return }  // already up
+                guard let p = LocalStarter.plan(&reg, &e) else { return }
+                started = DeckBridge.run(command: "PORT=\(p.port) \(p.inner)",
+                                         cwd: p.cwd, title: name)
+            }
+            if !started { setError(name, "couldn't reach Terminal Deck") }
+            return
+        }
         mutate { [weak self] reg in
             guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
             LocalStarter.start(&reg, &e)

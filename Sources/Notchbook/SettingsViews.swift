@@ -13,6 +13,7 @@ struct SettingsContainer: View {
             switch route {
             case .root:            SettingsRootPage()
             case .general:         SettingsGeneralPage()
+            case .configurations:  SettingsConfigurationsPage()
             case .page(let tab):   SettingsDetailPage(tab: tab)
             }
         }
@@ -204,6 +205,11 @@ struct SettingsRootPage: View {
             }
             .buttonStyle(.plain)
 
+            Button { state.settingsRoute = .configurations } label: {
+                navRow(icon: "terminal", title: "Configurations")
+            }
+            .buttonStyle(.plain)
+
             Text("Tabs")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.4))
@@ -275,6 +281,84 @@ struct SettingsRootPage: View {
         .padding(.horizontal, 10)
         .frame(height: 30)
         .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+    }
+}
+
+// MARK: - Configurations page
+
+/// Which terminal the island drives.
+///
+/// The Agents page's *Launch Terminal* and the Servers page's *start* have
+/// always meant Terminal.app (Apple Events) and a detached `nohup` child
+/// respectively. Terminal Deck is the replacement environment, and this is the
+/// one switch that moves both pages over — the BRIEF's "island integration flips
+/// targets", made a user choice rather than a migration cliff.
+struct SettingsConfigurationsPage: View {
+    @EnvironmentObject var state: NotchState
+    @EnvironmentObject var settings: SettingsStore
+
+    private var deckInstalled: Bool { DeckBridge.isInstalled }
+
+    var body: some View {
+        SettingsPage(title: "Configurations", back: { state.settingsRoute = .root }) {
+            SettingRow(label: "Terminal",
+                       help: deckInstalled
+                           ? "Where Agents and Servers open terminals and start servers"
+                           : "Terminal Deck isn't installed — build it and it appears here") {
+                SettingSegmented(selection: Binding(
+                    get: { deckInstalled ? settings.terminalHost : "terminalApp" },
+                    set: { settings.terminalHost = $0 }),
+                    options: [("Terminal.app", "terminalApp"), ("Deck", "deck")])
+                    .disabled(!deckInstalled)
+                    .opacity(deckInstalled ? 1 : 0.4)
+            }
+
+            // Deliberately inline rather than reusing a shared explainer view: a
+            // parallel session is adding one in this same file, and depending on
+            // an in-flight type would make this commit fail to build on its own —
+            // or collide as a duplicate definition when theirs lands.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(usingDeck ? "TERMINAL DECK" : "TERMINAL.APP")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+                ForEach(Array((usingDeck ? deckLines : terminalAppLines).enumerated()),
+                        id: \.offset) { _, line in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: line.0)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(width: 14)
+                        Text(line.1)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.white.opacity(0.75))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
+        }
+    }
+
+    private var usingDeck: Bool { deckInstalled && settings.terminalHost == "deck" }
+
+    /// Every line names the control it actually changes, so the page and the two
+    /// tabs read one-to-one.
+    private var deckLines: [(String, String)] {
+        [("plus", "Launch Terminal opens a Deck session"),
+         ("arrow.up.forward.app", "Open jumps to the session's Deck pane"),
+         ("play.fill", "Servers start in a visible pane — output on screen, ⌃C to stop"),
+         ("bolt.horizontal", "No Automation permission needed")]
+    }
+
+    private var terminalAppLines: [(String, String)] {
+        [("plus", "Launch Terminal opens the notch's own terminal tab"),
+         ("arrow.up.forward.app", "Open raises the Terminal.app tab via Apple Events"),
+         ("play.fill", "Servers run detached in the background, logging to a file"),
+         ("lock", "Needs Automation permission for Terminal.app")]
     }
 }
 

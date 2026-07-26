@@ -10,6 +10,7 @@ struct AgentsTab: View {
     @EnvironmentObject var agents: AgentSessionsModel
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var terminals: TerminalSessionsModel
+    @EnvironmentObject var settings: SettingsStore
 
     /// One shared clock so every row's "time-in-state" and context freshness
     /// advance together without a timer per row.
@@ -120,16 +121,31 @@ struct AgentsTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             // Neutral launch button (not an accent fill — green/amber/orange are
-            // reserved for session state in this tab). Opens the notch's own
-            // terminal so a `claude` started there comes back as a .notch row.
-            LaunchButton(icon: "plus", label: "Launch Terminal") {
-                state.currentTab = .terminal
-                terminals.newSession()
-            }
-            .help("New terminal in the notch — start a Claude session")
+            // reserved for session state in this tab). Where it opens follows the
+            // Configurations setting: the notch's own terminal tab, or a Terminal
+            // Deck session. Either way a `claude` started there comes back as a
+            // row here — `.notch` or `.other("TerminalDeck")`.
+            LaunchButton(icon: "plus", label: "Launch Terminal") { launchTerminal() }
+            .help(usingDeck ? "New session in Terminal Deck — start a Claude session"
+                            : "New terminal in the notch — start a Claude session")
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Terminal Deck only counts as the host when it is actually installed —
+    /// otherwise the button would open nothing at all.
+    private var usingDeck: Bool {
+        settings.terminalHost == "deck" && DeckBridge.isInstalled
+    }
+
+    private func launchTerminal() {
+        if usingDeck {
+            DeckBridge.newSession()
+        } else {
+            state.currentTab = .terminal
+            terminals.newSession()
+        }
     }
 }
 
@@ -603,7 +619,14 @@ private struct AgentRow: View {
             state.currentTab = .terminal
             terminals.selectedID = sid
         case .other(let app):
-            activateApp(named: app)
+            // Terminal Deck is an `.other` host by process ancestry, but unlike a
+            // generic app we can land on the exact PANE rather than just bringing
+            // the app forward — the deck resolves the session id itself.
+            if session.host.isDeck {
+                DeckBridge.open(sessionID: session.id)
+            } else {
+                activateApp(named: app)
+            }
         case .none:
             break
         }

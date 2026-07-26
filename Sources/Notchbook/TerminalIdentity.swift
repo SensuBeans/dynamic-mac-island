@@ -18,6 +18,18 @@ enum TerminalHost: Equatable {
     case none
 }
 
+extension TerminalHost {
+    /// Hosted inside Terminal Deck. The deck is a separate app, so the process
+    /// walk lands on `.other` with the deck's accounting name — but the island
+    /// CAN drive it (focus the exact pane over `terminaldeck://`), which plain
+    /// `.other` hosts don't allow. Matching on `p_comm` keeps this a pure
+    /// process-tree fact, no bundle lookup on the rebuild tick.
+    var isDeck: Bool {
+        if case .other(let app) = self { return app == "TerminalDeck" }
+        return false
+    }
+}
+
 /// A session's resolved terminal identity: its controlling tty (short form for
 /// display) and hosting app. Resolved once per pid via `sysctl` only — no `ps`,
 /// no AppleScript, nothing that spawns a process on the 1.5 s rebuild tick.

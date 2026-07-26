@@ -16,6 +16,8 @@ struct NotchToast: Equatable {
 enum SettingsRoute: Equatable {
     case root
     case general
+    /// Which terminal the Agents and Servers pages drive.
+    case configurations
     case page(NotchTab)
 }
 
