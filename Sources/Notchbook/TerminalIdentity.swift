@@ -63,15 +63,22 @@ struct TerminalIdentity: Equatable {
         // island (→ .notch), launchd (→ the top-level hosting app), or the cap.
         var lineage: [Int32] = [pid]
         var current = first
+        var currentPid = pid
         var topName: String?
+        var topPid: Int32 = 0
         var hitNotch = false
         for _ in 0..<24 {
             let ppid = current.kp_eproc.e_ppid
             if ppid == selfPid { hitNotch = true; break }
-            if ppid <= 1 { topName = comm(current); break }   // current = launchd's child
-            guard let parent = kinfo(ppid) else { topName = comm(current); break }
+            if ppid <= 1 {                                   // current = launchd's child
+                topName = comm(current); topPid = currentPid; break
+            }
+            guard let parent = kinfo(ppid) else {
+                topName = comm(current); topPid = currentPid; break
+            }
             lineage.append(ppid)
             current = parent
+            currentPid = ppid
         }
 
         if hitNotch {
@@ -89,11 +96,59 @@ struct TerminalIdentity: Equatable {
 
         guard tty != nil else { return TerminalIdentity(tty: nil, host: .none) }
         if let name = topName {
-            return name == "Terminal"
-                ? TerminalIdentity(tty: tty, host: .terminalApp)
-                : TerminalIdentity(tty: tty, host: .other(name))
+            if name == "Terminal" { return TerminalIdentity(tty: tty, host: .terminalApp) }
+            // A deck pane's shell is no longer a child of the deck: since the
+            // deck moved its panes onto a private tmux server so they survive a
+            // relaunch, the walk from `claude` goes shell → tmux server →
+            // launchd, and the deck is a SIBLING of that server, never an
+            // ancestor. So the honest top-level name is "tmux", and every deck
+            // session was landing here as a generic `.other("tmux")` — which
+            // means no Approve, no auto-resume, and an Open button that tried to
+            // activate an app called tmux and did nothing at all.
+            //
+            // The server's own argv says whose it is (`-L deck` is the deck's
+            // private socket), and argv is readable with a syscall — no spawn, so
+            // this still holds the rule that identity resolution never shells out.
+            if name == "tmux", isDeckTmuxServer(topPid) {
+                return TerminalIdentity(tty: tty, host: .other("TerminalDeck"))
+            }
+            return TerminalIdentity(tty: tty, host: .other(name))
         }
         return TerminalIdentity(tty: tty, host: .none)
+    }
+
+    /// The deck's private tmux socket, mirrored from `DeckSessionsModel.tmuxSocket`.
+    /// A copy rather than a shared constant for the same reason the deck's port of
+    /// this file is a copy: the two apps are not a shared dependency yet.
+    private static let deckTmuxSocket = "deck"
+
+    /// Is `pid` the tmux server backing Terminal Deck's panes?
+    ///
+    /// Matches `-L deck` as two ADJACENT argv elements, which is what the deck
+    /// passes. Argument vectors are null-separated in the `KERN_PROCARGS2` blob,
+    /// so the flag and its value are the exact byte run `-L\0deck\0` — a plain
+    /// substring search would also match a directory called `…-L deck…` in some
+    /// unrelated tmux's command line.
+    private static func isDeckTmuxServer(_ pid: Int32) -> Bool {
+        guard pid > 0, let blob = procArgs(pid) else { return false }
+        var needle = Array("-L".utf8); needle.append(0)
+        needle.append(contentsOf: Array(deckTmuxSocket.utf8)); needle.append(0)
+        guard blob.count >= needle.count else { return false }
+        for start in 0...(blob.count - needle.count) {
+            if Array(blob[start..<(start + needle.count)]) == needle { return true }
+        }
+        return false
+    }
+
+    /// Raw `KERN_PROCARGS2` bytes for a pid, or nil. World-readable for processes
+    /// owned by the same user, which every tmux server we care about is.
+    private static func procArgs(_ pid: Int32) -> [UInt8]? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return nil }
+        var buf = [UInt8](repeating: 0, count: size)
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return nil }
+        return Array(buf.prefix(size))
     }
 
     // MARK: - sysctl helpers

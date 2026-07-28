@@ -108,6 +108,12 @@ struct AgentSession: Identifiable {
     /// masquerade as a permission prompt in the UI.
     var pendingTool: (name: String, detail: String)?
 
+    /// What auto-resume last DID to this session, until the user has seen it.
+    /// Non-nil only for a settled outcome (never for a live arm — the countdown
+    /// chip already shows that), so the row can carry a verdict the user was not
+    /// at the machine to watch. Cleared by `acknowledgeResumeReports()`.
+    var resumeVerdict: ResumeReport?
+
     /// A session parked waiting for the user (a permission prompt or the end of
     /// a turn) — the states the notch offers an Approve / Open action for.
     var needsAttention: Bool { state == .waiting || state == .interrupted }
@@ -122,6 +128,80 @@ private struct SessionMeta {
     var name: String?
     var status: String   // "busy" | "waiting" | "idle"
     var cwd: String
+    /// When `status` last CHANGED (Claude Code's `statusUpdatedAt`, epoch ms).
+    /// Deliberately not treated as a heartbeat: measured on a live session, it
+    /// does NOT tick while the status stays "busy", so it says how long the
+    /// process has claimed this status — not how recently it was alive.
+    var statusAt: Date?
+}
+
+/// One thing auto-resume DID, in the terms the user would use.
+///
+/// The feature's whole point is to act while you are away from the machine,
+/// which is exactly when a toast is worthless — it shows for three seconds to an
+/// empty chair. So every settled outcome becomes one of these: kept on the
+/// session's row until acknowledged, listed in the tab's history, persisted
+/// across relaunch, and pushed to Notification Center where it waits.
+///
+/// Reported for FAILURE as loudly as for success. Two sessions armed and one
+/// resumed used to be indistinguishable from one session armed, because the only
+/// output the feature ever produced was a green toast on the path that worked.
+struct ResumeReport: Identifiable, Equatable {
+    enum Outcome: String, Equatable {
+        /// Armed — will resume when the window resets. The "initiated" half.
+        case armed
+        /// Typed `continue` into the session's terminal.
+        case resumed
+        /// Limits reset, but this host can't be typed into — over to you.
+        case notified
+        /// Deliberately not resumed, and that was right: already working, you
+        /// took it over yourself, or the turn had finished.
+        case skipped
+        /// Should have resumed and could not.
+        case failed
+    }
+
+    let id: String            // sessionId|epochSeconds|outcome — stable, dedups
+    let sessionId: String
+    let project: String
+    let name: String?
+    let at: Date
+    let outcome: Outcome
+    /// One plain sentence: why this happened. Never a guard name.
+    let detail: String
+
+    var isSettled: Bool { outcome != .armed }
+
+    var headline: String {
+        switch outcome {
+        case .armed:    return "Auto-resume armed"
+        case .resumed:  return "Resumed"
+        case .notified: return "Limits reset"
+        case .skipped:  return "No resume needed"
+        case .failed:   return "Didn't resume"
+        }
+    }
+
+    var glyph: String {
+        switch outcome {
+        case .armed:    return "bolt.badge.clock"
+        case .resumed:  return "bolt.fill"
+        case .notified: return "bell.fill"
+        case .skipped:  return "checkmark.circle"
+        case .failed:   return "exclamationmark.triangle.fill"
+        }
+    }
+
+    /// Presentation lives on the outcome, the way `AgentState` carries its own —
+    /// so the row chip and the history list can't drift apart.
+    var tint: Color {
+        switch outcome {
+        case .armed, .notified: return Color(red: 0.98, green: 0.74, blue: 0.20)  // amber
+        case .resumed:          return Color(red: 0.188, green: 0.820, blue: 0.345)
+        case .skipped:          return .white.opacity(0.55)
+        case .failed:           return .red
+        }
+    }
 }
 
 /// Account-wide Claude usage limits (the 5-hour rolling "session" window and the
@@ -244,6 +324,16 @@ final class AgentSessionsModel: ObservableObject {
     /// (green toast, no sound); `notify == true` ⇒ notify-only host or a
     /// Terminal.app tab that vanished (orange toast + Glass). Called on MAIN.
     var onResumeFired: ((_ project: String, _ name: String?, _ notify: Bool) -> Void)?
+
+    /// Injected: auto-resume did something worth telling the user about — armed,
+    /// resumed, skipped, or failed. Called on MAIN, once per report, and unlike
+    /// `onResumeFired` it fires on the paths that DON'T work too. AppDelegate
+    /// routes it to a toast and to Notification Center.
+    var onResumeReport: ((ResumeReport) -> Void)?
+
+    /// Everything auto-resume has done lately, newest first. Persisted, so the
+    /// answer to "did it resume while I was out?" survives a relaunch.
+    @Published private(set) var resumeReports: [ResumeReport] = []
 
     // MARK: State constants (spec §2, tunable)
 
@@ -368,9 +458,26 @@ final class AgentSessionsModel: ObservableObject {
         }
     }
 
+    /// Can a resume actually be TYPED into this host, or can we only tell the
+    /// user their limits came back? One predicate, so arming, re-arming and the
+    /// row's own affordances can't disagree about which hosts are actionable.
+    ///
+    /// Terminal Deck counts now: it takes a `terminaldeck://resume`, which is the
+    /// same capability the Apple Event gives Terminal.app. Every OTHER `.other`
+    /// host (iTerm2, VS Code…) still can't be typed into.
+    static func canInject(into host: TerminalHost) -> Bool {
+        switch host {
+        case .terminalApp, .notch: return true
+        case .other:               return host.isDeck
+        case .none:                return false
+        }
+    }
+
     /// Outcome of a single fire attempt. `.transient` leaves the arm live for a
     /// later retry; `.terminal` and `.fired` both consume the epoch for good.
-    private enum FireOutcome { case fired, transient, terminal }
+    /// `.transient` carries WHY, so a give-up hours later can still say what it
+    /// spent the whole retry window waiting for.
+    private enum FireOutcome { case fired, transient(String), terminal }
 
     /// Inputs collected per session during the rebuild loop, then evaluated for
     /// arming after `readUsage()` has refreshed the cap state.
@@ -411,16 +518,42 @@ final class AgentSessionsModel: ObservableObject {
     private let resumeRetryBackoff: TimeInterval = 10
     /// Give up retrying (and finally consume the epoch) once the fire moment is
     /// this far in the past — a session wedged 'busy' forever must not retry
-    /// unboundedly.
-    private let resumeRetryWindow: TimeInterval = 300
+    /// unboundedly. Fifteen minutes, not five: the only thing this guard waits
+    /// out is a genuinely-working session finishing its turn, and turns run
+    /// longer than five minutes all the time. A give-up is permanent for the
+    /// whole 5-hour window, so it must be the last resort it sounds like.
+    private let resumeRetryWindow: TimeInterval = 900
+    /// A `busy` flag whose transcript has been silent this long is not busy, it
+    /// is wedged — the same `idleMax` cut-off the row's own state uses, so the
+    /// fire guard and the state the user is looking at can never disagree.
+    private var staleBusyWindow: TimeInterval { idleMax }
+
+    /// Settled reports, newest first, keyed for the row verdict. ioQueue only.
+    private var reportHistory: [ResumeReport] = []
+    /// Reports the user has not acknowledged (cleared by opening the Agents tab).
+    private var unseenReportIDs: Set<String> = []
+    /// Bound: enough to answer "what happened overnight", not a log file.
+    private let reportHistoryLimit = 24
+    private var reportsURL: URL { autoResumeSupportDir.appendingPathComponent("resume-reports.json") }
 
     /// Support dir for the two auto-resume sidecars (always the real Application
     /// Support path — never the `NOTCHBOOK_USAGE_OVERRIDE` redirect, which only
     /// moves the usage spool). `autoresume-state.json` survives a relaunch;
     /// `autoresume.log` is the decision trail that makes "it didn't fire"
     /// answerable after the fact.
-    private let autoResumeSupportDir = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/Notchbook", isDirectory: true)
+    /// `NOTCHBOOK_SUPPORT_OVERRIDE` redirects the sidecars to a scratch directory,
+    /// the same escape hatch `NOTCHBOOK_USAGE_OVERRIDE` gives the usage spool and
+    /// for the same reason: the auto-resume paths cannot be exercised against the
+    /// real files without writing fake history into the list the user reads.
+    /// Unset in normal runs, so release behavior is unchanged.
+    private let autoResumeSupportDir: URL = {
+        if let override = ProcessInfo.processInfo.environment["NOTCHBOOK_SUPPORT_OVERRIDE"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Notchbook", isDirectory: true)
+    }()
     private var resumeStateURL: URL { autoResumeSupportDir.appendingPathComponent("autoresume-state.json") }
     private var resumeLogURL: URL { autoResumeSupportDir.appendingPathComponent("autoresume.log") }
     /// Last bytes written to the state file — dedups persist calls so an unchanged
@@ -453,6 +586,9 @@ final class AgentSessionsModel: ObservableObject {
         // arm that outlived an app relaunch is live again before any tick could
         // treat its session as "never armed" (see restoreResumeState).
         ioQueue.async { [weak self] in
+            // Verdicts first: a resume that fired while the app was down is the
+            // one thing the user most needs waiting for them at launch.
+            self?.restoreReports()
             self?.restoreResumeState()
             self?.scan()
         }
@@ -833,9 +969,15 @@ final class AgentSessionsModel: ObservableObject {
         // where the only fire-capable arms in the feature's history disappeared
         // without a trace.
         for id in armedResumes.keys where !liveIDs.contains(id) {
+            let resetAt = armedResumes[id]?.resetAt
             armedResumes.removeValue(forKey: id)
             lastResumeDecision[id] = nil
             logDecision("evict session=\(id.prefix(8)) reason=row-vanished")
+            // This is the silent eviction the log comment calls out as where every
+            // fire-capable arm in the feature's history went to die. It is a real
+            // outcome — the terminal closed before its window reset — so it says so.
+            report(.failed, sessionId: id, resetAt: resetAt,
+                   detail: "its terminal closed before the window reset")
         }
 
         // Spool cap == the 5-hour window at/above 99% AND its reset still ahead.
@@ -923,11 +1065,7 @@ final class AgentSessionsModel: ObservableObject {
                     continue
                 }
             }
-            let mode: ResumeMode
-            switch c.host {
-            case .terminalApp, .notch: mode = .inject
-            case .other, .none:        mode = .notifyOnly
-            }
+            let mode: ResumeMode = Self.canInject(into: c.host) ? .inject : .notifyOnly
             // Opted-in arms fire shape-agnostically (manual: true) — the user's
             // explicit intent, not a detected cut-off.
             armedResumes[c.id] = ArmedResume(
@@ -938,6 +1076,14 @@ final class AgentSessionsModel: ObservableObject {
                          line: "arm mode=\(mode == .inject ? "inject" : "notify") "
                              + "via=\(optedIn ? "optin" : hasBanner ? "banner" : "spool") "
                              + "resetAt=\(Self.logStamp.string(from: resetAt))")
+            // The "initiated" half of the feedback: what was armed, and when it
+            // will act — so two armed sessions are two visible facts, and a later
+            // "only one resumed" is answerable against a record of both.
+            report(.armed, sessionId: c.id, resetAt: resetAt,
+                   detail: mode == .inject
+                       ? "will continue at \(Self.clockStamp.string(from: resetAt))"
+                       : "will tell you at \(Self.clockStamp.string(from: resetAt)) — "
+                         + "its terminal isn't one the notch can type into")
         }
         rescheduleResumeTimer()
         persistResumeStateIfChanged()
@@ -1003,11 +1149,7 @@ final class AgentSessionsModel: ObservableObject {
                                          now: now) else { return }
         let p = parser(forID: sessionId)
         let identity = resolveIdentity(pid: meta.pid, sid: sessionId)
-        let mode: ResumeMode
-        switch identity.host {
-        case .terminalApp, .notch: mode = .inject
-        case .other, .none:        mode = .notifyOnly
-        }
+        let mode: ResumeMode = Self.canInject(into: identity.host) ? .inject : .notifyOnly
         armedResumes[sessionId] = ArmedResume(
             sessionId: sessionId, pid: meta.pid, resetAt: resetAt,
             armedEntryTs: p?.newestEntryTs, tty: identity.tty,
@@ -1015,6 +1157,160 @@ final class AgentSessionsModel: ObservableObject {
         lastResumeDecision[sessionId] = "armed|\(Int(resetAt.timeIntervalSince1970))"
         logDecision("arm via=optin mode=\(mode == .inject ? "inject" : "notify") "
                   + "resetAt=\(Self.logStamp.string(from: resetAt)) session=\(sessionId.prefix(8))")
+        report(.armed, sessionId: sessionId, resetAt: resetAt,
+               detail: mode == .inject
+                   ? "will continue at \(Self.clockStamp.string(from: resetAt))"
+                   : "will tell you at \(Self.clockStamp.string(from: resetAt)) — "
+                     + "its terminal isn't one the notch can type into")
+    }
+
+    // MARK: - Auto-resume: reporting (ioQueue only)
+
+    /// Record — and announce — one thing auto-resume did.
+    ///
+    /// Every settled outcome goes through here, which is the point: the decision
+    /// log already recorded all of them and nobody reads a log file at 1am. A
+    /// report reaches three places that survive not being watched (the row, the
+    /// history, Notification Center) plus the toast for when you are here.
+    private func report(_ outcome: ResumeReport.Outcome, sessionId: String,
+                        resetAt: Date?, detail: String) {
+        let meta = readSessionMetas()[sessionId]
+        let cwd = meta?.cwd ?? parser(forID: sessionId)?.cwd ?? ""
+        let project = cwd.isEmpty
+            ? (meta?.name ?? String(sessionId.prefix(8)))
+            : URL(fileURLWithPath: cwd).lastPathComponent
+        let epoch = Int((resetAt ?? Date()).timeIntervalSince1970)
+        let r = ResumeReport(id: "\(sessionId)|\(epoch)|\(outcome.rawValue)",
+                             sessionId: sessionId, project: project, name: meta?.name,
+                             at: Date(), outcome: outcome, detail: detail)
+        // Same arm reporting the same outcome twice (a retry loop that settles
+        // the way it already settled) must not stack up rows.
+        guard !reportHistory.contains(where: { $0.id == r.id }) else { return }
+        reportHistory.insert(r, at: 0)
+        if reportHistory.count > reportHistoryLimit {
+            let dropped = reportHistory.suffix(from: reportHistoryLimit)
+            unseenReportIDs.subtract(dropped.map(\.id))
+            reportHistory.removeLast(reportHistory.count - reportHistoryLimit)
+        }
+        // An arm is not a verdict — the countdown chip already says it is coming,
+        // so it lands in the history without lighting up a row or a notification.
+        if r.isSettled { unseenReportIDs.insert(r.id) }
+        persistReports()
+        let snapshot = reportHistory
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.resumeReports = snapshot
+            if r.isSettled { self.onResumeReport?(r) }
+        }
+    }
+
+    /// The verdict a row should still be showing, if any.
+    private func verdict(for sessionId: String) -> ResumeReport? {
+        reportHistory.first { $0.sessionId == sessionId && unseenReportIDs.contains($0.id) }
+    }
+
+    /// The user has looked at the Agents tab — the verdicts have been seen. The
+    /// history stays; only the row chips clear.
+    func acknowledgeResumeReports() {
+        ioQueue.async { [weak self] in
+            guard let self, !self.unseenReportIDs.isEmpty else { return }
+            self.unseenReportIDs.removeAll()
+            self.persistReports()
+            self.rebuild()
+        }
+    }
+
+    private func persistReports() {
+        let payload: [[String: Any]] = reportHistory.map {
+            ["id": $0.id, "sessionId": $0.sessionId, "project": $0.project,
+             "name": $0.name as Any, "at": $0.at.timeIntervalSince1970,
+             "outcome": $0.outcome.rawValue, "detail": $0.detail,
+             "unseen": unseenReportIDs.contains($0.id)]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        try? FileManager.default.createDirectory(at: autoResumeSupportDir,
+                                                 withIntermediateDirectories: true)
+        try? data.write(to: reportsURL, options: .atomic)
+    }
+
+    private func restoreReports() {
+        guard let data = try? Data(contentsOf: reportsURL),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        else { return }
+        var restored: [ResumeReport] = []
+        for d in rows {
+            guard let id = d["id"] as? String, let sid = d["sessionId"] as? String,
+                  let project = d["project"] as? String,
+                  let at = (d["at"] as? NSNumber)?.doubleValue,
+                  let raw = d["outcome"] as? String,
+                  let outcome = ResumeReport.Outcome(rawValue: raw) else { continue }
+            restored.append(ResumeReport(id: id, sessionId: sid, project: project,
+                                         name: d["name"] as? String,
+                                         at: Date(timeIntervalSince1970: at),
+                                         outcome: outcome,
+                                         detail: d["detail"] as? String ?? ""))
+            if (d["unseen"] as? Bool) == true { unseenReportIDs.insert(id) }
+        }
+        reportHistory = Array(restored.prefix(reportHistoryLimit))
+        let snapshot = reportHistory
+        DispatchQueue.main.async { [weak self] in self?.resumeReports = snapshot }
+    }
+
+    // MARK: - Reporting harness
+
+    /// `-ResumeReportProbe <path>` — prove the verdict pipeline end to end
+    /// without waiting five hours for a real cap.
+    ///
+    /// Drives one report of every outcome, then re-reads them back off disk the
+    /// way a relaunch would, and writes what it found. What is being checked is
+    /// the part that has to survive you not being there: that a failure is
+    /// recorded at all, that it persists, that it comes back after a restart, and
+    /// that a repeated settle does not stack duplicate rows. Point
+    /// `NOTCHBOOK_SUPPORT_OVERRIDE` at a scratch dir before running it.
+    func runReportProbe(writingTo path: String) {
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            let reset = Date().addingTimeInterval(60)
+            self.report(.armed, sessionId: "probe-a", resetAt: reset, detail: "will continue at 5:00 PM")
+            self.report(.resumed, sessionId: "probe-a", resetAt: reset, detail: "typed continue")
+            self.report(.failed, sessionId: "probe-b", resetAt: reset,
+                        detail: "gave up after 15 minutes: it was still working")
+            self.report(.skipped, sessionId: "probe-c", resetAt: reset, detail: "you got there first")
+            // A retry that settles the way it already settled must not stack.
+            self.report(.failed, sessionId: "probe-b", resetAt: reset,
+                        detail: "gave up after 15 minutes: it was still working")
+            let wrote = self.reportHistory.count
+            let unseen = self.unseenReportIDs.count
+            let verdictB = self.verdict(for: "probe-b")?.outcome.rawValue ?? "none"
+            // Armed must never light up a row; the three settled ones must.
+            let armedIsSilent = self.verdict(for: "probe-a")?.outcome != .armed
+
+            // Now the half that matters after a relaunch.
+            self.reportHistory = []
+            self.unseenReportIDs = []
+            self.restoreReports()
+            let restored = self.reportHistory.count
+            let restoredFailure = self.reportHistory.contains {
+                $0.sessionId == "probe-b" && $0.outcome == .failed
+            }
+            let restoredUnseen = self.unseenReportIDs.count
+
+            let pass = wrote == 4 && unseen == 3 && verdictB == "failed" && armedIsSilent
+                && restored == 4 && restoredFailure && restoredUnseen == 3
+            let text = """
+                reports.written=\(wrote) (expect 4 — the duplicate failure collapsed)
+                reports.unseen=\(unseen) (expect 3 — armed is not a verdict)
+                verdict(probe-b)=\(verdictB) (expect failed)
+                armed.silentOnRow=\(armedIsSilent) (expect true)
+                restored.count=\(restored) (expect 4)
+                restored.hasFailure=\(restoredFailure) (expect true)
+                restored.unseen=\(restoredUnseen) (expect 3)
+                verdict=\(pass ? "PASS" : "FAIL")
+
+                """
+            try? text.write(toFile: path, atomically: true, encoding: .utf8)
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
     }
 
     // MARK: - Auto-resume: firing (ioQueue only)
@@ -1073,11 +1369,21 @@ final class AgentSessionsModel: ObservableObject {
                 consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))
                 lastResumeDecision[a.sessionId] = nil
                 changed = true
-            case .transient:
+            case .transient(let why):
                 let base = a.resetAt.addingTimeInterval(resumeGrace)
                 if now.timeIntervalSince(base) > resumeRetryWindow {
                     // Wedged too long — stop retrying and consume for good.
-                    logDecision("fire-giveup transient-elapsed session=\(a.sessionId.prefix(8))")
+                    logDecision("fire-giveup transient-elapsed session=\(a.sessionId.prefix(8)) "
+                              + "reason=\(why)")
+                    // "Still working" is not a failure — a session that never
+                    // stopped working never needed continuing. Anything else is.
+                    let stillWorking = why.hasPrefix("it was still working")
+                    let mins = Int(resumeRetryWindow / 60)
+                    report(stillWorking ? .skipped : .failed,
+                           sessionId: a.sessionId, resetAt: a.resetAt,
+                           detail: stillWorking
+                               ? "\(why) — still going \(mins) minutes after the reset"
+                               : "gave up after \(mins) minutes: \(why)")
                     armedResumes.removeValue(forKey: a.sessionId)
                     consumedEpochs.insert(epochKey(a.sessionId, a.resetAt))
                     lastResumeDecision[a.sessionId] = nil
@@ -1101,7 +1407,10 @@ final class AgentSessionsModel: ObservableObject {
         // Guard 1a: the pid must be alive. Dead/replaced ⇒ TERMINAL — no retry
         // can revive it.
         guard kill(Int32(a.pid), 0) == 0 else {
-            logDecision("fire-cancel guard-pid session=\(sid)"); return .terminal
+            logDecision("fire-cancel guard-pid session=\(sid)")
+            report(.failed, sessionId: a.sessionId, resetAt: a.resetAt,
+                   detail: "its terminal had already closed when the window reset")
+            return .terminal
         }
         // Guard 1b (H1): read the live session file. A missing/torn read WHILE the
         // pid is alive is a mid-rewrite blip — TRANSIENT, retry (the old code
@@ -1109,15 +1418,61 @@ final class AgentSessionsModel: ObservableObject {
         // one unlucky read). A file that now names a DIFFERENT pid is a replaced
         // session — TERMINAL.
         guard let meta = readSessionMetas()[a.sessionId] else {
-            logDecision("fire-retry guard-meta session=\(sid)"); return .transient
+            logDecision("fire-retry guard-meta session=\(sid)")
+            return .transient("its status file was mid-write")
         }
         guard meta.pid == a.pid else {
-            logDecision("fire-cancel guard-pid-replaced session=\(sid)"); return .terminal
+            logDecision("fire-cancel guard-pid-replaced session=\(sid)")
+            report(.failed, sessionId: a.sessionId, resetAt: a.resetAt,
+                   detail: "a different Claude session had taken over that terminal")
+            return .terminal
         }
-        // Guard 3: not busy (a just-started manual resume would be busy).
-        // TRANSIENT — busy is expected to clear; retry rather than cancel.
-        guard meta.status != "busy" else {
-            logDecision("fire-retry guard-busy session=\(sid)"); return .transient
+        // The transcript is needed BEFORE the busy guard now — it is what tells a
+        // real busy from a wedged one — so its own guard moves up here. A missing
+        // parser is TRANSIENT (the file is momentarily being rewritten).
+        guard let p = parser(forID: a.sessionId) else {
+            logDecision("fire-retry guard-parser session=\(sid)")
+            return .transient("its transcript was mid-write")
+        }
+        let transcriptAge = p.newestEntryTs.map { Date().timeIntervalSince($0) } ?? .infinity
+
+        // Guard 3: busy. A process claiming "busy" is one of two very different
+        // things, and treating them alike is what made a real cap resume one of
+        // two sessions and say nothing about the other:
+        //
+        //   * genuinely mid-turn — the transcript is still moving. There is
+        //     nothing to resume; wait, and if it never stops, say so plainly.
+        //   * WEDGED — it has claimed busy about a turn that stopped moving hours
+        //     ago (measured: `statusUpdatedAt` does not tick while busy, so the
+        //     flag can outlive the work by a whole day). Injecting is exactly
+        //     right here, and refusing to is what left the session dead.
+        //
+        // The transcript separates them, on the same `idleMax` cut-off the row's
+        // own state uses — so this guard can never disagree with what the user
+        // is looking at.
+        if meta.status == "busy" {
+            // Two independent things both have to say "wedged" before we type
+            // into a process that claims to be working:
+            //
+            //   1. the transcript has been silent past `idleMax`, and
+            //   2. it has been claiming busy since BEFORE this window reset.
+            //
+            // The second is what `statusUpdatedAt` is good for. It does not tick
+            // while the status holds, so it cannot act as a heartbeat — but it
+            // does say when the claim was made, and a claim staked before the cap
+            // even lifted belongs to the turn the cap interrupted. A session that
+            // went busy AFTER the reset is doing something new; leave it alone
+            // however quiet its transcript is.
+            let claimedBeforeReset = meta.statusAt.map { $0 < a.resetAt } ?? true
+            guard transcriptAge >= staleBusyWindow, claimedBeforeReset else {
+                logDecision("fire-retry guard-busy session=\(sid) "
+                          + "transcriptAge=\(Int(transcriptAge))s "
+                          + "claimedBeforeReset=\(claimedBeforeReset)")
+                return .transient("it was still working — nothing to continue")
+            }
+            let since = meta.statusAt.map { Self.logStamp.string(from: $0) } ?? "unknown"
+            logDecision("fire-stale-busy session=\(sid) transcriptAge=\(Int(transcriptAge))s "
+                      + "statusSince=\(since) — treating as not busy")
         }
         // Guard 3b: a session parked at a permission prompt (a Bash/tool approval)
         // reports status "waiting". Injecting "continue" there does NOT resume it —
@@ -1133,19 +1488,22 @@ final class AgentSessionsModel: ObservableObject {
         // `armedEntryTs` round-tripped through the state file (Date→epoch→Date) can
         // differ from the freshly re-parsed Date by sub-microseconds; any REAL new
         // entry moves the clock by seconds, so 0.5 s cleanly separates "untouched"
-        // from "the user took over". A missing parser is TRANSIENT (the file is
-        // momentarily being rewritten); a transcript that MOVED is TERMINAL.
-        guard let p = parser(forID: a.sessionId) else {
-            logDecision("fire-retry guard-parser session=\(sid)"); return .transient
-        }
+        // from "the user took over". A transcript that MOVED is TERMINAL — and
+        // not a failure: you got there first.
         guard sameInstant(p.newestEntryTs, a.armedEntryTs) else {
-            logDecision("fire-cancel guard-transcript session=\(sid)"); return .terminal
+            logDecision("fire-cancel guard-transcript session=\(sid)")
+            report(.skipped, sessionId: a.sessionId, resetAt: a.resetAt,
+                   detail: "you had already picked it up yourself")
+            return .terminal
         }
         // Shape half (F2): the turn must still be resume-worthy — same predicate
         // arming used, so the two can't disagree (Bug B). MANUAL arms skip this:
         // the user deliberately chose to resume this session, even a finished one.
         if !a.manual, !p.isResumeWorthy {
-            logDecision("fire-cancel guard-shape session=\(sid)"); return .terminal
+            logDecision("fire-cancel guard-shape session=\(sid)")
+            report(.skipped, sessionId: a.sessionId, resetAt: a.resetAt,
+                   detail: "its turn had finished — there was nothing to continue")
+            return .terminal
         }
         // Guard 4: terminal identity re-resolves to the same tty + host. Only for
         // INJECT — a notify-only arm (incl. a prompt-parked one forced to notify
@@ -1155,7 +1513,11 @@ final class AgentSessionsModel: ObservableObject {
         if effectiveMode == .inject {
             let identity = resolveIdentity(pid: a.pid, sid: a.sessionId)
             guard identity.tty == a.tty, identity.host == a.host else {
-                logDecision("fire-cancel guard-identity session=\(sid)"); return .terminal
+                logDecision("fire-cancel guard-identity session=\(sid)")
+                report(.failed, sessionId: a.sessionId, resetAt: a.resetAt,
+                       detail: "its terminal moved after it was armed, so typing "
+                             + "into it was no longer safe")
+                return .terminal
             }
         }
 
@@ -1168,10 +1530,21 @@ final class AgentSessionsModel: ObservableObject {
                   + (atPrompt ? " reason=waiting-prompt" : "")
                   + " host=\(Self.hostLabel(a.host)) session=\(sid)")
 
+        // Both halves of the outcome in one place: the toast (unchanged) and the
+        // report that outlives it. Injection results arrive asynchronously, so
+        // the verdict is written when it is actually KNOWN — never optimistically
+        // at dispatch time, which would file "Resumed" for a tab that was gone.
+        let armSessionId = a.sessionId
+        let armResetAt = a.resetAt
+
         switch effectiveMode {
         case .notifyOnly:
+            let why = atPrompt
+                ? "it was sitting on a permission prompt — answer that and it continues"
+                : "its terminal isn't one the notch can type into"
             DispatchQueue.main.async { [weak self] in
-                self?.onResumeFired?(project, name, true)
+                self?.settleFire(injected: false, project: project, name: name,
+                                 sessionId: armSessionId, resetAt: armResetAt, detail: why)
             }
         case .inject:
             switch a.host {
@@ -1180,7 +1553,11 @@ final class AgentSessionsModel: ObservableObject {
                     // Notify-only if the built-in tab is gone / its shell dead —
                     // the resume no-ops there, so don't toast a false green (H5).
                     let injected = self?.onNotchResume?(sid) ?? false
-                    self?.onResumeFired?(project, name, !injected)
+                    self?.settleFire(injected: injected, project: project, name: name,
+                                     sessionId: armSessionId, resetAt: armResetAt,
+                                     detail: injected
+                                         ? "typed continue into its notch terminal"
+                                         : "its notch terminal was gone by the time limits reset")
                 }
             case .terminalApp:
                 let pid = a.pid
@@ -1189,7 +1566,29 @@ final class AgentSessionsModel: ObservableObject {
                     let outcome = AgentTerminalControl.resume(pid: pid, ttyPath: ttyPath)
                     DispatchQueue.main.async {
                         // Tab vanished between guard and send ⇒ notify instead.
-                        self?.onResumeFired?(project, name, outcome == .notFound)
+                        let injected = outcome != .notFound
+                        self?.settleFire(injected: injected, project: project, name: name,
+                                         sessionId: armSessionId, resetAt: armResetAt,
+                                         detail: injected
+                                             ? "typed continue into its Terminal.app tab"
+                                             : "its Terminal.app tab was gone by the time "
+                                               + "limits reset")
+                    }
+                }
+            case .other where a.host.isDeck:
+                // The deck is driven over its URL scheme, which launches it if it
+                // is closed — so a session in a pane resumes even with the deck
+                // quit, its tmux-backed shell still sitting there mid-turn.
+                let armedTs = a.armedEntryTs
+                if DeckBridge.resume(sessionID: armSessionId) {
+                    verifyDeckResume(sessionId: armSessionId, armedTs: armedTs,
+                                     resetAt: armResetAt, project: project, name: name)
+                } else {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.settleFire(injected: false, project: project, name: name,
+                                         sessionId: armSessionId, resetAt: armResetAt,
+                                         detail: "Terminal Deck couldn't be reached",
+                                         failed: true)
                     }
                 }
             case .other, .none:
@@ -1197,6 +1596,54 @@ final class AgentSessionsModel: ObservableObject {
             }
         }
         return .fired
+    }
+
+    /// Confirm a deck resume actually landed, by watching the transcript.
+    ///
+    /// Opening a URL tells you nothing about what happened at the other end —
+    /// unlike the Apple Event path, which at least reports that it found the tab.
+    /// Reporting "Resumed" the moment the URL was handed to LaunchServices would
+    /// be a green light for an outcome nobody checked, which is the exact failure
+    /// this whole feedback pass exists to remove.
+    ///
+    /// So the transcript is the proof: a resume that took writes a new entry. If
+    /// nothing has moved by the deadline, the honest report is that it didn't.
+    /// Generous, because the deck may have had to launch and reattach its panes
+    /// first — and nobody is watching a 45-second wait at 4am anyway.
+    private func verifyDeckResume(sessionId: String, armedTs: Date?, resetAt: Date,
+                                  project: String, name: String?) {
+        ioQueue.asyncAfter(deadline: .now() + 45) { [weak self] in
+            guard let self else { return }
+            let now = parser(forID: sessionId)?.newestEntryTs
+            let moved: Bool = {
+                guard let now else { return false }
+                guard let armedTs else { return true }   // nothing before, something now
+                return now.timeIntervalSince(armedTs) > 0.5
+            }()
+            DispatchQueue.main.async { [weak self] in
+                self?.settleFire(injected: moved, project: project, name: name,
+                                 sessionId: sessionId, resetAt: resetAt,
+                                 detail: moved
+                                     ? "Terminal Deck picked it up and it's running again"
+                                     : "Terminal Deck didn't pick it up — its pane may be gone",
+                                 failed: !moved)
+            }
+        }
+    }
+
+    /// The outcome of an injection, once it is actually known: the toast that was
+    /// always there, plus the verdict that outlives it. Called on MAIN.
+    private func settleFire(injected: Bool, project: String, name: String?,
+                            sessionId: String, resetAt: Date, detail: String,
+                            failed: Bool = false) {
+        // A failure's toast comes from `onResumeReport` (red, with the reason).
+        // Calling the fired-toast here too would stack an orange "Limits reset"
+        // on top of it saying something subtly different about the same event.
+        if !failed { onResumeFired?(project, name, !injected) }
+        ioQueue.async { [weak self] in
+            self?.report(failed ? .failed : (injected ? .resumed : .notified),
+                         sessionId: sessionId, resetAt: resetAt, detail: detail)
+        }
     }
 
     /// Two `Date?`s that mean the same instant. Used only for the fire-time
@@ -1402,6 +1849,12 @@ final class AgentSessionsModel: ObservableObject {
         return f
     }()
 
+    /// Wall-clock for anything a person reads ("resumes at 5:00 PM"). Locale-aware
+    /// on purpose, unlike `logStamp` — one is a log, the other is a sentence.
+    static let clockStamp: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "h:mm a"; return f
+    }()
+
     /// The freshest live parser for a sessionId (mirrors the rebuild index).
     private func parser(forID id: String) -> FileParser? {
         var best: FileParser?
@@ -1446,10 +1899,13 @@ final class AgentSessionsModel: ObservableObject {
             // would just inflate the list, so show only interactive sessions.
             // Files with no `kind` are older Claude Code — treat as interactive.
             if (obj["kind"] as? String) == "bg" { continue }
+            let statusAt = (obj["statusUpdatedAt"] as? NSNumber)
+                .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
             out[sid] = SessionMeta(pid: Int(pid),
                                    name: obj["name"] as? String,
                                    status: obj["status"] as? String ?? "idle",
-                                   cwd: obj["cwd"] as? String ?? "")
+                                   cwd: obj["cwd"] as? String ?? "",
+                                   statusAt: statusAt)
         }
         return out
     }
@@ -1905,7 +2361,9 @@ final class AgentSessionsModel: ObservableObject {
             // write the tool_use until you answer). Gated on .waiting + spool
             // freshness so a non-prompt pause never surfaces a stale last-tool.
             pendingTool: pendingPreview(state: state, sid: id, since: since,
-                                        parserFallback: p?.pendingTool))
+                                        parserFallback: p?.pendingTool),
+            // What auto-resume last did here, until it's been seen.
+            resumeVerdict: verdict(for: id))
     }
 
     /// The pending tool to preview on a row, or nil. Only `.waiting` rows preview

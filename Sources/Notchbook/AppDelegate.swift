@@ -201,6 +201,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var liquidAgentDebugTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `-ResumeReportProbe <path>` runs the verdict pipeline and quits. Ahead
+        // of the notch-screen guard and of any window, so it works headless.
+        if let i = CommandLine.arguments.firstIndex(of: "-ResumeReportProbe"),
+           i + 1 < CommandLine.arguments.count {
+            agentSessions.runReportProbe(writingTo: CommandLine.arguments[i + 1])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) { NSApp.terminate(nil) }
+            return
+        }
+        // `-IdentityProbe <pid>[,<pid>…]` prints what each pid's terminal resolves
+        // to and quits. Host resolution decides whether a row gets Approve, Open
+        // and auto-resume at all, and it cannot be read off the screen — a row
+        // looks identical for a correct `.other` and a wrong one.
+        if let i = CommandLine.arguments.firstIndex(of: "-IdentityProbe"),
+           i + 1 < CommandLine.arguments.count {
+            for raw in CommandLine.arguments[i + 1].split(separator: ",") {
+                guard let pid = Int32(raw) else { continue }
+                let id = TerminalIdentity.resolve(pid: pid, selfPid: getpid(),
+                                                  builtinShellPids: [])
+                print("pid=\(pid) tty=\(id.tty ?? "-") host=\(id.host) isDeck=\(id.host.isDeck)")
+            }
+            NSApp.terminate(nil)
+            return
+        }
         guard let screen = NotchMetrics.notchScreen() else { return }
         metrics = NotchMetrics(screen: screen)
         state.onQuit = { NSApp.terminate(nil) }
@@ -463,6 +486,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     color: .green))
             }
         }
+        // Every OTHER auto-resume outcome — the ones that used to reach nothing
+        // but a log file. `onResumeFired` above already toasts the two success
+        // shapes, so this only toasts what it doesn't; both paths file the
+        // verdict in Notification Center, where it waits however long it takes
+        // the user to come back to the machine.
+        agentSessions.onResumeReport = { [weak self] report in
+            guard let self else { return }
+            ResumeNotifier.post(report)
+            switch report.outcome {
+            case .resumed, .notified:
+                break   // onResumeFired toasted this one already
+            case .failed:
+                self.state.showToast(NotchToast(
+                    icon: report.glyph,
+                    title: "Didn't resume — \(report.project)",
+                    subtitle: report.detail,
+                    color: .red))
+            case .skipped:
+                self.state.showToast(NotchToast(
+                    icon: report.glyph,
+                    title: "No resume needed — \(report.project)",
+                    subtitle: report.detail,
+                    color: .gray))
+            case .armed:
+                break   // never settled; the countdown chip is the surface
+            }
+        }
+        ResumeNotifier.prepare()
 
         // Claude Code agent sessions: watch ~/.claude/projects, toast on
         // Done / Interrupted transitions (suppressed while already viewing

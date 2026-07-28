@@ -29,7 +29,7 @@ struct AgentsTab: View {
     /// to 120 and the spring-animated panel visibly dipped cap→120→real. Report
     /// nil until both readers that feed the height have reported.
     private var naturalHeight: CGFloat? {
-        if agents.sessions.isEmpty { return 150 }  // empty state: known constant
+        if agents.sessions.isEmpty { return 150 }
         guard rowsH > 0, (!hasUsage || usageH > 0) else { return nil }
         return (hasUsage ? usageH + 8 : 0) + rowsH
     }
@@ -55,6 +55,12 @@ struct AgentsTab: View {
         // token formatting once a second with the notch closed.
         .onReceive(timer) { if state.isExpanded && state.currentTab == .agents { now = $0 } }
         .onAppear { agents.acknowledgeCompletes() }
+        // Verdict chips clear on the way OUT, not on the way in. The tab is faded
+        // rather than unmounted, so `.onDisappear` never fires here — and clearing
+        // on appear would wipe "Didn't resume" in the same frame that finally
+        // showed it to you. Seen means looked at and then left.
+        .onChange(of: state.isExpanded) { if !$0 { agents.acknowledgeResumeReports() } }
+        .onChange(of: state.currentTab) { if $0 != .agents { agents.acknowledgeResumeReports() } }
     }
 
     @ViewBuilder
@@ -65,7 +71,13 @@ struct AgentsTab: View {
             // Always a ScrollView so any overflow scrolls; when the rows fit, it
             // simply doesn't scroll. maxHeight:.infinity bounds the scroll region.
             ScrollView(showsIndicators: true) {
-                VStack(spacing: 6) { rows }
+                VStack(spacing: 6) {
+                    rows
+                    // Inside the scroll content on purpose: `rowsH` already
+                    // measures it, so the history costs no new height math and
+                    // can never push the island past its cap.
+                    ResumeHistory(reports: agents.resumeReports, now: now)
+                }
                     // Natural row-stack height (inside the scroll content, so
                     // it's unclamped by the viewport) for the hug sizing.
                     .background(GeometryReader { g in
@@ -146,6 +158,75 @@ struct AgentsTab: View {
             state.currentTab = .terminal
             terminals.newSession()
         }
+    }
+}
+
+// MARK: - Auto-resume history
+
+/// The last few things auto-resume did, in order, with the reason spelled out.
+///
+/// The decision trail for this feature has always existed — as a log file in
+/// Application Support that answers "why didn't it fire" perfectly and that
+/// nobody has ever opened at the moment they wanted the answer. This is the same
+/// facts where the question gets asked. Renders nothing at all until auto-resume
+/// has actually done something, so a user who never hits a cap never sees it.
+private struct ResumeHistory: View {
+    let reports: [ResumeReport]
+    let now: Date
+
+    /// Deliberately short. This is a receipt for the last cap, not a log viewer —
+    /// the full trail is still on disk for when that is what you want.
+    private var recent: [ResumeReport] { Array(reports.prefix(4)) }
+
+    var body: some View {
+        if !recent.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("AUTO-RESUME")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .kerning(0.5)
+                    .padding(.top, 2)
+                ForEach(recent) { row($0) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.05)))
+        }
+    }
+
+    private func row(_ r: ResumeReport) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: r.glyph)
+                .font(.system(size: 8))
+                .foregroundStyle(r.tint)
+                .frame(width: 11)
+            // Project + verdict + reason as ONE wrapping paragraph: the reason is
+            // the whole point, so it must never be the part that gets truncated.
+            (Text(r.project).font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.white.opacity(0.8))
+             + Text(" \(r.headline)").font(.system(size: 9, weight: .medium))
+                .foregroundColor(r.tint)
+             + Text(" — \(r.detail)").font(.system(size: 9))
+                .foregroundColor(.white.opacity(0.45)))
+                .lineSpacing(1)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(ago(r.at))
+                .font(.system(size: 8))
+                .foregroundStyle(.white.opacity(0.3))
+                .monospacedDigit()
+                .fixedSize()
+        }
+    }
+
+    /// "4m" / "3h" / "2d" — a receipt needs to say how long ago, not when.
+    private func ago(_ date: Date) -> String {
+        let secs = max(0, Int(now.timeIntervalSince(date)))
+        if secs < 60 { return "\(secs)s" }
+        if secs < 3600 { return "\(secs / 60)m" }
+        if secs < 86_400 { return "\(secs / 3600)h" }
+        return "\(secs / 86_400)d"
     }
 }
 
@@ -396,13 +477,9 @@ private struct AgentRow: View {
     }
 
     /// Whether a green Approve makes sense: only hosts we can actually send a
-    /// Return to — Terminal.app (Apple Events) or the built-in notch tab (PTY).
-    private var canApprove: Bool {
-        switch session.host {
-        case .terminalApp, .notch: return true
-        case .other, .none:        return false
-        }
-    }
+    /// Return to — Terminal.app (Apple Events), the built-in notch tab (PTY), or
+    /// Terminal Deck (its `approve` bridge verb).
+    private var canApprove: Bool { AgentSessionsModel.canInject(into: session.host) }
 
     /// Whether Open can do anything: Terminal.app tab, the notch tab, or (as an
     /// activate-the-app fallback) another recognized host. Not for `.none`.
@@ -417,6 +494,7 @@ private struct AgentRow: View {
     @ViewBuilder
     private var actions: some View {
         HStack(spacing: 5) {
+            verdictChip
             autoResumeChip
             if session.state == .waiting, canApprove {
                 Button { approve() } label: {
@@ -471,7 +549,7 @@ private struct AgentRow: View {
     @ViewBuilder
     private var autoResumeMenu: some View {
         if !hostAutoTypeable {
-            Text("Auto-resume needs a Terminal.app or notch session")
+            Text("Auto-resume needs a Terminal.app, notch, or Terminal Deck session")
         } else if session.autoResumeArmed || session.autoResumeOptedIn {
             Button(role: .destructive) { agents.setAutoResume(session.id, enabled: false) } label: {
                 Label("Disable auto-resume", systemImage: "bolt.slash.fill")
@@ -490,15 +568,36 @@ private struct AgentRow: View {
         }
     }
 
+    // MARK: Auto-resume verdict
+
+    /// What auto-resume DID to this row, carried until the user has looked.
+    ///
+    /// The feature acts while you are away, so the moment it acts is the moment
+    /// you are least able to see a toast. This is the part that waits: a session
+    /// that failed to resume says so on its own row, next time you open the
+    /// notch, however many hours later — which is the difference between "only
+    /// one of my two terminals came back" and knowing which one and why.
+    @ViewBuilder
+    private var verdictChip: some View {
+        if let v = session.resumeVerdict {
+            HStack(spacing: 3) {
+                Image(systemName: v.glyph).font(.system(size: 8, weight: .bold))
+                Text(v.headline).font(.system(size: 9, weight: .medium))
+            }
+            .foregroundStyle(v.tint)
+            .padding(.horizontal, 7)
+            .frame(height: 22)
+            .background(Capsule().fill(v.tint.opacity(0.13)))
+            .overlay(Capsule().stroke(v.tint.opacity(0.55), lineWidth: 1))
+            .help("\(v.headline) — \(v.detail)")
+            .transition(.scale.combined(with: .opacity))
+        }
+    }
+
     // MARK: Auto-resume chip
 
     /// Auto-resume can only ever fire on a host we can type into.
-    private var hostAutoTypeable: Bool {
-        switch session.host {
-        case .terminalApp, .notch: return true
-        case .other, .none:        return false
-        }
-    }
+    private var hostAutoTypeable: Bool { AgentSessionsModel.canInject(into: session.host) }
 
     /// Trailing auto-resume affordance. On auto-typeable hosts: a dim ⚡ when not
     /// armed (display-only, revealed on hover like the other inactive controls);
@@ -640,6 +739,8 @@ private struct AgentRow: View {
             agents.approve(session) { outcomeToast($0) }
         case .notch(let sid):
             terminals.sendReturn(to: sid)
+        case .other where session.host.isDeck:
+            DeckBridge.approve(sessionID: session.id)
         case .other, .none:
             break
         }

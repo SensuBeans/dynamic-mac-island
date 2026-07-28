@@ -59,6 +59,27 @@ enum DeckBridge {
         return send(verb: "new", query: q)
     }
 
+    /// Type `continue` into the pane hosting a Claude session — the deck's
+    /// equivalent of the Apple Event the Terminal.app path sends. Without it the
+    /// deck was the one host auto-resume could only NOTIFY about, so a capped
+    /// session living in a pane never restarted on its own.
+    ///
+    /// Fire-and-forget, like every verb here: a URL open cannot report back. The
+    /// caller must confirm the resume actually took by watching the transcript,
+    /// exactly as it would for a Terminal.app tab that vanished mid-send.
+    @discardableResult
+    static func resume(sessionID: String) -> Bool {
+        guard !sessionID.isEmpty else { return false }
+        return send(verb: "resume", query: [.init(name: "session", value: sessionID)])
+    }
+
+    /// Answer a pane's permission prompt — a bare Return.
+    @discardableResult
+    static func approve(sessionID: String) -> Bool {
+        guard !sessionID.isEmpty else { return false }
+        return send(verb: "approve", query: [.init(name: "session", value: sessionID)])
+    }
+
     /// Run a command in a new deck session — how a dev server starts when the
     /// deck is the chosen host: visible in a real pane, with its output on
     /// screen and Ctrl-C available, instead of a detached child logging to a
