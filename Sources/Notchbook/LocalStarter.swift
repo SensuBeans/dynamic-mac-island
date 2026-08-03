@@ -234,7 +234,7 @@ enum LocalStarter {
     // MARK: - Launching
 
     /// index.html when present, else the first .html in the folder — how the
-    /// codemap renderer ends up served as foglamp.html at "/".
+    /// codemap renderer ends up served as codemap.html at "/".
     static func pickIndex(_ path: String) -> String {
         let fm = FileManager.default
         if fm.fileExists(atPath: path + "/index.html") { return "index.html" }

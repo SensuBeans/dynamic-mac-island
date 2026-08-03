@@ -56,7 +56,7 @@ Each row was reproduced before fixing and re-probed after, per the prompt's meth
 | H26 | No wake-from-sleep handling | `didWakeNotification` observer (narrowed form, per verification). |
 | M19 | Agents 1 Hz clock ran while closed | Ticks only when that tab is visible. |
 | **H2** | `portLive` IPv4-only → IPv6 servers read as down | Dual-stack, one shared 300 ms budget. Verified against a real `IPV6_V6ONLY` listener: `portLive(8997)` **false → true**; IPv4 and no-listener cases unchanged. |
-| **H1/H4** | Green dot could not tell your server from a stranger; ■ SIGTERMed the stranger | `owner(of:)` reads the pid files the launcher already wrote and nothing read, falling back to matching the project path in the listener's argv. **Verified on both live cases: the orphaned foglamp server (recorded 1099, listening 1099) resolves `.ours` — so a relaunched app re-adopts what it orphaned — and a squatter on a registered port resolves `.stranger`, which `stop()` refuses to kill.** |
+| **H1/H4** | Green dot could not tell your server from a stranger; ■ SIGTERMed the stranger | `owner(of:)` reads the pid files the launcher already wrote and nothing read, falling back to matching the project path in the listener's argv. **Verified on both live cases: the orphaned codemap server (recorded 1099, listening 1099) resolves `.ours` — so a relaunched app re-adopts what it orphaned — and a squatter on a registered port resolves `.stranger`, which `stop()` refuses to kill.** |
 | M11 | `stop()` fire-and-forget | SIGTERM → poll 3 s → SIGKILL → poll → `refusedToDie`. |
 | **H3** | Failed launch invisible | Exit status is meaningless (work is backgrounded with `&`), so the port is polled for 8 s and the last log line is published — wiring up `readLog`, which was fully written with no caller. The row renders it. |
 | §9-14 | `:0` rendered as a port | Em dash. |
@@ -261,5 +261,5 @@ checks below will look broken until you do.
 | M29 PTY parsing on the main queue | deferred — SwiftTerm does not expose the queue through `LocalProcessTerminalView.init`; needs a subclass |
 | §9 visual items 1–8, 12–15 | partially done via the failure-channel work (§9-2 StatTile, §9-3 Mirror actions, §9-4 Calendar, §9-5 tray badging, §9-12 fan range); 1, 6, 7, 8, 13–15 not done |
 
-**The orphaned foglamp server (PID 1099, port 8123) is still running and untouched**,
+**The orphaned codemap server (PID 1099, port 8123) is still running and untouched**,
 as instructed — it remains the intended test fixture for the H1 reconciliation work.

@@ -4,7 +4,7 @@
 Usage: _serve.py PORT DIR [INDEX]
 
 Serves DIR; requests for "/" (or any directory path) resolve to INDEX when
-given (e.g. `_serve.py 8123 .../foglamp/renderer foglamp.html`), otherwise to
+given (e.g. `_serve.py 8123 .../codemap/renderer codemap.html`), otherwise to
 the handler's normal index.html lookup. No-cache headers so edits show up on
 plain reload during development.
 

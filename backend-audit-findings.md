@@ -327,7 +327,7 @@ server that died out-of-band / re-attach on relaunch?" question outright:
 ```
 $ ps -o pid,ppid,lstart -p 1099
  1099     1  Fri Jul 24 17:21:59 2026      # PPID reparented to launchd
-$ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8123/foglamp.html
+$ curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8123/codemap.html
 HTTP 200                                   # still serving, 2h later
 $ pgrep -P 40568 | wc -l
        0                                   # new instance has NO children
@@ -406,7 +406,7 @@ Marginal-Economics' port 8080 with a socket that serves nothing:
 
 ```
 NAME                  KIND      PORT   run     (with squatter)      without squatter
-foglamp               static    :8123  UP                           UP
+codemap               static    :8123  UP                           UP
 Marginal-Economics    static    :8080  UP   <-- green, tap-to-open   down
 runningCount = 2                                                    runningCount = 1
 ```
@@ -1220,7 +1220,7 @@ The audit could not open the notch, hover, or play media. These are ordered so o
    they appear, C2 is confirmed end-to-end.
 6. **U6 — Agents:** confirm the `claude-opus-5[1m]` rows show a raw model badge and **no** context bar,
    while the Fable row shows a normal badge *with* a bar (H22).
-7. **U7 — Servers:** confirm the header reads "1 running · 5 total" with a green dot only on foglamp.
+7. **U7 — Servers:** confirm the header reads "1 running · 5 total" with a green dot only on codemap.
    Tap ▶ on Marginal-Economics (:8080 is free) and time it — any intermediate feedback? Tap it twice
    rapidly — any response at all (H3)?
 8. **U8 — Tray:** drop a file, delete it in Finder, reopen Tray — still a normal full-colour icon
@@ -1239,7 +1239,7 @@ The audit could not open the notch, hover, or play media. These are ordered so o
 
 - **D1:** Confirm the 19:11 rebuild/relaunch was you or a parallel session. If it was neither, that is
   a finding in itself.
-- **D2:** The orphaned foglamp server (**PID 1099**, up since 17:21:59, holding :8123, parent
+- **D2:** The orphaned codemap server (**PID 1099**, up since 17:21:59, holding :8123, parent
   launchd) is still running. It was deliberately **not** killed. It will outlive the app until killed
   manually.
 
