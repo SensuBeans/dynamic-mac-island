@@ -6,10 +6,6 @@ import Foundation
 enum TerminalHost: Equatable {
     /// Terminal.app — scriptable by tty (focus/approve via Apple Events).
     case terminalApp
-    /// A shell running inside the island's own built-in Terminal tab. Carries
-    /// the matched `TerminalSessionsModel` session so Open can select it and
-    /// Approve can write straight to its PTY.
-    case notch(sessionID: UUID)
     /// Any other recognizable hosting app (iTerm2, Code, WezTerm, …). We can
     /// activate the app but not script its tabs — Open only, no Approve.
     case other(String)
@@ -49,49 +45,26 @@ struct TerminalIdentity: Equatable {
     static let none = TerminalIdentity(tty: nil, host: .none)
 
     /// Resolve `pid`'s controlling tty and hosting app.
-    ///
-    /// - `selfPid`: this app's own pid (`getpid()`), so a session launched inside
-    ///   the island's built-in terminal is recognized as `.notch`.
-    /// - `builtinShellPids`: the island's live built-in shells `(sessionID, pid)`,
-    ///   used to pick the exact built-in session a `.notch` Claude belongs to.
-    static func resolve(pid: Int32, selfPid: Int32,
-                        builtinShellPids: [(UUID, Int32)]) -> TerminalIdentity {
+    static func resolve(pid: Int32) -> TerminalIdentity {
         guard let first = kinfo(pid) else { return .none }
         let tty = ttyName(first.kp_eproc.e_tdev)
 
-        // Walk parents (bounded), collecting the lineage, until we reach the
-        // island (→ .notch), launchd (→ the top-level hosting app), or the cap.
-        var lineage: [Int32] = [pid]
+        // Walk parents (bounded) until launchd (→ the top-level hosting app) or
+        // the cap.
         var current = first
         var currentPid = pid
         var topName: String?
         var topPid: Int32 = 0
-        var hitNotch = false
         for _ in 0..<24 {
             let ppid = current.kp_eproc.e_ppid
-            if ppid == selfPid { hitNotch = true; break }
             if ppid <= 1 {                                   // current = launchd's child
                 topName = comm(current); topPid = currentPid; break
             }
             guard let parent = kinfo(ppid) else {
                 topName = comm(current); topPid = currentPid; break
             }
-            lineage.append(ppid)
             current = parent
             currentPid = ppid
-        }
-
-        if hitNotch {
-            // The built-in session whose shell is (or is an ancestor of) this pid.
-            let ancestry = Set(lineage)
-            if let match = builtinShellPids.first(where: { ancestry.contains($0.1) }) {
-                return TerminalIdentity(tty: tty, host: .notch(sessionID: match.0))
-            }
-            // Inside the island but no built-in session matched (a transient race
-            // before the shell list bubbled in) — return fully-unresolved so the
-            // caller declines to cache it and the next tick re-resolves, rather
-            // than latching a wrong host for the pid's lifetime.
-            return .none
         }
 
         guard tty != nil else { return TerminalIdentity(tty: nil, host: .none) }
@@ -161,6 +134,23 @@ struct TerminalIdentity: Equatable {
         var size = MemoryLayout<kinfo_proc>.stride
         let r = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0)
         return (r == 0 && size > 0) ? info : nil
+    }
+
+    /// When a LIVE pid's process actually started, or nil if it is gone.
+    ///
+    /// Exposed so session discovery can tell the process that WROTE a session file
+    /// from an unrelated one that later inherited its pid. `kill(pid, 0)` only
+    /// proves something owns the number.
+    ///
+    /// Matching on the process NAME was tried first and does not work: Claude Code
+    /// runs from a versioned binary, so `p_comm` is the version string ("2.1.226"),
+    /// not "claude". Start time is both stable and precise — measured against three
+    /// live sessions begun four days apart, it agreed with the session file's
+    /// creation date to within one second.
+    static func startTime(of pid: Int32) -> Date? {
+        guard pid > 0, let k = kinfo(pid) else { return nil }
+        let tv = k.kp_proc.p_un.__p_starttime
+        return Date(timeIntervalSince1970: Double(tv.tv_sec) + Double(tv.tv_usec) / 1e6)
     }
 
     /// The process's accounting name (`p_comm`, ≤16 chars: "Terminal", "iTerm2").

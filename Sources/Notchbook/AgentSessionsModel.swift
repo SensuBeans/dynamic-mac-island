@@ -133,6 +133,19 @@ private struct SessionMeta {
     /// does NOT tick while the status stays "busy", so it says how long the
     /// process has claimed this status — not how recently it was alive.
     var statusAt: Date?
+    /// A headless `kind: "bg"` run. Always a user-launched background JOB by the
+    /// time it reaches here — prewarm spares are dropped in `readSessionMetas`.
+    /// It has no controlling tty, so `TerminalIdentity` resolves it to `.none`
+    /// and every terminal-shaped affordance (Open, Approve, auto-resume) already
+    /// switches itself off; the row is there to be SEEN, not jumped to.
+    var isBackground: Bool = false
+    /// This session's own background-job id (bg rows only).
+    var jobId: String?
+    /// Set when this session PARKED a background job: it reports "busy" on that
+    /// job's behalf while its own transcript sits perfectly still. Without this,
+    /// the stale-busy self-heal in `resolveState` reads the silence as a hung
+    /// turn and ages a genuinely-working session to Idle after 30 minutes.
+    var parkedJobId: String?
 }
 
 /// One thing auto-resume DID, in the terms the user would use.
@@ -302,23 +315,10 @@ final class AgentSessionsModel: ObservableObject {
     var onTransition: ((AgentSession, AgentState) -> Void)?
 
     /// Injected by AppDelegate: the island's own built-in Terminal-tab shells as
-    /// `(sessionID, shellPid)`. Lets terminal-identity resolution recognize a
-    /// Claude session hosted inside the notch and match its exact tab. Called on
-    /// `ioQueue`, so AppDelegate must return a thread-safe snapshot (the model
-    /// has no reference to `TerminalSessionsModel`, matching the callback idiom
-    /// of `onTransition`). Default: no built-in shells.
-    var builtinShellPids: () -> [(UUID, Int32)] = { [] }
-
     /// Injected by AppDelegate: is auto-resume enabled (the Agents settings
     /// toggle)? Read on `ioQueue`; AppDelegate returns a lock-guarded snapshot.
     /// Default ON so the detector runs if never wired.
     var autoResumeEnabled: () -> Bool = { true }
-
-    /// Injected: fire an auto-resume into the island's own built-in terminal
-    /// session (host `.notch`). Runs on MAIN (touches `TerminalSessionsModel`).
-    /// Returns whether it actually injected — `false` means the tab was gone /
-    /// its shell dead, so the caller toasts notify-only instead of green (H5).
-    var onNotchResume: ((UUID) -> Bool)?
 
     /// Injected: an auto-resume fired. `notify == false` ⇒ resume was injected
     /// (green toast, no sound); `notify == true` ⇒ notify-only host or a
@@ -414,8 +414,21 @@ final class AgentSessionsModel: ObservableObject {
     /// (old process died, new session reused the number) re-resolves fresh.
     /// Pruned to currently-live pids each rebuild. Touched only on `ioQueue`.
     private var identityCache: [Int32: (sid: String, identity: TerminalIdentity)] = [:]
-    /// This app's pid, for spotting sessions hosted in the island's own terminal.
-    private let selfPid = getpid()
+    /// Sessions the user has explicitly dismissed from the list (right-click →
+    /// Remove). Filtered out before publishing, so the row AND the collapsed pill
+    /// drop together — a dismissed session must not keep inflating the count it
+    /// was dismissed for.
+    ///
+    /// Deliberately sticky: it stays hidden until its process actually exits,
+    /// rather than reappearing on the next burst of activity. A time-based
+    /// auto-drop was considered and rejected — a session you are still using must
+    /// never vanish on a timer, and one you are done with should go when you say
+    /// so, not when a threshold says so.
+    ///
+    /// Pruned to live sessions every rebuild, so the persisted set cannot grow
+    /// without bound. Touched only on `ioQueue`.
+    private var dismissedSessionIDs: Set<String> = []
+    private let dismissedKey = "agents.dismissedSessionIDs"
 
     // MARK: Auto-resume (arming + firing; ioQueue only)
 
@@ -435,8 +448,6 @@ final class AgentSessionsModel: ObservableObject {
         var armedEntryTs: Date?
         let tty: String?
         let host: TerminalHost
-        /// `var` so a restored `.notch` inject arm (whose tab UUID is stale after a
-        /// relaunch) can be downgraded to notify-only (H4).
         var mode: ResumeMode
         /// User armed this via the bolt (F3): fire regardless of transcript shape
         /// (the user may deliberately resume a finished/end_turn session); only the
@@ -467,7 +478,7 @@ final class AgentSessionsModel: ObservableObject {
     /// host (iTerm2, VS Code…) still can't be typed into.
     static func canInject(into host: TerminalHost) -> Bool {
         switch host {
-        case .terminalApp, .notch: return true
+        case .terminalApp: return true
         case .other:               return host.isDeck
         case .none:                return false
         }
@@ -590,10 +601,30 @@ final class AgentSessionsModel: ObservableObject {
             // one thing the user most needs waiting for them at launch.
             self?.restoreReports()
             self?.restoreResumeState()
+            self?.restoreDismissed()
             self?.scan()
         }
         startFSEvents()
         startTimer()
+    }
+
+    /// Drop a session from the list until its process exits. Called from the row's
+    /// context menu; hops to `ioQueue` because the set is confined there.
+    func dismiss(sessionID: String) {
+        ioQueue.async { [weak self] in
+            guard let self, !self.dismissedSessionIDs.contains(sessionID) else { return }
+            self.dismissedSessionIDs.insert(sessionID)
+            self.persistDismissed()
+            self.rebuild()          // drop the row now, not on the next tick
+        }
+    }
+
+    private func restoreDismissed() {
+        dismissedSessionIDs = Set(UserDefaults.standard.stringArray(forKey: dismissedKey) ?? [])
+    }
+
+    private func persistDismissed() {
+        UserDefaults.standard.set(Array(dismissedSessionIDs), forKey: dismissedKey)
     }
 
     func shutdown() {
@@ -610,7 +641,7 @@ final class AgentSessionsModel: ObservableObject {
     }
 
     /// Raise the Terminal.app tab running this session (host `.terminalApp`;
-    /// `.notch`/`.other` are routed in the view). Off-main — AppleScript
+    /// `.other` is routed in the view). Off-main — AppleScript
     /// round-trips can take a beat. Reuses the already-resolved tty, falling back
     /// to a `ps` lookup only when it's nil. `missed(true)` on the main queue when
     /// the tab couldn't be found, so the caller can surface a toast.
@@ -702,11 +733,39 @@ final class AgentSessionsModel: ObservableObject {
         stream = nil
     }
 
+    /// Poll cadence. Foreground = the Agents tab is actually on screen, where the
+    /// age counters ("Working 4m…") tick visibly and 1.5 s is what keeps them
+    /// honest. Background = everything else, including collapsed.
+    ///
+    /// This model cannot be gated OFF the way the per-tab models are: it feeds the
+    /// collapsed pill, which has to keep working while the island is shut. But it
+    /// also should not do the foreground amount of work forever — `rebuild()` reads
+    /// and parses every session file plus `usage.json` on each tick, and the
+    /// comment that used to sit here claiming "no directory walk / stat storm" had
+    /// been false since discovery moved into `readSessionMetas`. FSEvents still
+    /// fires a rebuild the instant a transcript actually changes, so the slower
+    /// cadence costs the pill nothing in responsiveness.
+    private static let foregroundInterval: TimeInterval = 1.5
+    private static let backgroundInterval: TimeInterval = 6
+
+    private var isForeground = false
+
+    /// Called from the island's single gating point when the Agents tab's
+    /// visibility changes.
+    func setForeground(_ on: Bool) {
+        ioQueue.async { [weak self] in
+            guard let self, self.isForeground != on else { return }
+            self.isForeground = on
+            self.startTimer()          // reschedules at the new cadence
+            if on { self.rebuild() }   // don't make a freshly-opened tab wait a tick
+        }
+    }
+
     private func startTimer() {
+        timer?.cancel()
+        let interval = isForeground ? Self.foregroundInterval : Self.backgroundInterval
         let t = DispatchSource.makeTimerSource(queue: ioQueue)
-        t.schedule(deadline: .now() + 1.5, repeating: 1.5)
-        // Timer only re-evaluates the clock over already-tracked parsers — no
-        // directory walk / stat storm. Directory discovery is FSEvents-driven.
+        t.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(200))
         t.setEventHandler { [weak self] in self?.rebuild() }
         t.resume()
         timer = t
@@ -760,7 +819,13 @@ final class AgentSessionsModel: ObservableObject {
     /// session/usage files; runs from FSEvents and the 1.5 s timer.
     private func rebuild() {
         let now = Date()
-        let metas = readSessionMetas()   // live terminals only, by sessionId
+        let metas = readSessionMetas()   // live sessions (terminals + bg jobs), by sessionId
+
+        // Job ids of background runs still alive this tick. A parked parent's
+        // "busy" is only trustworthy while the job it is waiting on is in here
+        // (see `resolveState`) — otherwise a parent that outlived its job would
+        // sit "Working" forever on a transcript that stopped hours ago.
+        let liveJobIds = Set(metas.values.compactMap { $0.jobId })
 
         // Drop identity-cache entries for pids no longer live (keyed by pid, so a
         // recycled pid is also caught by the sessionId guard in resolveIdentity).
@@ -810,15 +875,30 @@ final class AgentSessionsModel: ObservableObject {
 
         for id in ids {
             guard let meta = metas[id] else { continue }   // live session file required
+            // A background session is NOT an agent the user has on screen. It has
+            // no terminal, so it renders with no Open, no Approve and no bolt — an
+            // inert row that still adds 1 to the pill. Worse, a parked parent is
+            // held at `.working` on behalf of exactly this job (see `resolveState`),
+            // so the pair counted ONE piece of work TWICE.
+            //
+            // This guard used to sit below the append, where it only kept bg out of
+            // auto-resume. Hoisting it here is the fix for both: no bg row, and the
+            // parked parent becomes the single row representing the pair.
+            guard !meta.isBackground else { continue }
             let p = parserByID[id]
             // Newest of the parent transcript and any subagent burst.
             let lastActivity = [p?.newestEntryTs, sidechainTsByID[id]]
                 .compactMap { $0 }.max()
             let age = lastActivity.map { now.timeIntervalSince($0) } ?? .infinity
             liveIDs.insert(id)
+            // Dismissed by the user. Recorded as live above (so the id is pruned
+            // once the process exits) but built into nothing — no row, and no
+            // contribution to the pill.
+            if dismissedSessionIDs.contains(id) { continue }
 
             let base = p.map { classify($0, age: age) } ?? .idle
-            let resolved = resolveState(base: base, meta: meta, hasTranscript: p != nil, age: age)
+            let resolved = resolveState(base: base, meta: meta, hasTranscript: p != nil,
+                                        age: age, liveJobIds: liveJobIds)
 
             // Transition tracking keyed by session (survives having no transcript).
             let prev = sessionStates[id]
@@ -845,6 +925,9 @@ final class AgentSessionsModel: ObservableObject {
             // entry last (an unanswered prompt / a tool_result awaiting the
             // assistant — the shape a limit-stopped session almost always has).
             let banner = p?.limitBanner
+            // (Background sessions were excluded at the top of the loop — they are
+            // neither rows nor resume candidates, since there is no terminal to
+            // type a keystroke into.)
             resumeCandidates.append(ResumeCandidate(
                 id: id, pid: meta.pid, host: identity.host, tty: identity.tty,
                 newestEntryTs: lastActivity, midTurn: p?.isResumeWorthy ?? false,
@@ -853,6 +936,11 @@ final class AgentSessionsModel: ObservableObject {
         }
         // Forget state for sessions that closed.
         sessionStates = sessionStates.filter { liveIDs.contains($0.key) }
+        // A dismissal only has to outlive the session it silenced.
+        if !dismissedSessionIDs.isSubset(of: liveIDs) {
+            dismissedSessionIDs.formIntersection(liveIDs)
+            persistDismissed()
+        }
 
         // Toasts: only real changes, never on first observation (old == nil).
         for item in built {
@@ -1507,7 +1595,7 @@ final class AgentSessionsModel: ObservableObject {
         }
         // Guard 4: terminal identity re-resolves to the same tty + host. Only for
         // INJECT — a notify-only arm (incl. a prompt-parked one forced to notify
-        // above) just toasts, so a drifted tty/host (e.g. a restored .notch arm
+        // above) just toasts, so a drifted tty/host (e.g. a restored arm
         // whose tab UUID is stale after relaunch, H4) must still surface the
         // "Limits reset" notification rather than dying silently.
         if effectiveMode == .inject {
@@ -1548,17 +1636,6 @@ final class AgentSessionsModel: ObservableObject {
             }
         case .inject:
             switch a.host {
-            case .notch(let sid):
-                DispatchQueue.main.async { [weak self] in
-                    // Notify-only if the built-in tab is gone / its shell dead —
-                    // the resume no-ops there, so don't toast a false green (H5).
-                    let injected = self?.onNotchResume?(sid) ?? false
-                    self?.settleFire(injected: injected, project: project, name: name,
-                                     sessionId: armSessionId, resetAt: armResetAt,
-                                     detail: injected
-                                         ? "typed continue into its notch terminal"
-                                         : "its notch terminal was gone by the time limits reset")
-                }
             case .terminalApp:
                 let pid = a.pid
                 let ttyPath = a.tty.map { "/dev/\($0)" }
@@ -1668,21 +1745,12 @@ final class AgentSessionsModel: ObservableObject {
               let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { logDecision("restore none"); return }
         let now = Date()
-        var restored = 0, droppedStale = 0, droppedDead = 0, downgraded = 0
+        var restored = 0, droppedStale = 0, droppedDead = 0
         if let arms = root["armed"] as? [[String: Any]] {
             for d in arms {
                 guard var a = armFromDict(d) else { continue }
                 if a.resetAt.addingTimeInterval(resumeGrace) < now { droppedStale += 1; continue }
                 if kill(Int32(a.pid), 0) != 0 { droppedDead += 1; continue }
-                // H4: a restored `.notch` inject arm can't be re-injected — the
-                // built-in tab is a fresh `UUID()` this launch, so its old sid
-                // never re-matches and Guard 4 would kill the arm silently. Keep
-                // the arm but downgrade to notify-only, so at reset it surfaces the
-                // orange "Limits reset" toast instead of vanishing without a trace.
-                if case .notch = a.host, a.mode == .inject {
-                    a.mode = .notifyOnly
-                    downgraded += 1
-                }
                 armedResumes[a.sessionId] = a
                 restored += 1
             }
@@ -1701,7 +1769,7 @@ final class AgentSessionsModel: ObservableObject {
             }
         }
         logDecision("restore armed=\(restored) droppedStale=\(droppedStale) "
-                  + "droppedDead=\(droppedDead) downgraded=\(downgraded) consumed=\(consumedKept)")
+                  + "droppedDead=\(droppedDead) consumed=\(consumedKept)")
         rescheduleResumeTimer()
         persistResumeStateIfChanged()   // rewrite pruned set; seeds the dedup cache
     }
@@ -1776,7 +1844,6 @@ final class AgentSessionsModel: ObservableObject {
     private func hostToDict(_ h: TerminalHost) -> [String: Any] {
         switch h {
         case .terminalApp:    return ["kind": "terminalApp"]
-        case .notch(let sid): return ["kind": "notch", "sid": sid.uuidString]
         case .other(let app): return ["kind": "other", "app": app]
         case .none:           return ["kind": "none"]
         }
@@ -1784,9 +1851,6 @@ final class AgentSessionsModel: ObservableObject {
     private func hostFromDict(_ d: [String: Any]) -> TerminalHost? {
         switch d["kind"] as? String {
         case "terminalApp": return .terminalApp
-        case "notch":
-            guard let s = d["sid"] as? String, let u = UUID(uuidString: s) else { return nil }
-            return .notch(sessionID: u)
         case "other":       return .other((d["app"] as? String) ?? "")
         case "none":        return TerminalHost.none
         default:            return nil
@@ -1796,7 +1860,6 @@ final class AgentSessionsModel: ObservableObject {
     private static func hostLabel(_ h: TerminalHost) -> String {
         switch h {
         case .terminalApp: return "terminalApp"
-        case .notch:       return "notch"
         case .other:       return "other"
         case .none:        return "none"
         }
@@ -1893,19 +1956,49 @@ final class AgentSessionsModel: ObservableObject {
                   let sid = obj["sessionId"] as? String,
                   let pid = (obj["pid"] as? NSNumber)?.int32Value,
                   kill(pid, 0) == 0 else { continue }
+            // `kill(pid, 0)` only proves SOMETHING owns that pid. Pids are
+            // recycled, and these files outlive the process that wrote them, so a
+            // dead session whose number got reused by any unrelated program read as
+            // live forever — an immortal row nothing could clear. Two cheap
+            // confirmations that this is still the process that wrote the file:
+            //
+            //  • the filename IS the pid, so contents disagreeing with the name
+            //    mean the file was copied or rewritten and cannot be trusted;
+            //  • the process must not have started meaningfully AFTER the file was
+            //    created. The writer starts, then writes; a recycled pid begins
+            //    long afterwards. (Matching the process NAME was tried and does
+            //    not work — Claude Code's `p_comm` is its version string.)
+            let fileNamePid = Int32(name.dropLast(".json".count))
+            guard fileNamePid == nil || fileNamePid == pid else { continue }
+            if let started = TerminalIdentity.startTime(of: pid),
+               let created = (try? url.resourceValues(forKeys: [.creationDateKey]))?.creationDate,
+               started.timeIntervalSince(created) > 60 { continue }
             // Claude Code 2.1+ pre-warms `bg-spare` processes and runs headless
-            // background jobs — both write a `<pid>.json` with kind == "bg".
-            // They're not terminals the user "has open" (nothing to jump to) and
-            // would just inflate the list, so show only interactive sessions.
-            // Files with no `kind` are older Claude Code — treat as interactive.
-            if (obj["kind"] as? String) == "bg" { continue }
+            // background jobs; both write a `<pid>.json` with kind == "bg".
+            //
+            // This used to try to tell them apart here, keeping any bg file that
+            // carried a `jobId` on the theory that only a user-launched job has
+            // one. That is no longer true — on 2.1.226 a process whose `p_comm` is
+            // literally "claude bg-spare" carries a jobId and reports busy, so a
+            // prewarm was passing as a working agent.
+            //
+            // The distinction is now unnecessary: NO bg session becomes a row
+            // (see `rebuild`). They are still read, because a parked parent's
+            // `parkedJobId` has to be matched against their live `jobId`s — that
+            // lookup is the only reason bg entries exist in this dictionary.
+            let isBackground = (obj["kind"] as? String) == "bg"
+            let jobId = (obj["jobId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let statusAt = (obj["statusUpdatedAt"] as? NSNumber)
                 .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
             out[sid] = SessionMeta(pid: Int(pid),
                                    name: obj["name"] as? String,
                                    status: obj["status"] as? String ?? "idle",
                                    cwd: obj["cwd"] as? String ?? "",
-                                   statusAt: statusAt)
+                                   statusAt: statusAt,
+                                   isBackground: isBackground,
+                                   jobId: jobId,
+                                   parkedJobId: (obj["parkedJobId"] as? String)
+                                       .flatMap { $0.isEmpty ? nil : $0 })
         }
         return out
     }
@@ -1983,13 +2076,14 @@ final class AgentSessionsModel: ObservableObject {
     private func resolveIdentity(pid: Int, sid: String) -> TerminalIdentity {
         let key = Int32(pid)
         if let hit = identityCache[key], hit.sid == sid { return hit.identity }
-        let identity = TerminalIdentity.resolve(pid: key, selfPid: selfPid,
-                                                builtinShellPids: builtinShellPids())
-        // Don't cache an unresolved notch session (the built-in shell list may not
-        // have bubbled in yet) — let the next tick resolve it once the tab exists.
-        if identity.host != .none || identity.tty != nil {
-            identityCache[key] = (sid, identity)
-        }
+        let identity = TerminalIdentity.resolve(pid: key)
+        // Cache EVERY outcome, including the fully-unresolved one. This used to
+        // refuse to cache `.none` so a transient race (the built-in shell list not
+        // yet bubbled in) could re-resolve next tick — but with the built-in
+        // terminal gone there is no such race, and `.none` is now a stable fact
+        // about a headless process. Declining to cache it meant every headless
+        // session re-walked up to 24 `sysctl` calls every 1.5 s, forever.
+        identityCache[key] = (sid, identity)
         return identity
     }
 
@@ -2300,7 +2394,8 @@ final class AgentSessionsModel: ObservableObject {
     /// transcript but never reports "working" (the process says it's not busy),
     /// so a quiet session settles to complete (just finished) or idle.
     private func resolveState(base: AgentState, meta: SessionMeta?,
-                              hasTranscript: Bool, age: TimeInterval) -> AgentState {
+                              hasTranscript: Bool, age: TimeInterval,
+                              liveJobIds: Set<String>) -> AgentState {
         if base == .interrupted { return .interrupted }
         guard let meta else { return base }
         switch meta.status {
@@ -2309,7 +2404,25 @@ final class AgentSessionsModel: ObservableObject {
         // while the transcript has gone cold. Past idleMax with no new entry,
         // stop trusting 'busy' and defer to the (now aged-out) transcript state,
         // so the working pill can't stay lit indefinitely with no self-healing.
-        case "busy":    return age < idleMax ? .working : base
+        //
+        // A PARKED session is the one silence that isn't a hang: it reports busy
+        // on behalf of a background job whose output goes to a different
+        // transcript entirely, so its own file stops the instant it parks and
+        // the cut-off above would age it to Idle in 30 minutes while the job
+        // runs on. Trust it for as long as the job it parked is STILL ALIVE —
+        // which keeps the self-heal honest, because a parent left claiming
+        // 'busy' over a job that has since exited falls straight back through
+        // to the staleness test rather than lighting the pill forever.
+        case "busy":
+            if let parked = meta.parkedJobId, liveJobIds.contains(parked) { return .working }
+            // No transcript at all ⇒ `age` is `.infinity`, so the staleness test
+            // below is ALWAYS false and a session reporting 'busy' could never
+            // render as working. A terminal that had not yet written a transcript
+            // (or whose project dir the island cannot see) therefore sat at Idle
+            // while it was demonstrably working. There is nothing to age out when
+            // there is no clock, so trust the process instead.
+            if !hasTranscript { return .working }
+            return age < idleMax ? .working : base
         case "waiting": return .waiting
         default:        return base == .complete ? .complete : .idle
         }

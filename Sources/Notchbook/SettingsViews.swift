@@ -13,6 +13,10 @@ struct SettingsContainer: View {
             switch route {
             case .root:            SettingsRootPage()
             case .general:         SettingsGeneralPage()
+            // Configurations is no longer reachable from the settings root — the
+            // Terminal.app/Deck choice keeps working from its stored value, it
+            // just isn't a user-facing switch any more. The route stays wired so
+            // an old deep-link can't land on nothing.
             case .configurations:  SettingsConfigurationsPage()
             case .page(let tab):   SettingsDetailPage(tab: tab)
             }
@@ -92,6 +96,41 @@ struct SettingRow<Trailing: View>: View {
         .frame(minHeight: 28)
         .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
         .help(help ?? "")
+    }
+}
+
+/// A read-only explainer block: a small caption over glyph-led lines. Same
+/// glass as `SettingRow` so it reads as part of the page rather than a callout.
+/// The glyph column is the point — every line names the control you actually
+/// press, so the text and the tab's chrome match one-to-one.
+struct SettingHelp: View {
+    let title: String
+    /// (SF Symbol, text) — the symbol should be the SAME one the control uses.
+    let lines: [(String, String)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.45))
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: line.0)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: 14)
+                    Text(line.1)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.06)))
     }
 }
 
@@ -202,11 +241,6 @@ struct SettingsRootPage: View {
         SettingsPage(title: "Settings") {
             Button { state.settingsRoute = .general } label: {
                 navRow(icon: "gearshape", title: "General")
-            }
-            .buttonStyle(.plain)
-
-            Button { state.settingsRoute = .configurations } label: {
-                navRow(icon: "terminal", title: "Configurations")
             }
             .buttonStyle(.plain)
 
@@ -465,7 +499,6 @@ struct SettingsDetailPage: View {
             case .notes:    NotesSettings()
             case .timer:    TimerSettings()
             case .tray:     TraySettings()
-            case .terminal: TerminalSettings()
             case .agents:   AgentsSettings()
             case .servers:  ServersSettings()
             case .calendar: CalendarSettings()
@@ -520,7 +553,8 @@ private struct MediaSettings: View {
                              options: [("Low", 0.25), ("Normal", 0.4), ("High", 0.6)])
         }
         SettingRow(label: "Ambient album glow") { SettingSwitch(isOn: $settings.ambientGlow) }
-        SettingRow(label: "Glow intensity") {
+        SettingRow(label: "Glow intensity",
+                   help: "Applies on the Media tab — every other tab stays Subtle") {
             SettingSegmented(selection: $settings.glowIntensity,
                              options: [("Subtle", 0.6), ("Normal", 1.0), ("Vivid", 1.5)])
         }
@@ -533,6 +567,7 @@ private struct MediaSettings: View {
 private struct NotesSettings: View {
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var state: NotchState
+    @EnvironmentObject var notesSync: NotesSyncModel
     var body: some View {
         SettingRow(label: "Number of pages",
                    help: "Won't drop a page that still has text") {
@@ -546,6 +581,23 @@ private struct NotesSettings: View {
         }
         SettingRow(label: "Monospaced font") { SettingSwitch(isOn: $settings.notesMonospaced) }
         SettingRow(label: "Confirm before clear") { SettingSwitch(isOn: $settings.notesConfirmClear) }
+
+        // Apple Notes mode is a whole second personality for this tab and none
+        // of its controls are labelled in a 460pt panel — so the page explains
+        // them, glyph for glyph.
+        SettingHelp(title: "APPLE NOTES", lines: [
+            ("cloud", "The cloud button swaps the tab between local pages and your Apple Notes library."),
+            ("line.3.horizontal", "Opens the browser: every folder, every note. Tap a folder to expand it, tap a note to open it."),
+            ("chevron.left", "Back to the editor — or swipe two fingers sideways across the panel."),
+            ("rectangle.stack", "The chips are your most recently edited notes, from anywhere in the library."),
+            ("plus", "Makes a new note in the \(notesSync.folderName) folder."),
+            ("arrow.triangle.2.circlepath", "Edits save back to Apple Notes about 2s after you stop typing. If the note changed on another device first, the island keeps that newer copy and tells you."),
+            ("lock.fill", "Password-protected notes open read-only — the island never writes to one."),
+        ])
+
+        SettingHelp(title: "KEYBOARD", lines: [
+            ("command", "⌘C, ⌘V, ⌘X, ⌘A and ⌘Z work in the notes editor, in the terminal, and in any text field in here."),
+        ])
     }
 }
 
@@ -602,10 +654,6 @@ private struct NoOptionsSettings: View {
                 .lineLimit(1)
         }
     }
-}
-
-private struct TerminalSettings: View {
-    var body: some View { NoOptionsSettings(note: "Managed by the Terminal tab") }
 }
 
 // MARK: Agents settings

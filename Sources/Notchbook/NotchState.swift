@@ -33,7 +33,7 @@ struct TabHugHeightKey: PreferenceKey {
 }
 
 enum NotchTab: String, CaseIterable {
-    case media, notes, timer, tray, terminal, agents, servers, calendar, mirror, stats, toggles
+    case media, notes, timer, tray, agents, servers, calendar, mirror, stats, toggles
 
     var icon: String {
         switch self {
@@ -41,7 +41,6 @@ enum NotchTab: String, CaseIterable {
         case .media: return "music.note"
         case .timer: return "timer"
         case .tray: return "tray.full"
-        case .terminal: return "terminal"
         case .agents: return "sparkles"
         case .servers: return "server.rack"
         case .calendar: return "calendar"
@@ -57,7 +56,6 @@ enum NotchTab: String, CaseIterable {
         case .media: return "Media"
         case .timer: return "Timer"
         case .tray: return "Tray"
-        case .terminal: return "Terminal"
         case .agents: return "Agents"
         case .servers: return "Servers"
         case .calendar: return "Calendar"
@@ -107,6 +105,10 @@ final class NotchState: ObservableObject {
     /// Convenience for the many call sites that only care whether settings is
     /// open at all (not which page).
     var showingSettings: Bool { settingsRoute != nil }
+    /// Notes tab: the all-notes browser is covering the editor. Lives here (not
+    /// just view-local) because the island's swipe handler must know to spend a
+    /// horizontal swipe on closing it rather than on switching tabs.
+    @Published var notesBrowsing = false
     /// Tabs the user has hidden from the nav dock and tab-swipe cycle.
     @Published var hiddenTabs: Set<NotchTab> {
         didSet {

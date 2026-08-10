@@ -9,7 +9,6 @@ import SwiftUI
 struct AgentsTab: View {
     @EnvironmentObject var agents: AgentSessionsModel
     @EnvironmentObject var state: NotchState
-    @EnvironmentObject var terminals: TerminalSessionsModel
     @EnvironmentObject var settings: SettingsStore
 
     /// One shared clock so every row's "time-in-state" and context freshness
@@ -132,31 +131,30 @@ struct AgentsTab: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            // Neutral launch button (not an accent fill — green/amber/orange are
-            // reserved for session state in this tab). Where it opens follows the
-            // Configurations setting: the notch's own terminal tab, or a Terminal
-            // Deck session. Either way a `claude` started there comes back as a
-            // row here — `.notch` or `.other("TerminalDeck")`.
-            LaunchButton(icon: "plus", label: "Launch Terminal") { launchTerminal() }
-            .help(usingDeck ? "New session in Terminal Deck — start a Claude session"
-                            : "New terminal in the notch — start a Claude session")
+            // Neutral launch buttons (not accent fills — green/amber/orange are
+            // reserved for session state in this tab). Each names the host it
+            // actually opens rather than following a hidden setting: with the
+            // Configurations page gone there is no visible switch to explain why
+            // one button went somewhere unexpected. Either host's `claude` comes
+            // back as a row here.
+            HStack(spacing: 8) {
+                LaunchButton(icon: "plus", label: "Launch Terminal") { launchTerminalApp() }
+                    .help("New window in Terminal.app — start a Claude session there")
+                if DeckBridge.isInstalled {
+                    LaunchButton(icon: "plus", label: "Launch Session") { DeckBridge.newSession() }
+                        .help("New session in Terminal Deck — start a Claude session there")
+                }
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Terminal Deck only counts as the host when it is actually installed —
-    /// otherwise the button would open nothing at all.
-    private var usingDeck: Bool {
-        settings.terminalHost == "deck" && DeckBridge.isInstalled
-    }
-
-    private func launchTerminal() {
-        if usingDeck {
-            DeckBridge.newSession()
-        } else {
-            state.currentTab = .terminal
-            terminals.newSession()
+    private func launchTerminalApp() {
+        if let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.Terminal") {
+            NSWorkspace.shared.openApplication(at: url,
+                                               configuration: NSWorkspace.OpenConfiguration())
         }
     }
 }
@@ -307,7 +305,6 @@ private struct UsageHeader: View {
 
 private struct AgentRow: View {
     @EnvironmentObject var agents: AgentSessionsModel
-    @EnvironmentObject var terminals: TerminalSessionsModel
     @EnvironmentObject var state: NotchState
     let session: AgentSession
     let now: Date
@@ -411,7 +408,14 @@ private struct AgentRow: View {
         // Right-click anywhere on the row to enable/disable auto-resume — the
         // reliable, always-there path (no hover, no cap-state guessing) the dim
         // ⚡ bolt never gave.
-        .contextMenu { autoResumeMenu }
+        .contextMenu {
+            autoResumeMenu
+            Divider()
+            // The only way to get rid of a session you are done with. A row
+            // otherwise lives until its terminal closes, so a Claude left running
+            // for days sat in the list — and in the count — forever.
+            Button("Remove from List") { agents.dismiss(sessionID: session.id) }
+        }
         // Leaving the island (row unmount: collapse / tab switch / re-sort) drops
         // any in-flight "Cancel?" confirm back to the armed pill. The pending work
         // is only an auto-revert now, but cancel it anyway so it can't fire against
@@ -466,13 +470,20 @@ private struct AgentRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Which terminal this session is actually living in.
+    ///
+    /// The old `ttys###` tags were dropped as visual noise and nothing replaced
+    /// them, which left Terminal.app and Terminal Deck rows looking identical —
+    /// with no Configurations page any more, there was no way at all to tell which
+    /// app a row would open. These name the host instead of the tty: the useful
+    /// half of the old tag without the noise.
     private var terminalTagText: (symbol: String, text: String)? {
         switch session.host {
-        case .notch:                       return ("sparkle", "notch")
-        // ttys### tags removed as visual noise — a Terminal.app/other host now
-        // carries no tag (Open still works off the resolved tty under the hood).
-        case .terminalApp, .other:         return nil
-        case .none:                        return nil
+        case .terminalApp:      return ("terminal", "Terminal")
+        case .other(let app):   return session.host.isDeck ? ("rectangle.split.2x1", "Deck")
+                                                           : ("app.dashed", app)
+        // Headless: no controlling tty, so no app to name and no controls either.
+        case .none:             return nil
         }
     }
 
@@ -714,9 +725,6 @@ private struct AgentRow: View {
         switch session.host {
         case .terminalApp:
             agents.focus(session) { outcomeToast($0) }
-        case .notch(let sid):
-            state.currentTab = .terminal
-            terminals.selectedID = sid
         case .other(let app):
             // Terminal Deck is an `.other` host by process ancestry, but unlike a
             // generic app we can land on the exact PANE rather than just bringing
@@ -737,8 +745,6 @@ private struct AgentRow: View {
         switch session.host {
         case .terminalApp:
             agents.approve(session) { outcomeToast($0) }
-        case .notch(let sid):
-            terminals.sendReturn(to: sid)
         case .other where session.host.isDeck:
             DeckBridge.approve(sessionID: session.id)
         case .other, .none:

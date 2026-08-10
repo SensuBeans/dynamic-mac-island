@@ -22,7 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let pomodoro = PomodoroModel()
     private let audioOutput = AudioOutputModel()
     private let settings = SettingsStore()
-    private let terminalSessions = TerminalSessionsModel()
     private let agentSessions = AgentSessionsModel()
     private let serversModel = ServersModel()
     private let notesSync = NotesSyncModel()
@@ -183,8 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `AgentSessionsModel` reads this on its own `ioQueue` to recognize a Claude
     /// session hosted inside the island — so the snapshot is updated on main and
     /// read under a lock.
-    private let builtinShellLock = NSLock()
-    private var builtinShellSnapshot: [(UUID, Int32)] = []
 
     /// Thread-safe mirror of the auto-resume toggle — `AgentSessionsModel` reads
     /// it on `ioQueue`, the setting is written on main.
@@ -201,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var liquidAgentDebugTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
         // `-ResumeReportProbe <path>` runs the verdict pipeline and quits. Ahead
         // of the notch-screen guard and of any window, so it works headless.
         if let i = CommandLine.arguments.firstIndex(of: "-ResumeReportProbe"),
@@ -217,8 +215,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            i + 1 < CommandLine.arguments.count {
             for raw in CommandLine.arguments[i + 1].split(separator: ",") {
                 guard let pid = Int32(raw) else { continue }
-                let id = TerminalIdentity.resolve(pid: pid, selfPid: getpid(),
-                                                  builtinShellPids: [])
+                let id = TerminalIdentity.resolve(pid: pid)
                 print("pid=\(pid) tty=\(id.tty ?? "-") host=\(id.host) isDeck=\(id.host.isDeck)")
             }
             NSApp.terminate(nil)
@@ -266,8 +263,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else if self.state.currentTab == .tray {
                     s = self.metrics.trayExpandedSize(itemCount: self.tray.items.count,
                                                       cell: self.settings.trayTileSize)
-                } else if self.state.currentTab == .terminal {
-                    s = NotchMetrics.terminalIslandSize
                 } else if self.state.currentTab == .agents {
                     s = NotchView.hugSize(cap: NotchMetrics.agentsIslandSize,
                                           natural: self.state.tabHugHeight)
@@ -378,17 +373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // clicking away.
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            if event.keyCode == 53, self.state.isExpanded,
-               self.state.currentTab != .terminal {
+            if event.keyCode == 53, self.state.isExpanded {
                 self.collapse()
-                return nil
-            }
-            // A finished terminal session has no PTY to receive input; Return
-            // (or Enter) dismisses it, per the exit hint.
-            if self.state.isExpanded, self.state.currentTab == .terminal,
-               event.keyCode == 36 || event.keyCode == 76,
-               let sel = self.terminalSessions.selected, !sel.isAlive {
-                self.terminalSessions.closeSession(id: sel.id)
                 return nil
             }
             return event
@@ -422,28 +408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupToasts()
 
-        // Feed the agent model the island's built-in shells (main-mutated,
-        // ioQueue-read) so a Claude session running inside the notch's own
-        // Terminal tab resolves to `.notch` and matches its exact session. Wire
-        // the snapshot BEFORE start() so the initial scan can already see it.
-        agentSessions.builtinShellPids = { [weak self] in
-            guard let self else { return [] }
-            self.builtinShellLock.lock(); defer { self.builtinShellLock.unlock() }
-            return self.builtinShellSnapshot
-        }
-        terminalSessions.$sessions
-            .sink { [weak self] sessions in
-                guard let self else { return }
-                let pids = sessions.compactMap { s -> (UUID, Int32)? in
-                    let pid = s.view.process.shellPid
-                    return pid > 0 ? (s.id, pid) : nil
-                }
-                self.builtinShellLock.lock()
-                self.builtinShellSnapshot = pids
-                self.builtinShellLock.unlock()
-            }
-            .store(in: &cancellables)
-
         // Which terminal the Servers page starts servers in (Configurations).
         // Read through the store so flipping the setting takes effect on the very
         // next start, with no restart and no cached copy to go stale.
@@ -467,9 +431,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.autoResumeLock.lock(); self.autoResumeSnapshot = on; self.autoResumeLock.unlock()
             }
             .store(in: &cancellables)
-        agentSessions.onNotchResume = { [weak self] sid in
-            self?.terminalSessions.resume(id: sid) ?? false
-        }
         agentSessions.onResumeFired = { [weak self] project, name, notify in
             guard let self else { return }
             if notify {
@@ -820,7 +781,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             swipeY = 0
             tabSwipeActive = false
             tabSteps = 0
-            settingsSwipe = state.isExpanded && state.showingSettings
+            settingsSwipe = state.isExpanded
+                && (state.showingSettings || state.notesBrowsing)
             volumeBase = nil
             volumeSwipeEnded = false
             lastSentVolume = nil
@@ -921,9 +883,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// One settings back-step with a haptic tick: sub-page → root → closed.
-    /// No-ops once settings is already closed (a long swipe just exits).
+    /// An accessory app never gets an app-provided main menu, and AppKit routes
+    /// ⌘C/⌘V/⌘X/⌘A/⌘Z through main-menu key equivalents — so with no menu, none
+    /// of them reached the first responder and every text surface in the island
+    /// (Notes editor, settings fields, the terminal) was un-pasteable.
+    ///
+    /// This menu is never DISPLAYED (`.accessory` draws no menu bar); it exists
+    /// purely as the routing table. Auto-enabling means each item only fires
+    /// when the current first responder actually implements its selector, which
+    /// is exactly the behavior a key monitor could not reproduce. Deliberately
+    /// no ⌘Q item: the island is always-on and quits from its power button.
+    private func installMainMenu() {
+        let main = NSMenu()
+        // Slot 0 is the app menu by convention; left empty so nothing claims a
+        // key equivalent there.
+        let appItem = NSMenuItem()
+        appItem.submenu = NSMenu()
+        main.addItem(appItem)
+
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "Redo", action: Selector(("redo:")),
+                                keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)),
+                     keyEquivalent: "a")
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+        main.addItem(editItem)
+
+        NSApp.mainMenu = main
+    }
+
+    /// One back-step with a haptic tick for whichever overlay owns the gesture:
+    /// settings (sub-page → root → closed) or the Notes browser (→ editor).
+    /// No-ops once nothing is left to dismiss (a long swipe just exits).
     private func settingsBack() {
+        if state.settingsRoute == nil, state.notesBrowsing {
+            withAnimation(.easeOut(duration: 0.18)) { state.notesBrowsing = false }
+            haptic()
+            return
+        }
         guard let route = state.settingsRoute else { return }
         state.settingsRoute = route == .root ? nil : .root
         haptic()
@@ -970,7 +974,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         state.saveNow()
         toggles.shutdown()
-        terminalSessions.shutdown()
         agentSessions.shutdown()
         if settings.trayClearOnQuit { tray.clear() }
     }
@@ -989,7 +992,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(spectrum)
             .environmentObject(lyrics)
             .environmentObject(audioOutput)
-            .environmentObject(terminalSessions)
             .environmentObject(agentSessions)
             .environmentObject(serversModel)
             .environmentObject(notesSync)

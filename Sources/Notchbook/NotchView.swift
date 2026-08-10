@@ -294,8 +294,6 @@ struct NotchView: View {
         if state.currentTab == .tray {
             return metrics.trayExpandedSize(itemCount: tray.items.count,
                                             cell: settings.trayTileSize)
-        } else if state.currentTab == .terminal {
-            return NotchMetrics.terminalIslandSize
         } else if state.currentTab == .agents {
             return Self.hugSize(cap: NotchMetrics.agentsIslandSize,
                                 natural: state.tabHugHeight)
@@ -865,6 +863,9 @@ struct NotchView: View {
         servers.setPolling(live && tab == .servers)
         calendarModel.setVisible(live && tab == .calendar)
         toggles.setPolling(live && tab == .toggles)
+        // Not a hard gate: the agents model also drives the collapsed pill, so it
+        // only steps DOWN to a slower cadence off-screen (see setForeground).
+        agentSessions.setForeground(live && tab == .agents)
         spectrum.setActive(spectrumShouldBeActive)
     }
 
@@ -1698,7 +1699,6 @@ struct NotchView: View {
                     case .timer: TimerTab()
                     case .media: MediaTab()
                     case .tray: TrayTab()
-                    case .terminal: TerminalTab()
                     case .agents: AgentsTab()
                     case .servers: ServersTab()
                     case .calendar: CalendarTab()
