@@ -54,6 +54,16 @@ struct NotchView: View {
     /// cross-fade so the raw metaball silhouette is fully visible for geometry
     /// tuning (Phase 1). Off in normal use.
     private var liquidNavPink: Bool { UserDefaults.standard.bool(forKey: "LiquidNavPink") }
+    /// A glass ball that rides the selected page's glyph and slides to whichever
+    /// page you pick next (Settings → General → "Page bead").
+    ///
+    /// Needs macOS 26 for `.glassEffect`, but deliberately NOT tied to the Liquid
+    /// Glass surface style: the bead sits in its own layer behind the chips, so it
+    /// works over a Frosted capsule too — and with one less layer of glass under it
+    /// the ball actually reads slightly cleaner there.
+    private var pageBead: Bool {
+        settings.pageBead && IslandSurfaceStyle.liquidGlassAvailable
+    }
     /// `-LiquidNavFreeze <e>`: pin the morph at a STATIC reveal value (0…1) with
     /// no animation, so each beat-sheet frame can be captured deterministically
     /// instead of chasing a slowed loop. Absent in normal use.
@@ -83,6 +93,20 @@ struct NotchView: View {
     /// tapped. 0 until the first probe measurement lands (one layout pass) —
     /// until then the pill sizes naturally rather than collapsing to nothing.
     @State private var tabBarWidth: CGFloat = 0
+    /// Width reserved for the selected chip's title — the widest of every page's,
+    /// so the chip row measures the same no matter which page is on.
+    ///
+    /// Without this, locking the pill to its widest reachable width leaves dead
+    /// pill past the last chip whenever a shorter title is selected: ~11pt of empty
+    /// pill on "Media" versus "Calendar", which reads as a lopsided gap between the
+    /// pages and the pin. The slack has to go somewhere — dead pill, or motion if
+    /// the pill hugs instead, or smeared into the chip gaps. Reserving the widest
+    /// title is the only option with neither: the content width simply never
+    /// changes, so the pill hugs it exactly AND nothing moves.
+    @State private var titleSlot: CGFloat = 0
+    /// Measured glyph centres in the chip row's space — where the travelling bead
+    /// aims. See `pageBead`.
+    @State private var tabIconCenters: [NotchTab: CGFloat] = [:]
     /// Live glyph centers of the nav controls (in navRow space) + row width,
     /// fed to LiquidNav so each icon-melt dot lands exactly on its real icon.
     @State private var navIconCenters: [CGFloat] = []
@@ -531,6 +555,8 @@ struct NotchView: View {
             // Same probe, the pill alone — locks the live pill's width so the
             // row stops breathing on page switches (see `tabBarWidth`).
             .onPreferenceChange(NavTabBarWidthKey.self) { tabBarWidth = $0 }
+            .onPreferenceChange(NavTitleWidthKey.self) { titleSlot = $0 }
+            .onPreferenceChange(TabIconCenterKey.self) { tabIconCenters = $0 }
             // Hug-sized tabs report their natural content height; published on
             // NotchState so AppDelegate's hover rect tracks the same height.
             .onPreferenceChange(TabHugHeightKey.self) { state.tabHugHeight = $0 }
@@ -1175,6 +1201,83 @@ struct NotchView: View {
     /// through this — reading the raw @State inside withAnimation snaps
     /// straight to the end value, so the branch logic never sees mid-flight
     /// t's and the liquid never draws a live frame.
+    /// Where each page's glyph actually sits in the chip row. MEASURED, not
+    /// derived: the icons are SF Symbols whose widths differ per symbol, so
+    /// accumulating paddings and gaps would drift a point or two per chip and the
+    /// bead would sit visibly off-centre on some pages.
+    private struct TabIconCenterKey: PreferenceKey {
+        static var defaultValue: [NotchTab: CGFloat] = [:]
+        static func reduce(value: inout [NotchTab: CGFloat],
+                           nextValue: () -> [NotchTab: CGFloat]) {
+            value.merge(nextValue()) { _, new in new }
+        }
+    }
+
+    /// The travelling bead, in its own layer BEHIND the chips.
+    ///
+    /// This is the arrangement that satisfies both constraints at once. The
+    /// container may keep drawing its glass above its own siblings — there are no
+    /// glyphs in here to ruin, only the bead — while the chips, glyphs and titles
+    /// live entirely OUTSIDE it and stay crisp. Same shape as the fix for the
+    /// nav-pearling washout: glass in the container, content above it.
+    ///
+    /// ONE bead that persists and slides, NOT a per-chip bead morphed by a shared
+    /// `glassEffectID`. That was the first attempt and it crossfades rather than
+    /// travels: filmed at 10×, the bead sat on the old glyph while a second one
+    /// formed on the new one. `glassEffectID` only reads as movement when the two
+    /// shapes are within the container's merge distance, and adjacent glyphs here
+    /// are ~55pt apart with the far ends ~180pt — nothing to morph through.
+    ///
+    /// A single view whose `offset` animates does travel, and it rides the row's own
+    /// spring, so the bead and the chips move on exactly one curve. No container
+    /// either: without `glassEffectID` it buys nothing, and less machinery in the
+    /// glass path is strictly better.
+    @available(macOS 26.0, *)
+    private struct BeadLayer: View {
+        let selected: NotchTab
+        let centers: [NotchTab: CGFloat]
+
+        var body: some View {
+            // Nothing until the first layout reports where the glyphs are —
+            // otherwise the bead would start at x=0 and fly in from the pill's edge.
+            if let cx = centers[selected] {
+                Color.clear
+                    .frame(width: 22, height: 22)
+                    .glassEffect(.regular, in: Circle())
+                    // Leading-aligned layer, so centre − radius puts the bead's
+                    // middle on the glyph.
+                    .offset(x: cx - 11)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// The selected page's title arriving.
+    ///
+    /// A bare `if selected { Text(…) }` drops the label in at full size and full
+    /// weight the instant the chip has room for it, which is the fast sideways pop:
+    /// the chip's capsule is still springing open rightward while the finished
+    /// label is already sitting there, so the label reads as being shoved out
+    /// sideways by the growing pill rather than as belonging to it.
+    ///
+    /// This resolves it out of nothing instead. Anchored at the LEADING edge, so
+    /// the growth runs the same direction the pill is opening and the glyph beside
+    /// it never appears to shift; blurred at the start, so it condenses into focus
+    /// the way the glass settles rather than snapping to sharp. `.blurReplace`
+    /// would be the stock equivalent but it is macOS 14+, and this ships to 13.
+    /// No horizontal scale here — the chip's `.clipShape(Capsule())` already does
+    /// the sideways reveal, and doing both made the glyphs stretch. This is only
+    /// the softness: the label condenses out of a blur as the capsule uncovers it,
+    /// so it resolves into focus rather than arriving finished.
+    private struct TitleReveal: ViewModifier {
+        let shown: Bool
+        func body(content: Content) -> some View {
+            content
+                .blur(radius: shown ? 0 : 2.5)
+                .opacity(shown ? 1 : 0)
+        }
+    }
+
     /// Window-drag for the pinned island. `WindowDragGesture` is macOS 15+;
     /// below that the modifier is inert (pin still holds the island open, it
     /// just isn't parkable).
@@ -1224,6 +1327,15 @@ struct NotchView: View {
     /// (one layout per visible tab, max-reduced) and used to LOCK the live pill
     /// to that width. See `tabBarWidth`.
     private struct NavTabBarWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+    /// Widest page TITLE, again from the probe only. The selected chip reserves
+    /// exactly this much for its label whatever page it is, which is what keeps the
+    /// chip row's total width constant. See `titleSlot`.
+    private struct NavTitleWidthKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
             value = max(value, nextValue())
@@ -1647,6 +1759,21 @@ struct NotchView: View {
                 tabChip(tab, selectedOverride: selectedOverride, emitWidth: !measuring)
             }
         }
+        // Prototype: the bead's morph container. Off on the measuring path — the
+        // probe lays the row out once per tab, so its off-screen copies would all
+        // claim the same glassEffectID and fight the live one for it.
+        // The chip row's own coordinate space, so each glyph can report where it
+        // sits and the bead layer below can be positioned in the same frame.
+        .coordinateSpace(name: "chiprow")
+        // The bead rides BEHIND the chips: `.background` here is inside the pill
+        // (applied further out), so the stack is pill → bead → chips, and the glyph
+        // stays crisp on top of the glass.
+        .background(alignment: .leading) {
+            if pageBead, !measuring, #available(macOS 26.0, *) {
+                BeadLayer(selected: selectedOverride ?? state.currentTab,
+                          centers: tabIconCenters)
+            }
+        }
         .padding(2)
         // LOCKED WIDTH — the fix for the bar reshuffling on every page switch.
         // Held to the widest pill the visible set can produce, leading-aligned,
@@ -1690,13 +1817,19 @@ struct NotchView: View {
         )
         .coordinateSpace(name: "tabbar")
         .onPreferenceChange(TabChipWidthKey.self) { if !measuring { chipWidths = $0 } }
-        // CRITICALLY DAMPED (0.24/1.0), not the old 0.3/0.8. One transaction here
-        // carries chip width, chip position, the label color and the selection
-        // capsule's fill, so at 0.8 a dozen chips all overshot their target and
-        // swung back at once — the single biggest contributor to the switch
-        // reading as unsettled. At 1.0 the reflow arrives and stops; the shorter
-        // response keeps it from feeling sluggish for losing the bounce.
-        .animation(measuring ? nil : .spring(response: 0.24, dampingFraction: 1.0), value: state.currentTab)
+        // CRITICALLY DAMPED (0.34/1.0), not the old 0.30/0.8. ONE curve drives
+        // everything the switch touches — chip width, chip position, label color,
+        // the selection capsule's fill, and (through the capsule's clip) the
+        // title's reveal. At 0.8 a dozen chips overshot and swung back at once,
+        // the single biggest contributor to the switch reading as unsettled; at
+        // 1.0 the reflow arrives and stops.
+        //
+        // 0.34 rather than the original 0.30: with the bounce gone there is no
+        // wobble to outrun, and the extra 40ms is what lets the capsule visibly
+        // open BEFORE the label finishes condensing into it instead of the two
+        // happening at once. Shortening it instead (0.24 was tried) snapped the
+        // pill open faster than the label could resolve and made the pop worse.
+        .animation(measuring ? nil : .spring(response: 0.34, dampingFraction: 1.0), value: state.currentTab)
         .animation(measuring ? nil : .easeOut(duration: 0.12), value: swipeTarget)
     }
 
@@ -1713,11 +1846,42 @@ struct NotchView: View {
         return HStack(spacing: 4) {
             dotAnchor(Image(systemName: tab.icon)
                 .font(.system(size: 11, weight: .medium)))
+                // Prototype: the glass bead rides the SELECTED page's glyph.
+                // `emitWidth` is the live path (the probe passes it false), the
+                // same signal the reorder plumbing keys off.
+                // Report this glyph's centre in the chip row's own space, so the
+                // travelling bead can land exactly on it. Live path only — the
+                // probe's off-screen rows would report their own coordinates.
+                .background(GeometryReader { g in
+                    Color.clear.preference(
+                        key: TabIconCenterKey.self,
+                        value: emitWidth
+                            ? [tab: g.frame(in: .named("chiprow")).midX] : [:])
+                })
             if selected {
                 Text(tab.title)
                     .font(.system(size: 11, weight: .semibold))
+                    .fixedSize()
+                    // Report the natural title width from the PROBE only (it lays
+                    // the row out once per page, so max-reducing across its copies
+                    // is the widest title) — then the live chip reserves that.
+                    .background(GeometryReader { g in
+                        Color.clear.preference(key: NavTitleWidthKey.self,
+                                               value: emitWidth ? 0 : g.size.width)
+                    })
+                    // Centred, not leading: the slack is split around a short title
+                    // so the chip stays optically balanced. Leading-aligned would
+                    // just move the lopsided gap from the pill into the chip.
+                    .frame(width: (emitWidth && titleSlot > 0) ? titleSlot : nil)
+                    .transition(.modifier(active: TitleReveal(shown: false),
+                                          identity: TitleReveal(shown: true)))
             }
         }
+        // Prototype diagnostic: the bead is LIGHT glass, so a white glyph on it is
+        // white-on-light and vanishes. If a dark glyph reads, the bead is correctly
+        // behind the icon and this is purely a contrast problem; if it still
+        // vanishes, the glass is compositing OVER the icon and the whole
+        // bead-behind arrangement is unusable.
         .foregroundStyle(selected ? .white
                          : .white.opacity(targeted ? 0.9 : 0.45))
         // Adaptive horizontal padding (see `chipPadUnselected`): with a full tab set
@@ -1739,6 +1903,18 @@ struct NotchView: View {
             Capsule().fill(.white.opacity(
                 isDragging ? 0.3 : (selected ? 0.16 : (targeted ? 0.09 : 0))))
         )
+        // The capsule IS the title's reveal. The chip's width springs open, and
+        // clipping the content to that animating capsule wipes the label into view
+        // from behind its edge — which is why the label needs no sideways animation
+        // of its own, and why it can no longer overhang.
+        //
+        // Filmed at 10× before this: the label was laid out at full size the moment
+        // it was inserted and stayed razor-sharp OUTSIDE the capsule for the whole
+        // spring, then dissolved at the very end. That mismatch — finished text
+        // sitting past an edge that is still travelling — is what read as a fast
+        // sideways pop. Clipping ties the two together for free, with no measured
+        // title width and no second animation to keep in sync.
+        .clipShape(Capsule())
         // Measure width (stable, position-independent) for the reorder math.
         .background(GeometryReader { geo in
             Color.clear.preference(key: TabChipWidthKey.self,

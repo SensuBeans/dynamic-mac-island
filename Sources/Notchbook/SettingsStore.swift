@@ -31,6 +31,10 @@ final class SettingsStore: ObservableObject {
     /// Liquid Glass choice on an older machine instead of failing. Stays "" until
     /// the user picks something, so the default can be changed later in one place.
     @Published var surfaceStyle: String { didSet { set(surfaceStyle, "general.surfaceStyle") } }
+    /// A glass ball on the current page's icon in the nav bar, sliding to the next
+    /// page you pick. Needs macOS 26 (`.glassEffect`); the settings row is disabled
+    /// below that. Off★ — it is an addition to the bar, not part of its base look.
+    @Published var pageBead: Bool { didSet { set(pageBead, "general.pageBead") } }
     /// Dwell before a hover opens the panel, seconds. instant★ / 0.2 / 0.5.
     @Published var expandDelay: Double { didSet { set(expandDelay, "general.expandDelay") } }
     @Published var haptics: Bool { didSet { set(haptics, "general.haptics") } }
@@ -128,6 +132,7 @@ final class SettingsStore: ObservableObject {
             // "" = nobody has chosen; IslandSurfaceStyle.resolve reads that as
             // frosted, i.e. exactly the pre-Liquid-Glass look.
             "general.surfaceStyle": "",
+            "general.pageBead": false,
             "general.expandDelay": 0.0,
             "general.haptics": true,
             "general.toastDuration": 3.0,
@@ -175,6 +180,7 @@ final class SettingsStore: ObservableObject {
         hideInFullscreen = defaults.bool(forKey: "general.hideInFullscreen")
         navAtBottom = defaults.bool(forKey: "general.navAtBottom")
         surfaceStyle = defaults.string(forKey: "general.surfaceStyle") ?? ""
+        pageBead = defaults.bool(forKey: "general.pageBead")
         expandDelay = defaults.double(forKey: "general.expandDelay")
         haptics = defaults.bool(forKey: "general.haptics")
         toastDuration = defaults.double(forKey: "general.toastDuration")

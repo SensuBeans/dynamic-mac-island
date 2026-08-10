@@ -381,6 +381,12 @@ struct SettingsGeneralPage: View {
         return opts
     }
 
+    private var beadHelp: String {
+        IslandSurfaceStyle.liquidGlassAvailable
+            ? "A glass ball on the current page's icon that slides to the next one"
+            : "Needs macOS 26"
+    }
+
     private var surfaceHelp: String {
         IslandSurfaceStyle.liquidGlassAvailable
             ? "How the nav bar, panel, toasts and agent pill are painted"
@@ -418,6 +424,11 @@ struct SettingsGeneralPage: View {
             SettingRow(label: "Island surface", help: surfaceHelp) {
                 SettingSegmented(selection: surface, options: surfaceOptions)
             }
+            SettingRow(label: "Page bead", help: beadHelp) {
+                SettingSwitch(isOn: $settings.pageBead)
+            }
+            .disabled(!IslandSurfaceStyle.liquidGlassAvailable)
+            .opacity(IslandSurfaceStyle.liquidGlassAvailable ? 1 : 0.4)
             SettingRow(label: "Haptics") {
                 SettingSwitch(isOn: $settings.haptics)
             }

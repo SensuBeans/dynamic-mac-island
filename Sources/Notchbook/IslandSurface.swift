@@ -124,9 +124,27 @@ struct IslandSurface<S: InsettableShape>: ViewModifier {
         switch effective {
         case .liquidGlass:
             if #available(macOS 26.0, *) {
+                // The substrate is NOT optional here, and it is not (only) the
+                // chroma damper Deck describes. `.glassEffect` refracts content
+                // inside its OWN window; the island's window is transparent, so
+                // without the substrate there is nothing behind the capsule for the
+                // glass to lens and it renders as a flat translucent film. Removing
+                // it was tried against a saturated test pattern pinned under the
+                // notch: the bars showed through as plain transparency with no
+                // bending at all. The NSVisualEffectView is what samples the
+                // desktop; the glass lenses that sample.
+                //
+                // `.underWindowBackground` rather than the `.hudWindow` the frosted
+                // style uses: hudWindow is very dark, so it hands the glass an
+                // almost black sample and there is nothing left to see refracted.
+                // This one retains far more of what is actually behind the island,
+                // which is what gives the lensing something to bend.
                 Color.clear
                     .glassEffect(glass, in: shape)
-                    .background { VisualEffectBlur().clipShape(shape) }
+                    .background {
+                        VisualEffectBlur(material: .underWindowBackground)
+                            .clipShape(shape)
+                    }
             } else {
                 // Not reachable — `resolve` already downgrades below 26 — but it
                 // renders the frosted ground rather than nothing, so that if
