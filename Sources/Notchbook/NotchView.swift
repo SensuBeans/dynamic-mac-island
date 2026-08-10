@@ -14,11 +14,18 @@ struct NotchView: View {
     @EnvironmentObject var toggles: TogglesModel
     @EnvironmentObject var stats: StatsModel
     @EnvironmentObject var pomodoro: PomodoroModel
-    @EnvironmentObject var spectrum: AudioSpectrum
     @EnvironmentObject var settings: SettingsStore
     @EnvironmentObject var agentSessions: AgentSessionsModel
     @EnvironmentObject var servers: ServersModel
     let metrics: NotchMetrics
+    /// A PLAIN reference, deliberately not `@EnvironmentObject`.
+    ///
+    /// The root only ever calls `setActive` on this; it reads nothing published.
+    /// Observing it would re-invalidate the whole tree on every audio sample
+    /// (17 Hz) — the exact cost `AmbientGlow` was extracted to remove — because
+    /// SwiftUI observation is per-object, not per-property. The views that DO
+    /// need the levels take their own `@EnvironmentObject`.
+    let spectrum: AudioSpectrum
 
     /// The material every floating island is painted with, resolved once here so
     /// each call site passes a value instead of re-reading the store. `resolve`
@@ -41,7 +48,6 @@ struct NotchView: View {
     @State private var chipWidths: [NotchTab: CGFloat] = [:]
     /// Accumulated rotation of the ambient color layers. Advances with each
     /// audio sample — faster when the music is loud, frozen when paused.
-    @State private var colorPhase: Double = 0
     /// Nav-bar reveal progress (0 = melted into the panel, 1 = separated
     /// capsule). Driven off `navShown` on an easeInOutCubic timing curve; drives
     /// the LiquidNav goo morph, the panel's downward shift, and the controls' fade-in.
@@ -797,12 +803,6 @@ struct NotchView: View {
             // already in fullscreen — re-evaluate the tap to match.
             spectrum.setActive(spectrumShouldBeActive)
         }
-        .onChange(of: spectrum.levels) { levels in
-            // Each fresh audio sample nudges the ambient colors along,
-            // loudness sets the pace; no samples (paused) — no motion.
-            guard !levels.isEmpty else { return }
-            colorPhase += 0.5 + 2.0 * Double(ambientPulse)
-        }
         .onChange(of: dropTargeted) { targeted in
             if targeted && !state.isExpanded && settings.trayOpenOnDrag {
                 state.currentTab = .tray
@@ -867,25 +867,6 @@ struct NotchView: View {
         // only steps DOWN to a slower cadence off-screen (see setForeground).
         agentSessions.setForeground(live && tab == .agents)
         spectrum.setActive(spectrumShouldBeActive)
-    }
-
-    /// One oversized square copy of the artwork for the ambient background —
-    /// square and larger than the panel's diagonal, so rotation never shows
-    /// a corner.
-    private func ambientLayer(_ art: NSImage, side: CGFloat) -> some View {
-        Image(nsImage: art)
-            .resizable()
-            .aspectRatio(contentMode: .fill)
-            .frame(width: side, height: side)
-    }
-
-    /// Current music loudness (0…1) for the ambient background, averaged over
-    /// the newest few samples so the glow breathes rather than strobes. Zero
-    /// while paused — the tap is off, so the background settles to its base.
-    private var ambientPulse: CGFloat {
-        let recent = spectrum.levels.suffix(3)
-        guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
-        return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
     }
 
     /// Whether the audio tap should be running: the live-waveform setting is on,
@@ -968,11 +949,8 @@ struct NotchView: View {
                                         // synthetic sine is indistinguishable
                                         // from a live waveform, so a denied
                                         // permission would look like it works.
-                                        EqualizerBars(barCount: 4, maxHeight: 14,
-                                                      color: media.accent,
-                                                      animating: spectrum.failure == nil,
-                                                      levels: !spectrum.levels.isEmpty
-                                                          ? spectrum.levels : nil)
+                                        LiveEqualizer(barCount: 4, maxHeight: 14,
+                                                      color: media.accent)
                                     } else {
                                         Image(systemName: "play.fill")
                                             .font(.system(size: 10))
@@ -1658,30 +1636,12 @@ struct NotchView: View {
             // Media tab only; every other tab is pinned to Subtle so the
             // artwork never upstages the page being read.
             if let art = media.artwork, settings.ambientGlow {
-                let pulse = ambientPulse
-                let intensity = state.currentTab == .media
-                    ? settings.glowIntensity : 0.6
-                ZStack {
-                    ambientLayer(art, side: size.width)
-                        .scaleEffect(1.6 + 0.25 * pulse)
-                        .rotationEffect(.degrees(colorPhase))
-                    ambientLayer(art, side: size.width)
-                        .scaleEffect(1.95 + 0.3 * pulse)
-                        .rotationEffect(.degrees(140 - colorPhase * 1.6))
-                        .offset(x: 30 * cos(colorPhase / 40),
-                                y: 18 * sin(colorPhase / 47))
-                        .opacity(0.6)
-                }
-                .blur(radius: 46)
-                .saturation(1.5 + 0.5 * pulse)
-                .opacity((0.32 + 0.2 * pulse) * intensity)
-                .frame(width: size.width, height: size.height)
-                .allowsHitTesting(false)
-                .animation(.linear(duration: 0.14), value: colorPhase)
-                .animation(.easeOut(duration: 0.16), value: pulse)
-                // Tab switches crossfade the intensity change — no pop when
-                // entering/leaving Media.
-                .animation(.easeInOut(duration: 0.35), value: state.currentTab)
+                AmbientGlow(art: art, size: size,
+                            intensity: state.currentTab == .media
+                                ? settings.glowIntensity : 0.6)
+                    // Tab switches crossfade the intensity change — no pop when
+                    // entering/leaving Media.
+                    .animation(.easeInOut(duration: 0.35), value: state.currentTab)
             }
             expandedContent
                 .frame(width: size.width, height: size.height, alignment: .top)
@@ -2037,5 +1997,97 @@ struct NotchView: View {
             }
         }
         return accepted
+    }
+}
+
+/// The album-artwork glow behind the panel, in its OWN view.
+///
+/// This used to live inline in `NotchView.contentIsland`, with its rotation
+/// phase as `@State` on NotchView and its loudness read from the root's
+/// `@EnvironmentObject var spectrum`. Both are 17 Hz signals — the audio tap
+/// publishes every 0.06 s — so each sample invalidated the ENTIRE root body:
+/// the island, all four Liquid morph relays, the ten-copy nav width probe, and
+/// the current tab's whole view, which stays mounted while collapsed. That ran
+/// continuously whenever music played with the media ear showing, which is the
+/// app's normal idle state.
+///
+/// Observation in SwiftUI is per-OBJECT, not per-property, so throttling the
+/// samples would not have helped while the root still observed the spectrum.
+/// The phase and the observation both had to move down here, where invalidation
+/// costs one blurred image pair instead of the whole tree.
+private struct AmbientGlow: View {
+    let art: NSImage
+    let size: CGSize
+    let intensity: Double
+
+    @EnvironmentObject private var spectrum: AudioSpectrum
+    @EnvironmentObject private var media: MediaWatcher
+    @State private var colorPhase: Double = 0
+
+    /// Music loudness (0…1), averaged over the newest few samples so the glow
+    /// breathes rather than strobes. Zero while paused — the tap is off, so the
+    /// background settles to its base.
+    private var pulse: CGFloat {
+        let recent = spectrum.levels.suffix(3)
+        guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
+        return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
+    }
+
+    /// One oversized square copy of the artwork — square and larger than the
+    /// panel's diagonal, so rotation never shows a corner.
+    private func layer() -> some View {
+        Image(nsImage: art)
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: size.width, height: size.width)
+    }
+
+    var body: some View {
+        let p = pulse
+        ZStack {
+            layer()
+                .scaleEffect(1.6 + 0.25 * p)
+                .rotationEffect(.degrees(colorPhase))
+            layer()
+                .scaleEffect(1.95 + 0.3 * p)
+                .rotationEffect(.degrees(140 - colorPhase * 1.6))
+                .offset(x: 30 * cos(colorPhase / 40),
+                        y: 18 * sin(colorPhase / 47))
+                .opacity(0.6)
+        }
+        .blur(radius: 46)
+        .saturation(1.5 + 0.5 * p)
+        .opacity((0.32 + 0.2 * p) * intensity)
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+        .animation(.linear(duration: 0.14), value: colorPhase)
+        .animation(.easeOut(duration: 0.16), value: p)
+        // Each fresh audio sample nudges the colors along; loudness sets the
+        // pace, and no samples (paused) means no motion.
+        .onChange(of: spectrum.levels) { levels in
+            guard !levels.isEmpty else { return }
+            colorPhase += 0.5 + 2.0 * Double(p)
+        }
+    }
+}
+
+/// `EqualizerBars` wired to the live audio tap, observing the spectrum ITSELF.
+///
+/// Call sites used to read `spectrum.levels` inline, which forced whatever view
+/// contained them to observe the tap and re-render at 17 Hz. Pulling the
+/// observation down to this leaf keeps the invalidation to four bars.
+struct LiveEqualizer: View {
+    var barCount: Int
+    var maxHeight: CGFloat
+    var color: Color
+
+    @EnvironmentObject private var spectrum: AudioSpectrum
+
+    var body: some View {
+        // A dead tap must not animate: the synthetic sine is indistinguishable
+        // from a live waveform, so a denied permission would look like it works.
+        EqualizerBars(barCount: barCount, maxHeight: maxHeight, color: color,
+                      animating: spectrum.failure == nil,
+                      levels: spectrum.levels.isEmpty ? nil : spectrum.levels)
     }
 }

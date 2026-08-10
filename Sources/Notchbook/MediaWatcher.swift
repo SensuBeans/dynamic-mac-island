@@ -434,25 +434,50 @@ final class MediaWatcher: ObservableObject {
 
     /// One-shot sync so a track already playing at launch shows up without
     /// waiting for the next player event. Never launches the players.
+    /// Re-read what is playing. ASYNCHRONOUS — it returns immediately and updates
+    /// `nowPlaying` when the players answer.
+    ///
+    /// This used to run `NSAppleScript.executeAndReturnError` inline, on the main
+    /// thread, once per running player. `expand()` calls it on the very frame that
+    /// starts the open animation, so a paused-but-running Music plus a running
+    /// Spotify meant two serialized Apple Event round trips before the panel could
+    /// draw. Warm that is 30-80 ms; cold, indexing or busy it is hundreds of
+    /// milliseconds to seconds, and an unresponsive player hangs on AppKit's
+    /// two-minute Apple Event timeout — freezing the whole overlay. Every other hot
+    /// path in this file had already moved off-main; this one had not.
     func refresh() {
-        for source in [Source.music, .spotify] where isRunning(source) {
-            let script = """
-            tell application "\(source.rawValue)"
-                if player state is stopped then return ""
-                set t to name of current track
-                set a to artist of current track
-                set s to (player state is playing) as text
-                return t & linefeed & a & linefeed & s
-            end tell
-            """
-            guard let out = runAppleScript(script)?.stringValue, !out.isEmpty else { continue }
-            let parts = out.components(separatedBy: "\n")
-            guard parts.count >= 3 else { continue }
+        askNextSource(Array([Source.music, .spotify].filter(isRunning)))
+    }
+
+    /// Walk the running players one at a time, stopping at the first that is
+    /// actually PLAYING. Sequential rather than concurrent so the old precedence
+    /// (Music wins over Spotify) is preserved exactly, and so a stopped player
+    /// costs nothing beyond its own round trip.
+    private func askNextSource(_ remaining: [Source]) {
+        var rest = remaining
+        guard !rest.isEmpty else { return }
+        let source = rest.removeFirst()
+        let script = """
+        tell application "\(source.rawValue)"
+            if player state is stopped then return ""
+            set t to name of current track
+            set a to artist of current track
+            set s to (player state is playing) as text
+            return t & linefeed & a & linefeed & s
+        end tell
+        """
+        runScriptAsync(script) { [weak self] out in    // delivers on main
+            guard let self else { return }
+            let parts = (out ?? "").components(separatedBy: "\n")
+            guard let out, !out.isEmpty, parts.count >= 3 else {
+                self.askNextSource(rest)
+                return
+            }
             let np = NowPlaying(title: parts[0], artist: parts[1],
                                 isPlaying: parts[2] == "true", source: source)
-            nowPlaying = np
-            fetchArtworkIfNeeded(for: np)
-            if np.isPlaying { break }
+            self.nowPlaying = np
+            self.fetchArtworkIfNeeded(for: np)
+            if !np.isPlaying { self.askNextSource(rest) }
         }
     }
 

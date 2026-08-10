@@ -973,13 +973,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         state.saveNow()
+        // The LOCAL notes store is flushed by saveNow above; Apple Notes edits are
+        // debounced 2 s and were not flushed by anything, so quitting inside that
+        // window kept the text in the island's cache forever while Notes never
+        // received it — a silent, permanent divergence with no indication.
+        notesSync.flushPendingEdits()
         toggles.shutdown()
         agentSessions.shutdown()
         if settings.trayClearOnQuit { tray.clear() }
     }
 
     private func makeRoot() -> AnyView {
-        AnyView(NotchView(metrics: metrics)
+        AnyView(NotchView(metrics: metrics, spectrum: spectrum)
             .environmentObject(state)
             .environmentObject(media)
             .environmentObject(tray)

@@ -38,6 +38,10 @@ final class StatsModel: ObservableObject {
     var hiddenTiles: Set<String> = []
 
     private var timer: Timer?
+    /// Serial queue for the slow IOKit / filesystem probes, so they never run on
+    /// the main run loop alongside the island's animations.
+    private let probeQueue = DispatchQueue(label: "com.sensubeans.notchbook.stats",
+                                           qos: .utility)
     private var prevTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)?
     private let smc = SMC()
     /// `mach_host_self()` returns a send right that must be released; cache it
@@ -65,18 +69,93 @@ final class StatsModel: ObservableObject {
         }
     }
 
+    /// CPU and memory are `host_statistics` calls costing microseconds, so they
+    /// stay inline. Disk, GPU and fan do not: an APFS capacity computation walks
+    /// snapshots, `IORegistryEntryCreateCFProperties` serialises the accelerator's
+    /// ENTIRE property dictionary out of the kernel, and the SMC read is up to six
+    /// IOKit round trips. Together they ran on the main run loop every 2 s — the
+    /// same run loop driving the panel's spring animations — so they move to a
+    /// background queue and publish their results back in one hop.
     private func poll() {
         if !hiddenTiles.contains("cpu") { pollCPU() }
         if !hiddenTiles.contains("memory") { pollMemory() }
-        if !hiddenTiles.contains("disk") { pollDisk() }
-        if !hiddenTiles.contains("gpu") { pollGPU() }
-        if !hiddenTiles.contains("battery") { pollBattery() }
-        if !hiddenTiles.contains("fan") {
-            fanRPM = smc?.fanRPM() ?? -1
-            unavailable["fan"] = smc == nil ? "No AppleSMC service on this Mac"
-                : (fanRPM < 0 ? "SMC has no F0Ac key (no fan?)" : nil)
-            if fanMax == 0, let r = smc?.fanRange() { fanMin = r.min; fanMax = r.max }
+
+        let wantDisk = !hiddenTiles.contains("disk")
+        let wantGPU = !hiddenTiles.contains("gpu")
+        let wantBattery = !hiddenTiles.contains("battery")
+        let wantFan = !hiddenTiles.contains("fan")
+        let needRange = fanMax == 0
+        guard wantDisk || wantGPU || wantBattery || wantFan else { return }
+
+        probeQueue.async { [weak self] in
+            guard let self else { return }
+            let disk = wantDisk ? Self.probeDisk() : nil
+            let gpu = wantGPU ? Self.probeGPU() : nil
+            let battery = wantBattery ? Self.probeBattery() : nil
+            let rpm = wantFan ? (self.smc?.fanRPM() ?? -1) : nil
+            let range = (wantFan && needRange) ? self.smc?.fanRange() : nil
+            let noSMC = self.smc == nil
+
+            DispatchQueue.main.async {
+                if let disk {
+                    self.diskFree = disk.free
+                    self.diskTotal = disk.total
+                    self.unavailable["disk"] = disk.error
+                }
+                if let gpu {
+                    self.gpu = gpu.value
+                    self.unavailable["gpu"] = gpu.error
+                }
+                if let battery {
+                    self.batteryLevel = battery.level
+                    self.batteryCharging = battery.charging
+                    self.unavailable["battery"] = battery.error
+                }
+                if let rpm {
+                    self.fanRPM = rpm
+                    self.unavailable["fan"] = noSMC ? "No AppleSMC service on this Mac"
+                        : (rpm < 0 ? "SMC has no F0Ac key (no fan?)" : nil)
+                }
+                if let range { self.fanMin = range.min; self.fanMax = range.max }
+            }
         }
+    }
+
+    /// Probes below are `static` and return plain values on purpose: they run on
+    /// `probeQueue`, so they must not touch any `@Published` state.
+    private static func probeDisk() -> (free: Double, total: Double, error: String?) {
+        guard let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys:
+            [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
+        else { return (0, 0, "Couldn't read the boot volume") }
+        return (Double(v.volumeAvailableCapacityForImportantUsage ?? 0),
+                Double(v.volumeTotalCapacity ?? 0), nil)
+    }
+
+    private static func probeGPU() -> (value: Double, error: String?) {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                           IOServiceMatching("IOAccelerator"),
+                                           &iterator) == kIOReturnSuccess else {
+            return (-1, "No IOAccelerator service")
+        }
+        defer { IOObjectRelease(iterator) }
+        var entry = IOIteratorNext(iterator)
+        while entry != 0 {
+            var props: Unmanaged<CFMutableDictionary>?
+            if IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0)
+                == kIOReturnSuccess,
+               let dict = props?.takeRetainedValue() as? [String: Any],
+               let perf = dict["PerformanceStatistics"] as? [String: Any],
+               let util = perf["Device Utilization %"] as? Int {
+                IOObjectRelease(entry)
+                return (Double(util) / 100, nil)
+            }
+            IOObjectRelease(entry)
+            entry = IOIteratorNext(iterator)
+        }
+        // Fell through every node without finding the key — say so instead of
+        // leaving the last reading frozen on screen.
+        return (-1, "IOAccelerator reports no Device Utilization %")
     }
 
     private func pollCPU() {
@@ -123,53 +202,12 @@ final class StatsModel: ObservableObject {
             + Double(vm.compressor_page_count)) * page
     }
 
-    private func pollDisk() {
-        guard let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys:
-            [.volumeAvailableCapacityForImportantUsageKey, .volumeTotalCapacityKey])
-        else {
-            diskTotal = 0; unavailable["disk"] = "Couldn't read the boot volume"; return
-        }
-        unavailable["disk"] = nil
-        diskFree = Double(v.volumeAvailableCapacityForImportantUsage ?? 0)
-        diskTotal = Double(v.volumeTotalCapacity ?? 0)
-    }
 
-    private func pollGPU() {
-        var iterator: io_iterator_t = 0
-        guard IOServiceGetMatchingServices(kIOMainPortDefault,
-                                           IOServiceMatching("IOAccelerator"),
-                                           &iterator) == kIOReturnSuccess else {
-            gpu = -1; unavailable["gpu"] = "No IOAccelerator service"; return
-        }
-        defer { IOObjectRelease(iterator) }
-        var entry = IOIteratorNext(iterator)
-        while entry != 0 {
-            var props: Unmanaged<CFMutableDictionary>?
-            if IORegistryEntryCreateCFProperties(entry, &props, kCFAllocatorDefault, 0)
-                == kIOReturnSuccess,
-               let dict = props?.takeRetainedValue() as? [String: Any],
-               let perf = dict["PerformanceStatistics"] as? [String: Any],
-               let util = perf["Device Utilization %"] as? Int {
-                gpu = Double(util) / 100
-                unavailable["gpu"] = nil
-                IOObjectRelease(entry)
-                return
-            }
-            IOObjectRelease(entry)
-            entry = IOIteratorNext(iterator)
-        }
-        // Fell through every node without finding the key — say so instead of
-        // leaving the last reading frozen on screen.
-        gpu = -1
-        unavailable["gpu"] = "IOAccelerator reports no Device Utilization %"
-    }
 
-    private func pollBattery() {
+    private static func probeBattery() -> (level: Double, charging: Bool, error: String?) {
         guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef]
-        else {
-            batteryLevel = -1; unavailable["battery"] = "No power-source data"; return
-        }
+        else { return (-1, false, "No power-source data") }
         for ps in list {
             guard let desc = IOPSGetPowerSourceDescription(blob, ps)?
                 .takeUnretainedValue() as? [String: Any],
@@ -179,13 +217,10 @@ final class StatsModel: ObservableObject {
                 (desc[kIOPSTypeKey] as? String) == kIOPSInternalBatteryType,
                 let current = desc[kIOPSCurrentCapacityKey] as? Int,
                 let max = desc[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
-            batteryLevel = Double(current) / Double(max)
-            batteryCharging = (desc[kIOPSIsChargingKey] as? Bool) ?? false
-            unavailable["battery"] = nil
-            return
+            return (Double(current) / Double(max),
+                    (desc[kIOPSIsChargingKey] as? Bool) ?? false, nil)
         }
-        batteryLevel = -1
-        unavailable["battery"] = "No internal battery"
+        return (-1, false, "No internal battery")
     }
 }
 

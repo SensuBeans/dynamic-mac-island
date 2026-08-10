@@ -799,7 +799,23 @@ final class AgentSessionsModel: ObservableObject {
         if parser == nil {
             // New file: adopt only if live (ignore transcripts already past the
             // drop threshold — an old file touched by a stray write stays out).
-            guard now.timeIntervalSince(mtime) < idleMax else { return }
+            //
+            // EXCEPT for a session with a live auto-resume arm. Such a session is
+            // silent BY DEFINITION: the usage cap stopped it mid-turn and it writes
+            // nothing until the reset, hours later. Across an app relaunch the arm
+            // is restored from disk but its transcript is long past idleMax, so it
+            // was refused adoption here — and `fireOne` then found no parser, took
+            // its TRANSIENT branch, retried for the full 15-minute window and gave
+            // up reporting "its transcript was mid-write". The transcript was never
+            // mid-write; it was never read. The resume simply could not happen.
+            //
+            // The file name is the sessionId, so the arm can be matched without
+            // parsing anything. `restoreResumeState()` runs before `scan()`, so the
+            // arms are already in place by the time this is consulted.
+            let sid = (path as NSString).lastPathComponent
+                .replacingOccurrences(of: ".jsonl", with: "")
+            guard now.timeIntervalSince(mtime) < idleMax || armedResumes[sid] != nil
+            else { return }
             let p = FileParser(path: path, now: now)
             parsers[path] = p
             parser = p
@@ -1520,7 +1536,10 @@ final class AgentSessionsModel: ObservableObject {
         // parser is TRANSIENT (the file is momentarily being rewritten).
         guard let p = parser(forID: a.sessionId) else {
             logDecision("fire-retry guard-parser session=\(sid)")
-            return .transient("its transcript was mid-write")
+            // Honest wording: this is "we have not read it", which covers a file
+            // genuinely mid-rewrite AND one we never adopted. Claiming "mid-write"
+            // outright sent people looking for a corrupt transcript that was fine.
+            return .transient("its transcript hasn't been read yet")
         }
         let transcriptAge = p.newestEntryTs.map { Date().timeIntervalSince($0) } ?? .infinity
 

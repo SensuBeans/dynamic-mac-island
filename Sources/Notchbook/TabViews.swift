@@ -9,7 +9,11 @@ struct NotesTab: View {
     @EnvironmentObject var notesSync: NotesSyncModel
     @EnvironmentObject var settings: SettingsStore
     var focus: FocusState<Bool>.Binding
-    @State private var notesIndex = 0
+    /// Apple Notes mode selects by stable note id — an index would silently
+    /// point at a different note every time a pull reorders `pages` by recency.
+    @State private var selectedID: String?
+    /// Browser: which folder sections are open (folder ids).
+    @State private var expandedFolders: Set<String> = []
     /// Confirm-before-clear: the trash button is "armed" for 2s after the
     /// first click when the setting is on; a second click within the window
     /// actually clears.
@@ -17,8 +21,42 @@ struct NotesTab: View {
     @State private var clearGen = 0
 
     private var isNotesMode: Bool { notesSync.mode == .notes }
+    private var browsing: Bool { isNotesMode && state.notesBrowsing }
+
+    /// The note the editor is currently backing.
+    private var currentPage: NotesSyncModel.Page? {
+        notesSync.pages.first { $0.id == selectedID } ?? notesSync.pages.first
+    }
 
     var body: some View {
+        ZStack(alignment: .top) {
+            // The editor stays MOUNTED behind the browser (hidden, inert). An
+            // AppKit-backed TextEditor pushes its initial empty text through the
+            // binding when it is rebuilt — tearing it down and back up for every
+            // browse would put that hazard on the note-writing path.
+            editorStack
+                .opacity(browsing ? 0 : 1)
+                .allowsHitTesting(!browsing)
+
+            if browsing {
+                notesBrowser
+                    .transition(.opacity)
+            }
+        }
+        .onAppear {
+            if isNotesMode { notesSync.refresh() } else { state.notesBrowsing = false }
+        }
+        .onDisappear { state.notesBrowsing = false }
+        .onChange(of: notesSync.mode) { _ in state.notesBrowsing = false }
+        .onChange(of: notesSync.folders.count) { _ in if browsing { seedExpansion() } }
+        .onChange(of: state.notesBrowsing) { on in
+            // Focus follows the visible surface: never leave the caret in a
+            // hidden editor.
+            focus.wrappedValue = !on && state.isExpanded && state.currentTab == .notes
+        }
+    }
+
+    private var editorStack: some View {
         VStack(spacing: 8) {
             TextEditor(text: editorText)
                 .focused(focus)
@@ -26,6 +64,7 @@ struct NotesTab: View {
                               design: settings.notesMonospaced ? .monospaced : .default))
                 .foregroundStyle(.white)
                 .scrollContentBackground(.hidden)
+                .disabled(isNotesMode && currentPage?.load != .ready)
                 .padding(6)
                 .background(
                     RoundedRectangle(cornerRadius: 10)
@@ -33,7 +72,12 @@ struct NotesTab: View {
                 )
 
             HStack {
-                if isNotesMode { notesChips } else { pageTabs }
+                if isNotesMode {
+                    browserToggle
+                    notesChips
+                } else {
+                    pageTabs
+                }
                 statusLabel
                 Spacer()
                 modeToggle
@@ -48,28 +92,22 @@ struct NotesTab: View {
                 }
             }
         }
-        .onAppear { if isNotesMode { notesSync.refresh() } }
-        .onChange(of: notesSync.pages.count) { count in
-            if notesIndex >= count { notesIndex = max(0, count - 1) }
-        }
     }
 
     /// The hidden (collapsed) editor must never write through to the store —
     /// an AppKit-backed TextEditor can push its initial empty text back
     /// through the binding during setup, which once wiped saved notes. The
     /// same guard protects Apple Notes mode (a push there would set the note's
-    /// body to empty).
+    /// body to empty), and extends to the browser: while the list is up the
+    /// editor is hidden, so nothing it emits may reach a note.
     private var editorText: Binding<String> {
         if isNotesMode {
             return Binding(
-                get: {
-                    notesSync.pages.indices.contains(notesIndex)
-                        ? notesSync.pages[notesIndex].body : ""
-                },
+                get: { currentPage?.body ?? "" },
                 set: { newValue in
-                    guard state.isExpanded,
-                          notesSync.pages.indices.contains(notesIndex) else { return }
-                    notesSync.edit(id: notesSync.pages[notesIndex].id, text: newValue)
+                    guard state.isExpanded, !state.notesBrowsing,
+                          let page = currentPage, page.load == .ready else { return }
+                    notesSync.edit(id: page.id, text: newValue)
                 })
         }
         return Binding(
@@ -81,12 +119,20 @@ struct NotesTab: View {
     }
 
     private var statusLabel: some View {
-        Text(isNotesMode
-             ? (notesSync.syncing ? "syncing…" : "Apple Notes")
+        Text(isNotesMode ? notesStatus
              : "\(state.pages[state.currentPage].count) chars · autosaved")
             .font(.system(size: 10))
             .foregroundStyle(.white.opacity(0.35))
+            .lineLimit(1)
             .padding(.leading, 6)
+    }
+
+    private var notesStatus: String {
+        switch currentPage?.load {
+        case .locked:  return "🔒 locked · read-only"
+        case .loading: return "opening…"
+        default:       return notesSync.syncing ? "syncing…" : "Apple Notes"
+        }
     }
 
     /// Cloud toggle: Local pages ↔ Apple Notes. (The settings page binds the
@@ -95,7 +141,7 @@ struct NotesTab: View {
     private var modeToggle: some View {
         Button {
             notesSync.setMode(isNotesMode ? .local : .notes)
-            notesIndex = 0
+            selectedID = nil
         } label: {
             Image(systemName: isNotesMode ? "cloud.fill" : "cloud")
                 .font(.system(size: 11))
@@ -142,26 +188,74 @@ struct NotesTab: View {
         }
     }
 
-    /// Apple Notes mode: one chip per note (title, ~10 chars) + a create chip.
+    /// Leads the Apple Notes chips row: opens the whole-library browser.
+    private var browserToggle: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.18)) { state.notesBrowsing = true }
+            seedExpansion()
+            notesSync.refresh()
+        } label: {
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+                .frame(width: 20, height: 16)
+                .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .help("Browse all notes")
+    }
+
+    /// Apple Notes mode: one chip per backed note + a create chip. Only the
+    /// first few fit the row — the browser reaches everything else — so the
+    /// current note is always swapped into the last visible slot.
+    private var visibleChips: [NotesSyncModel.Page] {
+        let pages = notesSync.pages
+        let maxChips = 4
+        guard pages.count > maxChips else { return pages }
+        var shown = Array(pages.prefix(maxChips))
+        if let current = currentPage, !shown.contains(where: { $0.id == current.id }) {
+            shown[maxChips - 1] = current
+        }
+        return shown
+    }
+
     private var notesChips: some View {
         HStack(spacing: 3) {
-            ForEach(Array(notesSync.pages.enumerated()), id: \.element.id) { idx, page in
-                let isCurrent = idx == notesIndex
-                Button { notesIndex = idx } label: {
-                    Text(chipTitle(page.title))
-                        .font(.system(size: 10, weight: isCurrent ? .bold : .regular))
-                        .foregroundStyle(isCurrent ? .black : .white.opacity(0.8))
-                        .lineLimit(1)
-                        .padding(.horizontal, 6)
-                        .frame(height: 16)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(.white.opacity(isCurrent ? 0.85 : 0.08))
-                        )
+            ForEach(visibleChips) { page in
+                let isCurrent = page.id == currentPage?.id
+                Button {
+                    selectedID = page.id
+                    // Claim it as the open note too. `applyIndex` keeps the 9
+                    // most-recently-modified notes PLUS `openID`, so a chip that
+                    // only set `selectedID` could be evicted by an ordinary pull —
+                    // after which `currentPage`'s `?? pages.first` fallback quietly
+                    // pointed the editor at a different note and the next keystroke
+                    // edited the wrong one.
+                    notesSync.open(id: page.id)
+                } label: {
+                    HStack(spacing: 3) {
+                        if page.load == .locked {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 7, weight: .bold))
+                        }
+                        Text(chipTitle(page.title))
+                            .font(.system(size: 10, weight: isCurrent ? .bold : .regular))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(isCurrent ? .black : .white.opacity(0.8))
+                    .padding(.horizontal, 6)
+                    .frame(height: 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(.white.opacity(isCurrent ? 0.85 : 0.08))
+                    )
                 }
                 .buttonStyle(.plain)
+                .help(page.title.isEmpty ? "Untitled" : page.title)
             }
-            Button { notesSync.createNote { notesIndex = 0 } } label: {
+            Button {
+                notesSync.createNote { id in if let id { selectedID = id } }
+            } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.7))
@@ -169,14 +263,176 @@ struct NotesTab: View {
                     .background(RoundedRectangle(cornerRadius: 5).fill(.white.opacity(0.08)))
             }
             .buttonStyle(.plain)
-            .help("New note in the sync folder")
+            .help("New note in the \(notesSync.folderName) folder")
         }
     }
 
     private func chipTitle(_ t: String) -> String {
         let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = s.isEmpty ? "Untitled" : s
-        return name.count > 10 ? String(name.prefix(10)) + "…" : name
+        return name.count > 8 ? String(name.prefix(8)) + "…" : name
+    }
+
+    // MARK: - All-notes browser
+
+    /// Replaces the editor in place (same footprint — the panel never resizes):
+    /// every Apple Notes folder as a collapsible section over its note titles.
+    private var notesBrowser: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Button { closeBrowser() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .buttonStyle(.plain)
+                .help("Back to the editor")
+                Text("All Notes")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("\(notesSync.folders.reduce(0) { $0 + $1.notes.count })")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.35))
+                Spacer(minLength: 0)
+                if notesSync.syncing {
+                    Text("syncing…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+            if notesSync.folders.isEmpty {
+                VStack {
+                    Spacer()
+                    Text(notesSync.syncing ? "Reading your library…" : "No folders found")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(notesSync.folders) { folder in
+                            folderSection(folder)
+                        }
+                    }
+                    .padding(.bottom, 2)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    @ViewBuilder
+    private func folderSection(_ folder: NotesSyncModel.NoteFolder) -> some View {
+        let open = expandedFolders.contains(folder.id)
+        Button {
+            withAnimation(.easeOut(duration: 0.16)) {
+                if open { expandedFolders.remove(folder.id) }
+                else { expandedFolders.insert(folder.id) }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.45))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                Text(folder.name)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                Text("\(folder.notes.count)")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(.white.opacity(0.1)))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+
+        if open {
+            ForEach(folder.notes) { note in
+                NoteBrowserRow(note: note,
+                               current: note.id == currentPage?.id,
+                               open: { openNote(note) })
+            }
+        }
+    }
+
+    /// Open on something useful rather than five collapsed headers: the folder
+    /// holding the current note, else the first folder that has any.
+    private func seedExpansion() {
+        guard expandedFolders.isEmpty, !notesSync.folders.isEmpty else { return }
+        let cur = currentPage?.id
+        let home = notesSync.folders.first { f in
+            cur != nil && f.notes.contains { $0.id == cur }
+        } ?? notesSync.folders.first { !$0.notes.isEmpty }
+        if let home { expandedFolders = [home.id] }
+    }
+
+    private func openNote(_ note: NotesSyncModel.NoteMeta) {
+        selectedID = note.id
+        notesSync.open(id: note.id)
+        closeBrowser()
+    }
+
+    private func closeBrowser() {
+        withAnimation(.easeOut(duration: 0.18)) { state.notesBrowsing = false }
+    }
+}
+
+/// One note row in the browser — glass row language, metadata only.
+private struct NoteBrowserRow: View {
+    let note: NotesSyncModel.NoteMeta
+    let current: Bool
+    let open: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 8) {
+                Image(systemName: note.locked ? "lock.fill" : "note.text")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(note.locked ? 0.5 : 0.35))
+                    .frame(width: 11)
+                Text(note.title.isEmpty ? "Untitled" : note.title)
+                    .font(.system(size: 11, weight: current ? .semibold : .regular))
+                    .foregroundStyle(.white.opacity(current ? 1 : 0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 6)
+                Text(Self.relative(note.modSeconds))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 9)
+                .fill(.white.opacity(current ? 0.12 : (hovered ? 0.09 : 0.05))))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovered)
+        .help(note.locked ? "Password-protected — read-only" : (note.title.isEmpty ? "Untitled" : note.title))
+    }
+
+    /// Compact relative age from the scripts' local-epoch seconds.
+    static func relative(_ seconds: Double) -> String {
+        let d = max(0, NotesSyncModel.nowSeconds - seconds)
+        switch d {
+        case ..<90:     return "now"
+        case ..<3600:   return "\(Int(d / 60))m"
+        case ..<86_400: return "\(Int(d / 3600))h"
+        case ..<604_800: return "\(Int(d / 86_400))d"
+        case ..<2_592_000: return "\(Int(d / 604_800))w"
+        default:        return "\(Int(d / 2_592_000))mo"
+        }
     }
 }
 
@@ -301,7 +557,16 @@ struct MediaTab: View {
                                               color: media.accent,
                                               animating: np.isPlaying && state.isExpanded
                                                   && spectrum.failure == nil,
-                                              levels: np.isPlaying && !spectrum.levels.isEmpty
+                                              // isExpanded here too, not just on
+                                              // `animating`: the panel is never
+                                              // unmounted, only faded to 0, and
+                                              // step() stays live while levels are
+                                              // non-empty. Without this the Canvas
+                                              // eased 30x a second behind a closed
+                                              // island for the whole listening
+                                              // session.
+                                              levels: state.isExpanded && np.isPlaying
+                                                  && !spectrum.levels.isEmpty
                                                   ? spectrum.levels : nil)
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     .overlay(alignment: .center) {
@@ -778,7 +1043,42 @@ struct LaunchButton: View {
 
 struct TimerTab: View {
     @EnvironmentObject var pomodoro: PomodoroModel
+    @EnvironmentObject var settings: SettingsStore
     @State private var customTime = ""
+
+    /// One centered grid — [ring] + gap + [column] — sized to the REAL tab
+    /// canvas: the 460×158 nominal content minus the 30pt the nav island sheds
+    /// (`NotchMetrics.expandedSize`) and the 16/12/14 padding `expandedContent`
+    /// applies, i.e. 428×102. The panel is clip-shaped, so these are ceilings,
+    /// not suggestions. Every right-hand row spans the full column so all three
+    /// share the same two edges.
+    private enum Metric {
+        static let ring: CGFloat = 100      // capped by the 102pt canvas height
+        static let gap: CGFloat = 24
+        static let column: CGFloat = 304    // 428 - ring - gap
+        static let barPad: CGFloat = 3
+        static let cellGap: CGFloat = 3
+        static let cellHeight: CGFloat = 18
+        /// Four segmented cells in 1 : 1 : 1 : 1.4 proportion, solved so the
+        /// bar comes out exactly `column` wide.
+        static let unit = (column - barPad * 2 - cellGap * 3) / 4.4
+        static let customCell = unit * 1.4
+    }
+
+    private static let presets = [15, 25, 45]
+
+    /// The active custom length in seconds, or nil when a preset is selected.
+    /// Derived from the model so the cell still reads right after a relaunch —
+    /// no duplicate "is custom" state to drift.
+    private var customSeconds: Int? {
+        let s = Int(pomodoro.focusDuration)
+        return Self.presets.contains { $0 * 60 == s } ? nil : s
+    }
+
+    private var customLabel: String {
+        guard let s = customSeconds else { return "" }
+        return s % 60 == 0 ? "\(s / 60)m" : String(format: "%d:%02d", s / 60, s % 60)
+    }
 
     private func applyCustomTime() {
         let parts = customTime.split(separator: ":")
@@ -789,109 +1089,160 @@ struct TimerTab: View {
             seconds = Int(m * 60)
         }
         if seconds > 0 {
-            pomodoro.setCustomFocus(seconds: min(seconds, 12 * 3600))
+            let clamped = min(seconds, 12 * 3600)
+            pomodoro.setCustomFocus(seconds: clamped)
+            // Same write-back as the presets, rounded to the store's whole-minute
+            // resolution. A sub-minute custom time keeps at least 1.
+            settings.focusMinutes = max(1, clamped / 60)
         }
         customTime = ""
     }
 
     var body: some View {
-        HStack(spacing: 20) {
-            ZStack {
-                Circle().stroke(.white.opacity(0.12), lineWidth: 5)
-                Circle()
-                    .trim(from: 0, to: max(0.003, pomodoro.progress))
-                    .stroke(pomodoro.phase == .focus ? Color.orange : .green,
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 1), value: pomodoro.progress)
-                VStack(spacing: 1) {
-                    Text(pomodoro.timeString)
-                        .font(.system(size: 20, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                    Text(pomodoro.phase == .focus ? "FOCUS" : "BREAK")
-                        .font(.system(size: 8, weight: .semibold))
-                        .kerning(1)
-                        .foregroundStyle(.white.opacity(0.45))
-                }
+        HStack(spacing: Metric.gap) {
+            ring
+            VStack(alignment: .leading, spacing: 10) {
+                statusRow
+                transportStrip
+                presetBar
             }
-            .frame(width: 98, height: 98)
-
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 5) {
-                    ForEach(0..<4, id: \.self) { i in
-                        Circle()
-                            .fill(i < pomodoro.sessions % 4 || (pomodoro.sessions > 0 && pomodoro.sessions % 4 == 0)
-                                  ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.2)))
-                            .frame(width: 6, height: 6)
-                    }
-                    Text("\(pomodoro.sessions) done")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .padding(.leading, 4)
-                }
-
-                HStack(spacing: 12) {
-                    Button { pomodoro.startPause() } label: {
-                        Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
-                            .font(.system(size: 16))
-                            .frame(width: 20)
-                    }
-                    Button { pomodoro.reset() } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 12))
-                    }
-                    .help("Reset")
-                    Button { pomodoro.skip() } label: {
-                        Image(systemName: "forward.end.fill")
-                            .font(.system(size: 11))
-                    }
-                    .help("Skip phase")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-
-                HStack(spacing: 6) {
-                    ForEach([15, 25, 45], id: \.self) { m in
-                        Button {
-                            pomodoro.focusMinutes = m
-                        } label: {
-                            Text("\(m)m")
-                                .font(.system(size: 10, weight: .medium))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(
-                                    Capsule().fill(pomodoro.focusMinutes == m
-                                        ? .white.opacity(0.85) : .white.opacity(0.08))
-                                )
-                                .foregroundStyle(pomodoro.focusMinutes == m
-                                    ? .black : .white.opacity(0.7))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    Text("+ 5m break")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.35))
-                }
-
-                HStack(spacing: 6) {
-                    TextField("custom · 90 or 12:30", text: $customTime)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .frame(width: 120)
-                        .background(RoundedRectangle(cornerRadius: 6)
-                            .fill(.white.opacity(0.08)))
-                        .onSubmit { applyCustomTime() }
-                    Text("min")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.35))
-                }
-            }
+            .frame(width: Metric.column)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private var ring: some View {
+        ZStack {
+            Circle().stroke(.white.opacity(0.12), lineWidth: 5)
+            Circle()
+                .trim(from: 0, to: max(0.003, pomodoro.progress))
+                .stroke(pomodoro.phase == .focus ? Color.orange : .green,
+                        style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 1), value: pomodoro.progress)
+            VStack(spacing: 1) {
+                Text(pomodoro.timeString)
+                    .font(.system(size: 21, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                Text(pomodoro.phase == .focus ? "FOCUS" : "BREAK")
+                    .font(.system(size: 8, weight: .semibold))
+                    .kerning(1)
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+        }
+        .frame(width: Metric.ring, height: Metric.ring)
+    }
+
+    /// Row 1 — sessions left, break hint right, pinned to both column edges.
+    private var statusRow: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<4, id: \.self) { i in
+                Circle()
+                    .fill(i < pomodoro.sessions % 4 || (pomodoro.sessions > 0 && pomodoro.sessions % 4 == 0)
+                          ? AnyShapeStyle(.orange) : AnyShapeStyle(.white.opacity(0.2)))
+                    .frame(width: 6, height: 6)
+            }
+            Text("\(pomodoro.sessions) done")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.4))
+                .padding(.leading, 4)
+            Spacer(minLength: 8)
+            Text("+ \(settings.breakMinutes)m break")
+                .font(.system(size: 9))
+                .foregroundStyle(.white.opacity(0.35))
+        }
+        .frame(width: Metric.column)
+    }
+
+    /// Row 2 — full-width plate, transport clustered at its center.
+    private var transportStrip: some View {
+        HStack(spacing: 30) {
+            Button { pomodoro.reset() } label: {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 12))
+            }
+            .help("Reset")
+            Button { pomodoro.startPause() } label: {
+                Image(systemName: pomodoro.isRunning ? "pause.fill" : "play.fill")
+                    .font(.system(size: 16))
+                    // Fixed slot: the play/pause glyphs differ in width, and the
+                    // cluster must not twitch when they swap.
+                    .frame(width: 20)
+            }
+            Button { pomodoro.skip() } label: {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 11))
+            }
+            .help("Skip phase")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .frame(width: Metric.column)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(.white.opacity(0.05)))
+    }
+
+    /// Row 3 — segmented presets; the fourth cell IS the custom field, so the
+    /// old standalone input row folds into the same edges.
+    private var presetBar: some View {
+        HStack(spacing: Metric.cellGap) {
+            ForEach(Self.presets, id: \.self) { m in
+                let selected = Int(pomodoro.focusDuration) == m * 60
+                Button {
+                    pomodoro.focusMinutes = m
+                    // Write BACK to the store. AppDelegate seeds the model from
+                    // this at launch and pushes later changes one way, so a tab
+                    // preset that only touched the model was invisible to the
+                    // Settings stepper and silently reverted on relaunch — and
+                    // nudging that stepper afterwards yanked the live timer to a
+                    // value the user never picked.
+                    settings.focusMinutes = m
+                } label: {
+                    Text("\(m)m")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(selected ? AnyShapeStyle(.black)
+                                                  : AnyShapeStyle(.white.opacity(0.7)))
+                        .frame(width: Metric.unit, height: Metric.cellHeight)
+                        .background(cellFill(selected))
+                }
+                .buttonStyle(.plain)
+            }
+            customCell
+        }
+        .padding(Metric.barPad)
+        .background(Capsule().fill(.white.opacity(0.06)))
+    }
+
+    private var customCell: some View {
+        let selected = customSeconds != nil
+        return ZStack {
+            // The field itself empties on submit, so this layer carries both the
+            // placeholder AND the committed custom value — that's what makes the
+            // cell read as "selected, showing 90m" instead of going blank.
+            if customTime.isEmpty {
+                Text(selected ? customLabel : "90 or 12:30…")
+                    .font(.system(size: 10, weight: selected ? .medium : .regular))
+                    .foregroundStyle(selected ? AnyShapeStyle(.black)
+                                              : AnyShapeStyle(.white.opacity(0.45)))
+                    .lineLimit(1)
+            }
+            TextField("", text: $customTime)
+                .textFieldStyle(.plain)
+                .font(.system(size: 10))
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .foregroundStyle(selected ? AnyShapeStyle(.black) : AnyShapeStyle(.white))
+                .onSubmit { applyCustomTime() }
+        }
+        .frame(width: Metric.customCell - 8, height: Metric.cellHeight)
+        .padding(.horizontal, 4)
+        .background(cellFill(selected))
+    }
+
+    private func cellFill(_ selected: Bool) -> some View {
+        Capsule().fill(selected ? AnyShapeStyle(.white.opacity(0.85))
+                                : AnyShapeStyle(.clear))
     }
 }
 
@@ -986,13 +1337,13 @@ private struct TrayTile: View {
     /// AirDrop were silent no-ops.
     private var unreachable: Bool { thumb == .missing || thumb == .denied }
 
-    private func reload() {
-        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
-    }
-
     /// Visual tile edge = the grid cell (tile-size setting) minus the 8pt of
     /// surrounding spacing the grid reserves.
     private var side: CGFloat { settings.trayTileSize - 8 }
+
+    private func reload() {
+        TrayThumbnails.shared.load(url, side: side) { thumb = $0 }
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -1405,8 +1756,6 @@ struct MirrorTab: View {
                     .padding(8)
                 }
         } else if mirror.denied || mirror.unavailable {
-            // Error states have no button to anchor on, so keep the icon +
-            // message centered between spacers as before.
             // Both states are now recoverable: the gate always offers either a
             // Settings deep-link or a retry, so a denial can no longer strand
             // the tab with no way back.

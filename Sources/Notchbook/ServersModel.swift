@@ -96,15 +96,23 @@ final class ServersModel: ObservableObject {
         // replacing. No port-watch/log-tail follow-up either: the pane IS the
         // feedback, and the row's own poll flips the dot green when the port binds.
         if useDeck() {
-            var started = false
-            mutate { reg in
-                guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
-                guard !LocalStarter.portLive(e.port) else { started = true; return }  // already up
+            // The outcome is reported from INSIDE the work block. It used to be
+            // captured into a `var started` out here and tested straight after the
+            // `mutate` call — but `mutate` is `work.async`, so that test ran on main
+            // before the block had executed and always read the initial `false`.
+            // Every deck launch therefore reported "couldn't reach Terminal Deck"
+            // and left a red row, moments before its own port poll turned the dot
+            // green. (It was also an unsynchronised cross-thread read of a captured
+            // local — a real data race, not just a wrong answer.)
+            mutate { [weak self] reg in
+                guard var e = LocalStarter.entries(reg).first(where: { $0.name == name })
+                else { return }
+                guard !LocalStarter.portLive(e.port) else { return }   // already up
                 guard let p = LocalStarter.plan(&reg, &e) else { return }
-                started = DeckBridge.run(command: "PORT=\(p.port) \(p.inner)",
-                                         cwd: p.cwd, title: name)
+                let started = DeckBridge.run(command: "PORT=\(p.port) \(p.inner)",
+                                             cwd: p.cwd, title: name)
+                if !started { self?.setError(name, "couldn't reach Terminal Deck") }
             }
-            if !started { setError(name, "couldn't reach Terminal Deck") }
             return
         }
         mutate { [weak self] reg in

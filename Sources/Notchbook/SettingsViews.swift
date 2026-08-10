@@ -170,12 +170,19 @@ struct SettingStepper: View {
     let value: Int
     let range: ClosedRange<Int>
     var format: (Int) -> String = { "\($0)" }
+    /// A floor the CALLER enforces that `range` cannot express — e.g. notes refuse
+    /// to drop a page that still has text. Without it the minus button rendered at
+    /// full opacity and took clicks that did nothing at all, which is
+    /// indistinguishable from the app being frozen.
+    var refusesBelow: Int? = nil
     let set: (Int) -> Void
+
+    private var minimum: Int { max(range.lowerBound, refusesBelow ?? range.lowerBound) }
 
     var body: some View {
         HStack(spacing: 8) {
-            stepButton("minus", enabled: value > range.lowerBound) {
-                set(max(range.lowerBound, value - 1))
+            stepButton("minus", enabled: value > minimum) {
+                set(max(minimum, value - 1))
             }
             Text(format(value))
                 .font(.system(size: 11, weight: .semibold))
@@ -571,7 +578,11 @@ private struct NotesSettings: View {
     var body: some View {
         SettingRow(label: "Number of pages",
                    help: "Won't drop a page that still has text") {
-            SettingStepper(value: settings.notesPageCount, range: 1...9) { proposed in
+            SettingStepper(value: settings.notesPageCount, range: 1...9,
+                           // Mirror setCount's own refusal, so the button greys out
+                           // instead of silently ignoring the press.
+                           refusesBelow: max(1, (state.pages.lastIndex { !$0.isEmpty })
+                                                .map { $0 + 1 } ?? 1)) { proposed in
                 NotesPages.setCount(proposed, settings: settings, state: state)
             }
         }
