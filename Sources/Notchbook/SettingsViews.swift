@@ -368,6 +368,34 @@ struct SettingsGeneralPage: View {
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var settings: SettingsStore
 
+    /// The Liquid Glass segment is OFFERED only where the API exists — SwiftUI
+    /// cannot disable one segment of a Picker, so an unavailable option has to be
+    /// absent rather than greyed.
+    private var surfaceOptions: [(String, IslandSurfaceStyle)] {
+        var opts: [(String, IslandSurfaceStyle)] = []
+        if IslandSurfaceStyle.liquidGlassAvailable {
+            opts.append((IslandSurfaceStyle.liquidGlass.title, .liquidGlass))
+        }
+        opts.append((IslandSurfaceStyle.frosted.title, .frosted))
+        opts.append((IslandSurfaceStyle.solid.title, .solid))
+        return opts
+    }
+
+    private var surfaceHelp: String {
+        IslandSurfaceStyle.liquidGlassAvailable
+            ? "How the nav bar, panel, toasts and agent pill are painted"
+            : "Liquid Glass needs macOS 26 — this Mac gets Frosted or Solid"
+    }
+
+    /// Reads through `resolve` so the picker mirrors what is actually drawn. A
+    /// defaults file carried from a macOS 26 machine onto an older one stores
+    /// `liquidGlass`, which has no matching segment here — without the downgrade
+    /// the control would show nothing selected.
+    private var surface: Binding<IslandSurfaceStyle> {
+        Binding(get: { IslandSurfaceStyle.resolve(settings.surfaceStyle) },
+                set: { settings.surfaceStyle = $0.rawValue })
+    }
+
     var body: some View {
         SettingsPage(title: "General", back: { state.settingsRoute = .root }) {
             SettingRow(label: "Hover to expand",
@@ -386,6 +414,9 @@ struct SettingsGeneralPage: View {
                        help: "Bottom: the bar bulges out below the panel") {
                 SettingSegmented(selection: $settings.navAtBottom,
                                  options: [("Top", false), ("Bottom", true)])
+            }
+            SettingRow(label: "Island surface", help: surfaceHelp) {
+                SettingSegmented(selection: surface, options: surfaceOptions)
             }
             SettingRow(label: "Haptics") {
                 SettingSwitch(isOn: $settings.haptics)

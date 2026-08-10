@@ -25,6 +25,12 @@ final class SettingsStore: ObservableObject {
     /// Nav bar docks under the notch (false) or hangs below the panel (true★).
     /// The liquid morph runs mirrored in bottom mode — same choreography.
     @Published var navAtBottom: Bool { didSet { set(navAtBottom, "general.navAtBottom") } }
+    /// How the floating islands are painted — an `IslandSurfaceStyle` raw value.
+    /// frosted★ / liquidGlass (macOS 26 only) / solid. Stored as the raw string
+    /// and resolved through `IslandSurfaceStyle.resolve`, which downgrades a
+    /// Liquid Glass choice on an older machine instead of failing. Stays "" until
+    /// the user picks something, so the default can be changed later in one place.
+    @Published var surfaceStyle: String { didSet { set(surfaceStyle, "general.surfaceStyle") } }
     /// Dwell before a hover opens the panel, seconds. instant★ / 0.2 / 0.5.
     @Published var expandDelay: Double { didSet { set(expandDelay, "general.expandDelay") } }
     @Published var haptics: Bool { didSet { set(haptics, "general.haptics") } }
@@ -119,6 +125,9 @@ final class SettingsStore: ObservableObject {
             "general.hoverToExpand": true,
             "general.hideInFullscreen": true,
             "general.navAtBottom": true,   // user-chosen default (Jul 18)
+            // "" = nobody has chosen; IslandSurfaceStyle.resolve reads that as
+            // frosted, i.e. exactly the pre-Liquid-Glass look.
+            "general.surfaceStyle": "",
             "general.expandDelay": 0.0,
             "general.haptics": true,
             "general.toastDuration": 3.0,
@@ -165,6 +174,7 @@ final class SettingsStore: ObservableObject {
         hoverToExpand = defaults.bool(forKey: "general.hoverToExpand")
         hideInFullscreen = defaults.bool(forKey: "general.hideInFullscreen")
         navAtBottom = defaults.bool(forKey: "general.navAtBottom")
+        surfaceStyle = defaults.string(forKey: "general.surfaceStyle") ?? ""
         expandDelay = defaults.double(forKey: "general.expandDelay")
         haptics = defaults.bool(forKey: "general.haptics")
         toastDuration = defaults.double(forKey: "general.toastDuration")

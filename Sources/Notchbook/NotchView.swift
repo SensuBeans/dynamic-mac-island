@@ -20,6 +20,13 @@ struct NotchView: View {
     @EnvironmentObject var servers: ServersModel
     let metrics: NotchMetrics
 
+    /// The material every floating island is painted with, resolved once here so
+    /// each call site passes a value instead of re-reading the store. `resolve`
+    /// downgrades a Liquid Glass preference on a pre-26 machine.
+    private var surfaceStyle: IslandSurfaceStyle {
+        IslandSurfaceStyle.resolve(settings.surfaceStyle)
+    }
+
     @FocusState private var editorFocused: Bool
     @State private var dropTargeted = false
 
@@ -64,6 +71,18 @@ struct NotchView: View {
     /// you switch pages and the power button is never clipped. Starts at a sane
     /// default until the first probe measurement lands (within one layout pass).
     @State private var navBarWidth: CGFloat = 300
+    /// Fixed pages-pill width — the same probe measurement as `navBarWidth`, but
+    /// the tab bar alone. The live pill is LOCKED to it, which is what stops the
+    /// bar reshuffling on every page switch: only the selected chip's title
+    /// changes width, and today that resizes the whole row, which a center-
+    /// aligned container then re-centers — so every chip AND the trailing
+    /// pin/gear/power slide by ±Δ/2, by an amount that depends on how long the
+    /// two page names happen to be. Pinning the pill makes the row's total width
+    /// constant, so both of the bar's edges become fixed points and the only
+    /// motion left is chips parting INSIDE the pill, to the right of the one you
+    /// tapped. 0 until the first probe measurement lands (one layout pass) —
+    /// until then the pill sizes naturally rather than collapsing to nothing.
+    @State private var tabBarWidth: CGFloat = 0
     /// Live glyph centers of the nav controls (in navRow space) + row width,
     /// fed to LiquidNav so each icon-melt dot lands exactly on its real icon.
     @State private var navIconCenters: [CGFloat] = []
@@ -509,6 +528,9 @@ struct NotchView: View {
             // as a zero-footprint background so it measures even while collapsed.
             .background(navWidthProbe)
             .onPreferenceChange(NavWidthKey.self) { navBarWidth = $0 }
+            // Same probe, the pill alone — locks the live pill's width so the
+            // row stops breathing on page switches (see `tabBarWidth`).
+            .onPreferenceChange(NavTabBarWidthKey.self) { tabBarWidth = $0 }
             // Hug-sized tabs report their natural content height; published on
             // NotchState so AppDelegate's hover rect tracks the same height.
             .onPreferenceChange(TabHugHeightKey.self) { state.tabHugHeight = $0 }
@@ -990,9 +1012,7 @@ struct NotchView: View {
                 }
                 .padding(.horizontal, 9)
                 .frame(height: metrics.notchHeight - 8)
-                .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.4) } }
-                .clipShape(Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                .islandSurface(Capsule(), style: surfaceStyle, dim: 0.4)
                 .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
                 .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .leading)))
             }
@@ -1017,7 +1037,7 @@ struct NotchView: View {
                         state.currentTab = .agents
                         state.onExpandRequest?()
                     } label: {
-                        AgentPillLabel(pill: pill)
+                        AgentPillLabel(pill: pill, surfaceStyle: surfaceStyle)
                     }
                     .buttonStyle(.plain)
                     // Invisible during flight — the LiquidAgent goo carries the
@@ -1050,6 +1070,10 @@ struct NotchView: View {
     /// The pill's glyph + count capsule; `.working` gets a gently pulsing dot.
     private struct AgentPillLabel: View {
         let pill: AgentSessionsModel.CollapsedPill
+        /// Passed down rather than resolved here: this is a nested type, so it
+        /// can't reach `NotchView.surfaceStyle`, and giving it its own
+        /// `@EnvironmentObject` would make it re-render on every settings change.
+        let surfaceStyle: IslandSurfaceStyle
         /// Drives the one-second entry pulse and then stops. Not a ticker.
         @State private var entered = false
 
@@ -1116,11 +1140,9 @@ struct NotchView: View {
             }
             .padding(.horizontal, 9)
             .frame(height: 20)
-            // Its own frosted-glass capsule that floats — matching the nav/content
-            // islands rather than sitting inside the black notch bar.
-            .background { ZStack { VisualEffectBlur(); Color.black.opacity(0.4) } }
-            .clipShape(Capsule())
-            .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+            // Its own capsule that floats — matching the nav/content islands
+            // rather than sitting inside the black notch bar.
+            .islandSurface(Capsule(), style: surfaceStyle, dim: 0.4)
             .shadow(color: .black.opacity(0.45), radius: 5, y: 2)
         }
     }
@@ -1193,6 +1215,15 @@ struct NotchView: View {
         }
     }
     private struct NavRowWidthKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+    /// Widest reachable pages-pill width, reported by the off-screen probe only
+    /// (one layout per visible tab, max-reduced) and used to LOCK the live pill
+    /// to that width. See `tabBarWidth`.
+    private struct NavTabBarWidthKey: PreferenceKey {
         static var defaultValue: CGFloat = 0
         static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
             value = max(value, nextValue())
@@ -1274,20 +1305,17 @@ struct NotchView: View {
                     .opacity(1 - rest)
                 // Real crisp capsule, same footprint as the settled goo capsule
                 // (flip-invariant; the whole layer mirrors in bottom mode).
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.clear)
-                    .background(VisualEffectBlur().clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous)))
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.black.opacity(0.32)))
-                    // Hairline rim so the glass capsule reads as ONE bounded
-                    // surface enclosing every control (tabs + pin/gear/power).
-                    // The capsule already encloses them geometrically, but the
-                    // dark frosted fill is near-invisible against the desktop, so
-                    // pin/gear/power looked orphaned past the tab-bar's own inner
-                    // pill. Every other frosted island — the track toast (872),
-                    // the count badge (979), the content panel — carries this same
-                    // .14 white stroke; the nav capsule was the lone exception.
-                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                // Hairline rim so the glass capsule reads as ONE bounded surface
+                // enclosing every control (tabs + pin/gear/power). The capsule
+                // already encloses them geometrically, but the dark frosted fill
+                // is near-invisible against the desktop, so pin/gear/power looked
+                // orphaned past the tab-bar's own inner pill. Every other frosted
+                // island — the track toast, the count badge, the content panel —
+                // carries this same .14 white stroke; the nav capsule was the lone
+                // exception. `islandSurface` now paints all of them.
+                Color.clear
+                    .islandSurface(RoundedRectangle(cornerRadius: 16, style: .continuous),
+                                   style: surfaceStyle)
                     .frame(width: navBlobW, height: NotchMetrics.navIslandHeight)
                     .shadow(color: .black.opacity(0.45), radius: 12,
                             // Negate in bottom mode: the whole layer is mirrored
@@ -1378,10 +1406,15 @@ struct NotchView: View {
             : (NotchMetrics.navIslandHeight + NotchMetrics.navContentGap) * CGFloat(renderNavT)
         return contentIsland(size: expandedSize)
             .frame(width: expandedSize.width, height: expandedSize.height)
+            // The panel's material lives here rather than inside `contentIsland`
+            // because this is where the shape is: `islandSurface` paints the
+            // ground, clips to it, and (rim off — the panel has never carried the
+            // .14 hairline the smaller islands do) leaves the edge bare.
             // Corner radius relaxes slightly in flight (34 hidden → 26 open) for
             // the soft "bubble" read; animatable via the spring.
-            .clipShape(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
-                                        style: .continuous))
+            .islandSurface(RoundedRectangle(cornerRadius: state.isExpanded ? 26 : 34,
+                                            style: .continuous),
+                           style: surfaceStyle, rim: false)
             .shadow(color: .black.opacity(0.55), radius: 18, y: 8)
             .offset(y: shift)
     }
@@ -1503,8 +1536,8 @@ struct NotchView: View {
     /// The content panel island: frosted glass, ambient album glow, the tab.
     private func contentIsland(size: CGSize) -> some View {
         ZStack(alignment: .top) {
-            VisualEffectBlur()
-            Color.black.opacity(0.32)
+            // The frosted/glass ground is painted by `expandedPanelLayer`, which
+            // owns the panel's shape; everything here composites on top of it.
             // Ambient glow: the album cover, blown up and heavily blurred,
             // tints the panel with the artwork's palette on every tab.
             // While music plays it breathes with the song's loudness. The
@@ -1615,6 +1648,36 @@ struct NotchView: View {
             }
         }
         .padding(2)
+        // LOCKED WIDTH — the fix for the bar reshuffling on every page switch.
+        // Held to the widest pill the visible set can produce, leading-aligned,
+        // so the chips pack from a fixed left edge and the pill's own edges never
+        // move. Everything after the pill in the row (pin/gear/power) is packed
+        // positionally behind it, so freezing the pill freezes the trio too — no
+        // Spacer needed, and the trio's optical-centering tuning below survives
+        // byte-for-byte.
+        //
+        // Placement is load-bearing, and this is the ONLY spot all three of these
+        // hold at once:
+        //  • BEFORE `.background(Capsule…)`, so the pill capsule sizes to the
+        //    locked width instead of hugging the live chips (put it after and
+        //    the pill still breathes while only the trio holds still).
+        //  • BEFORE `.coordinateSpace(name: "tabbar")`, so that space's origin is
+        //    the locked frame's leading edge — which the .leading alignment makes
+        //    identical to the chip HStack's own. `slotCenterX` and `reorder` both
+        //    seed at x = 2 (the .padding(2) above) and walk the chips in order,
+        //    so drag-reorder keeps working untouched.
+        //  • NOT on the measuring path, or the probe would measure a row already
+        //    locked to `tabBarWidth` — a self-feeding fixed point that latches at
+        //    0 and never discovers the true widest set.
+        .frame(width: (measuring || tabBarWidth <= 0) ? nil : tabBarWidth,
+               alignment: .leading)
+        // Report the natural pill width from the probe's copies ONLY (same
+        // reasoning as `emitWidth` above): max-reduced across one layout per
+        // visible tab, that is the width the live pill locks to.
+        .background(GeometryReader { g in
+            Color.clear.preference(key: NavTabBarWidthKey.self,
+                                   value: measuring ? g.size.width : 0)
+        })
         // The pages section reads as its own longer pill, distinct from the
         // trailing pin/gear/power. The capsule is drawn WIDER than the chips via
         // negative padding — a purely visual extent that does NOT enlarge the
@@ -1627,7 +1690,13 @@ struct NotchView: View {
         )
         .coordinateSpace(name: "tabbar")
         .onPreferenceChange(TabChipWidthKey.self) { if !measuring { chipWidths = $0 } }
-        .animation(measuring ? nil : .spring(response: 0.3, dampingFraction: 0.8), value: state.currentTab)
+        // CRITICALLY DAMPED (0.24/1.0), not the old 0.3/0.8. One transaction here
+        // carries chip width, chip position, the label color and the selection
+        // capsule's fill, so at 0.8 a dozen chips all overshot their target and
+        // swung back at once — the single biggest contributor to the switch
+        // reading as unsettled. At 1.0 the reflow arrives and stops; the shorter
+        // response keeps it from feeling sluggish for losing the bounce.
+        .animation(measuring ? nil : .spring(response: 0.24, dampingFraction: 1.0), value: state.currentTab)
         .animation(measuring ? nil : .easeOut(duration: 0.12), value: swipeTarget)
     }
 
@@ -1769,18 +1838,6 @@ struct NotchView: View {
                            nextValue: () -> [NotchTab: CGFloat]) {
             value.merge(nextValue()) { _, new in new }
         }
-    }
-
-    private struct VisualEffectBlur: NSViewRepresentable {
-        func makeNSView(context: Context) -> NSVisualEffectView {
-            let view = NSVisualEffectView()
-            view.material = .hudWindow
-            view.blendingMode = .behindWindow
-            view.state = .active
-            return view
-        }
-
-        func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
