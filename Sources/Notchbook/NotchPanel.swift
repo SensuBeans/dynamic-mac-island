@@ -33,6 +33,19 @@ final class NotchPanel: NSPanel {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .scrollWheel { onScroll?(event) }
+        // Belt-and-braces for the editing key equivalents (⌘C/⌘V/⌘X/⌘A/⌘Z):
+        // NSApplication normally offers ⌘-chords to the main menu before the
+        // window sees them, but this panel is key while the app itself is NOT
+        // active, and that path is not guaranteed there. Offering them again is
+        // a no-op when AppKit already handled it (we'd never see the event) and
+        // still respects the responder chain — the menu only fires an item the
+        // first responder actually implements.
+        if event.type == .keyDown,
+           event.modifierFlags.contains(.command),
+           let menu = NSApp.mainMenu,
+           menu.performKeyEquivalent(with: event) {
+            return
+        }
         super.sendEvent(event)
     }
 }

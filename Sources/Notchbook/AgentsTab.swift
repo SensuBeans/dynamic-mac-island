@@ -172,18 +172,41 @@ private struct ResumeHistory: View {
     let reports: [ResumeReport]
     let now: Date
 
+    /// Hide is a cutoff, not a kill switch: ✕ stamps "hidden as of now", and
+    /// only reports newer than the stamp render. So dismissing a stale receipt
+    /// is permanent for THAT receipt, but the next thing auto-resume actually
+    /// does brings the panel back on its own — no settings page needed to
+    /// recover it. The history file on disk is untouched.
+    @AppStorage("AgentsResumeHistoryHiddenAt") private var hiddenAt: Double = 0
+
     /// Deliberately short. This is a receipt for the last cap, not a log viewer —
     /// the full trail is still on disk for when that is what you want.
-    private var recent: [ResumeReport] { Array(reports.prefix(4)) }
+    private var recent: [ResumeReport] {
+        Array(reports.filter { $0.at.timeIntervalSince1970 > hiddenAt }.prefix(4))
+    }
 
     var body: some View {
         if !recent.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                Text("AUTO-RESUME")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.4))
-                    .kerning(0.5)
-                    .padding(.top, 2)
+                HStack(spacing: 4) {
+                    Text("AUTO-RESUME")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .kerning(0.5)
+                    Spacer(minLength: 4)
+                    Button {
+                        hiddenAt = now.timeIntervalSince1970
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 7, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.35))
+                            .frame(width: 14, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide — comes back when auto-resume next does something")
+                }
+                .padding(.top, 2)
                 ForEach(recent) { row($0) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

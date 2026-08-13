@@ -367,6 +367,35 @@ enum LocalStarter {
         return pid
     }
 
+    /// Two paths pointing at the same directory. Registry `path` values are
+    /// hand-editable and may carry a trailing slash, and /tmp-style symlinks
+    /// mean lsof's answer can spell the same folder differently.
+    static func samePath(_ a: String, _ b: String) -> Bool {
+        func norm(_ s: String) -> String {
+            URL(fileURLWithPath: s).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        return !a.isEmpty && !b.isEmpty && norm(a) == norm(b)
+    }
+
+    /// The working directory of a running process, via lsof.
+    ///
+    /// This is the only reliable link back to a project for servers whose
+    /// command line carries no path: anything launched as `cd <dir> && python3
+    /// server.py` shows up in ps as a bare relative `server.py`, and Next
+    /// rewrites its title outright to `next-server (v16.2.12)`. Both run with
+    /// cwd set to the project, so that is what we match on.
+    static func processCwd(_ pid: pid_t) -> String? {
+        let r = Subprocess.run("/usr/sbin/lsof",
+                               ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"], timeout: 3)
+        guard r.ok else { return nil }
+        // -Fn emits one field per line, each prefixed by its type: "n/path/here".
+        for line in r.out.split(separator: "\n") where line.hasPrefix("n") {
+            let path = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+            if !path.isEmpty { return path }
+        }
+        return nil
+    }
+
     /// The pid actually listening on a port, via lsof.
     static func listenerPid(_ port: Int) -> pid_t? {
         let r = Subprocess.run("/usr/sbin/lsof",
@@ -387,6 +416,13 @@ enum LocalStarter {
         // file is gone but the command line points at this project. This is what
         // lets a relaunched app re-adopt a server it orphaned on quit.
         if !entry.path.isEmpty, cmd.contains(entry.path) { return .ours(live) }
+        // …but a command line only carries the path when it was launched with an
+        // absolute one. `cd <dir> && python3 server.py` reduces to `server.py`,
+        // and Next overwrites its title with `next-server (vX)`, so the check
+        // above could never re-adopt either — ■ reported "held by" and refused
+        // to stop a server that was ours all along. cwd still points home.
+        if !entry.path.isEmpty, let cwd = processCwd(live),
+           samePath(cwd, entry.path) { return .ours(live) }
         return .stranger(live, cmd.isEmpty ? "another process" : cmd)
     }
 
