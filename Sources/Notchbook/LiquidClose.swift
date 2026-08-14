@@ -36,6 +36,12 @@ struct LiquidClose: View, Animatable {
     var navShift: CGFloat
     var panelWidth: CGFloat
     var panelHeight: CGFloat
+    /// Pill mode (notchless display): the collapsed island is a free-floating
+    /// capsule at this canvas-space rect. There is no silhouette to disappear
+    /// inside, so the closing mass must settle ONTO the pill — at the pill's
+    /// size and position — instead of tucking into a notch that isn't there.
+    /// Nil on a notched Mac, where the tuck-inside behavior is correct.
+    var pillRest: CGRect? = nil
     var debugPink: Bool = false
 
     // Hosting-frame padding (NotchView must match): the canvas spans the notch
@@ -43,6 +49,10 @@ struct LiquidClose: View, Animatable {
     static let hPad: CGFloat = 26        // ≈ 2·bodyBlur + headroom for the wide panel
     static let botPad: CGFloat = 24
     static let bodyBlur: CGFloat = 7
+    /// How far the 0.42 alpha threshold + `bodyBlur` push the rendered
+    /// silhouette OUTSIDE the drawn rect. Shapes are inset by this whenever the
+    /// goo has to coincide with a real view.
+    static let dilation: CGFloat = 2.5
     static let bodyThreshold: Double = 0.42
     static let dotBlur: CGFloat = 3.5
     static let dotThreshold: Double = 0.42
@@ -61,27 +71,45 @@ struct LiquidClose: View, Animatable {
             let panelTopRest = notchHeight + gap + navShift
             let panelBotRest = panelTopRest + panelHeight
 
+            // Where the mass ends up. On a notched Mac it tucks INSIDE the
+            // silhouette (a sliver, narrower than the notch) because the
+            // hardware hides it. In pill mode it must land exactly ON the
+            // resting pill — whose size is live, so a close while music is
+            // playing settles onto the wider now-playing pill and a close at
+            // standby onto the small one.
+            let restTop = pillRest?.minY ?? (notchHeight - 5)
+            let restBot = pillRest?.maxY ?? (notchHeight - 2)
+            let restW = pillRest?.width ?? (notchWidth - 6)
+            // The y the body counts as "fused" / the gradient's black anchor:
+            // the notch's underside, or the pill's bottom edge.
+            let fuseY = pillRest?.maxY ?? notchHeight
+
             // --- C4 body geometry (mock: closeStudies[C4].render) ---
-            let topY = lerp(panelTopRest, notchHeight - 5, smooth(0.24, 0.72, e))
+            let topY = lerp(panelTopRest, restTop, smooth(0.24, 0.72, e))
             // The bottom edge ends fully INSIDE the notch (−2, not +9): the mass
             // must geometrically disappear into the silhouette by e≈0.96 so the
             // final opacity swap has nothing visible left to fade — a bottom that
             // floors below the notch leaves a black lip that can only ghost out
             // (the user-flagged ".95 frame").
-            let botY = lerp(panelBotRest, notchHeight - 2, smooth(0.4, 0.96, e))
+            let botY = lerp(panelBotRest, restBot, smooth(0.4, 0.96, e))
             // Width likewise tucks INSIDE the notch by the end — wider-than-notch
             // leaves nubs sticking out under its corners after absorption. The
             // taper starts just after the top begins climbing (0.30, was 0.42):
             // holding full width deep into the climb read as a slab bottom
             // (user-flagged "see the bottom width").
-            let w = lerp(panelWidth, notchWidth - 6, smooth(0.30, 0.96, e))
+            let w = lerp(panelWidth, restW, smooth(0.30, 0.96, e))
             let h = max(5, botY - topY)
             // Dilation compensation: the 0.42 threshold pushes the silhouette
             // ~2.5pt OUTSIDE the drawn rect, so at morph start the stand-in was
             // born visibly fatter than the real panel it replaces (user-flagged
             // first frame). Inset by the dilation while young; relax to the full
             // metaball body by mid-flight when the neck needs the fat alpha.
-            let inset = 2.5 * (1 - smooth(0.25, 0.5, e))
+            // …and it comes BACK at the end in pill mode. With a notch the fat
+            // silhouette is hidden by the hardware, so the ending can relax to
+            // 0; on a pill there is nothing to hide it, and a goo 2.5pt fatter
+            // than the capsule it hands off to reads as a snap at the swap.
+            let inset = Self.dilation * (1 - smooth(0.25, 0.5, e))
+                + (pillRest != nil ? Self.dilation * smooth(0.80, 0.97, e) : 0)
             let panelRect = CGRect(x: cx - w / 2, y: topY, width: w, height: h)
                 .insetBy(dx: inset, dy: min(inset, h / 4))
             // 26 matches the real panel's expanded clip radius, so the birth
@@ -94,9 +122,18 @@ struct LiquidClose: View, Animatable {
                 // The notch joins the liquid body only once the mass is within
                 // fusing range — before that it contributes nothing but a dilated
                 // halo over the real notch (part of the fat first frame).
-                if topY < notchHeight + 3 * Self.bodyBlur {
-                    layer.fill(NotchShape(topRadius: NotchMetrics.topFlare, bottomRadius: 10)
-                                .path(in: notchFrame), with: .color(.white))
+                if topY < fuseY + 3 * Self.bodyBlur {
+                    if let pill = pillRest {
+                        // Pill mode: the destination is the capsule itself, so
+                        // the goo fuses with the pill's own shape and the final
+                        // swap to the real pill is a pixel match.
+                        layer.fill(Capsule().path(in: pill.insetBy(dx: Self.dilation,
+                                                                   dy: Self.dilation)),
+                                   with: .color(.white))
+                    } else {
+                        layer.fill(NotchShape(topRadius: NotchMetrics.topFlare, bottomRadius: 10)
+                                    .path(in: notchFrame), with: .color(.white))
+                    }
                 }
                 // Once the mass is fully absorbed (a sliver hidden inside the
                 // notch), its blur still bleeds around the notch and DILATES the
@@ -105,7 +142,7 @@ struct LiquidClose: View, Animatable {
                 // from the body at that point: the silhouette becomes the notch
                 // alone, pixel-matching the real one, so the final swap is
                 // invisible and the ending reads as pure absorption.
-                if h > 6 || w > notchWidth {
+                if pillRest != nil || h > 6 || w > notchWidth {
                     layer.fill(Path(roundedRect: panelRect, cornerRadius: panelCorner),
                                with: .color(.white))
                 }
@@ -145,7 +182,7 @@ struct LiquidClose: View, Animatable {
             ])
             body.fill(Path(CGRect(origin: .zero, size: size)),
                       with: .linearGradient(tone,
-                          startPoint: CGPoint(x: cx, y: notchHeight),
+                          startPoint: CGPoint(x: cx, y: fuseY),
                           endPoint: CGPoint(x: cx, y: panelBotRest)))
 
             // No content-row dot-melt on the expanded island (per review): the

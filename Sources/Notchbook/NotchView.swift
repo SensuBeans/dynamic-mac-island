@@ -355,8 +355,10 @@ struct NotchView: View {
         // pill floats as its own capsule (below), so it no longer widens the bar.
         // The black notch bar shows for media only. A toast is its OWN small
         // floating glass capsule beside the notch (like the agent pill), so it
-        // no longer fills / widens the bar.
-        let collapsedVisible = hasMedia
+        // no longer fills / widens the bar. In pill mode there is no notch to
+        // hide behind, so the standby pill is always visible and waiting to be
+        // hovered (there, a toast grows the pill itself into a bubble).
+        let collapsedVisible = hasMedia || !metrics.hasNotch
         // The nav dock appears ONLY on hover over its top strip (flush under
         // the notch); otherwise it retracts and the content panel slides up to
         // fill its height. Tab-swipes deliberately do NOT reveal it (user:
@@ -374,132 +376,172 @@ struct NotchView: View {
             // with intrinsic width and NO clip — its position is a fixed offset,
             // not derived from an animating bar width, so it cannot drift left
             // under the notch or be truncated by the silhouette.
-            ZStack(alignment: .topLeading) {
-                // The crisp backing owns the RESTING look. For the media ear the
-                // LiquidEar goo owns the flight and the backing only fades in over
-                // the last 10% (its full width is invisible until then, so there's
-                // no width-spring). The opacity window is NONLINEAR, so it MUST
-                // render through an Animatable relay — a plain `.opacity(f(earT))`
-                // interpolates linearly and fades the bar in from the very start.
-                NavTDriven(t: renderEarT) { e in
-                    ZStack {
-                        if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
-                        Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+            if metrics.hasNotch {
+                ZStack(alignment: .topLeading) {
+                    // The crisp backing owns the RESTING look. For the media ear the
+                    // LiquidEar goo owns the flight and the backing only fades in over
+                    // the last 10% (its full width is invisible until then, so there's
+                    // no width-spring). The opacity window is NONLINEAR, so it MUST
+                    // render through an Animatable relay — a plain `.opacity(f(earT))`
+                    // interpolates linearly and fades the bar in from the very start.
+                    NavTDriven(t: renderEarT) { e in
+                        ZStack {
+                            if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                            Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                        }
+                        .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
+                               height: metrics.notchHeight)
+                        .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
+                                              bottomRadius: 10))
+                        // Backing presence = the media-ear reveal OR the pomodoro
+                        // countdown, taken independently (S1). The media term rides
+                        // the goo morph (fades in over the last 10%); the pomodoro
+                        // term is a steady 1. Keying opacity on `showMediaEar ? … : 1`
+                        // conflated them: when music started over a running countdown
+                        // the term jumped to smoothstep(0.9,1,~0)=0 for a frame — the
+                        // countdown bar blinked out before the ear budded — and when
+                        // music stopped with the countdown on, the `: 1` else pinned
+                        // the bar fully opaque so the retracting goo had nothing to
+                        // recede against. max() decouples the two: the countdown holds
+                        // the bar steady while the media goo reveals/hides on top.
+                        .opacity(max(showMediaEar ? smoothstep(0.9, 1, e) : 0,
+                                     (pomodoro.isRunning && settings.timerCountdownEar) ? 1 : 0))
                     }
-                    .frame(width: metrics.collapsedSize(withMedia: hasMedia).width,
-                           height: metrics.notchHeight)
-                    .clipShape(NotchShape(topRadius: NotchMetrics.topFlare,
-                                          bottomRadius: 10))
-                    // Backing presence = the media-ear reveal OR the pomodoro
-                    // countdown, taken independently (S1). The media term rides
-                    // the goo morph (fades in over the last 10%); the pomodoro
-                    // term is a steady 1. Keying opacity on `showMediaEar ? … : 1`
-                    // conflated them: when music started over a running countdown
-                    // the term jumped to smoothstep(0.9,1,~0)=0 for a frame — the
-                    // countdown bar blinked out before the ear budded — and when
-                    // music stopped with the countdown on, the `: 1` else pinned
-                    // the bar fully opaque so the retracting goo had nothing to
-                    // recede against. max() decouples the two: the countdown holds
-                    // the bar steady while the media goo reveals/hides on top.
-                    .opacity(max(showMediaEar ? smoothstep(0.9, 1, e) : 0,
-                                 (pomodoro.isRunning && settings.timerCountdownEar) ? 1 : 0))
-                }
 
-                // E1 "Side Bulge": the notch's right flank swells into the ear.
-                // The mount branch is a STRUCTURAL decision on progress, so it
-                // MUST live inside the relay — evaluated in NotchView's body it
-                // sees only earT's END value (1), which fails `< 0.999`, and the
-                // morph never mounts during a real animation (the dead-ear bug).
-                NavTDriven(t: renderEarT) { e in
-                    if !state.isExpanded, e > 0.02, e < 0.999 {
-                        LiquidEar(t: e,
-                                  notchWidth: metrics.notchWidth,
-                                  notchHeight: metrics.notchHeight,
-                                  earWidth: metrics.mediaEarWidth,
-                                  debugPink: liquidEarPink)
-                            .frame(width: metrics.notchWidth + metrics.mediaEarWidth
-                                           + LiquidEar.rightPad,
-                                   height: metrics.notchHeight
-                                           + LiquidEar.vPadTop + LiquidEar.vPadBottom,
-                                   alignment: .topLeading)
-                            .offset(y: -LiquidEar.vPadTop)
-                            .allowsHitTesting(false)
+                    // E1 "Side Bulge": the notch's right flank swells into the ear.
+                    // The mount branch is a STRUCTURAL decision on progress, so it
+                    // MUST live inside the relay — evaluated in NotchView's body it
+                    // sees only earT's END value (1), which fails `< 0.999`, and the
+                    // morph never mounts during a real animation (the dead-ear bug).
+                    NavTDriven(t: renderEarT) { e in
+                        if !state.isExpanded, e > 0.02, e < 0.999 {
+                            LiquidEar(t: e,
+                                      notchWidth: metrics.notchWidth,
+                                      notchHeight: metrics.notchHeight,
+                                      earWidth: metrics.mediaEarWidth,
+                                      debugPink: liquidEarPink)
+                                .frame(width: metrics.notchWidth + metrics.mediaEarWidth
+                                               + LiquidEar.rightPad,
+                                       height: metrics.notchHeight
+                                               + LiquidEar.vPadTop + LiquidEar.vPadBottom,
+                                       alignment: .topLeading)
+                                .offset(y: -LiquidEar.vPadTop)
+                                .allowsHitTesting(false)
+                        }
                     }
-                }
 
-                // Agent pill: horizontal bud-and-pinch off the island body (ear
-                // cap when music plays, else the notch flank). Same relay
-                // discipline as the ear — the mount branch reads mid-flight `e`, so
-                // it MUST live inside the NavTDriven. Drawn above the backing, below
-                // the HStack content, so the real label sharpens in on top at rest.
-                NavTDriven(t: renderAgentT) { e in
-                    if !state.isExpanded, e > 0.02, e < 0.999, agentPillFrameLatch != .zero,
-                       let pill = activePill ?? lastAgentPill {
-                        LiquidAgent(t: e,
-                                    notchWidth: metrics.notchWidth,
-                                    notchHeight: metrics.notchHeight,
-                                    earWidth: metrics.mediaEarWidth,
-                                    hasEar: agentEarLatch,
-                                    pillRect: agentPillFrameLatch,
-                                    glyphCenterX: nil,
-                                    countCenterX: nil,
-                                    tint: pillTint(pill),
-                                    debugPink: liquidAgentPink)
-                            .frame(width: metrics.collapsedSize(withMedia: agentEarLatch,
-                                                                withAgent: true).width
-                                           + LiquidAgent.rightPad,
-                                   height: metrics.notchHeight
-                                           + LiquidAgent.vPadTop + LiquidAgent.vPadBottom,
-                                   alignment: .topLeading)
-                            .offset(y: -LiquidAgent.vPadTop)
-                            .allowsHitTesting(false)
+                    // Agent pill: horizontal bud-and-pinch off the island body (ear
+                    // cap when music plays, else the notch flank). Same relay
+                    // discipline as the ear — the mount branch reads mid-flight `e`, so
+                    // it MUST live inside the NavTDriven. Drawn above the backing, below
+                    // the HStack content, so the real label sharpens in on top at rest.
+                    NavTDriven(t: renderAgentT) { e in
+                        if !state.isExpanded, e > 0.02, e < 0.999, agentPillFrameLatch != .zero,
+                           let pill = activePill ?? lastAgentPill {
+                            LiquidAgent(t: e,
+                                        notchWidth: metrics.notchWidth,
+                                        notchHeight: metrics.notchHeight,
+                                        earWidth: metrics.mediaEarWidth,
+                                        hasEar: agentEarLatch,
+                                        pillRect: agentPillFrameLatch,
+                                        glyphCenterX: nil,
+                                        countCenterX: nil,
+                                        tint: pillTint(pill),
+                                        debugPink: liquidAgentPink)
+                                .frame(width: metrics.collapsedSize(withMedia: agentEarLatch,
+                                                                    withAgent: true).width
+                                               + LiquidAgent.rightPad,
+                                       height: metrics.notchHeight
+                                               + LiquidAgent.vPadTop + LiquidAgent.vPadBottom,
+                                       alignment: .topLeading)
+                                .offset(y: -LiquidAgent.vPadTop)
+                                .allowsHitTesting(false)
+                        }
                     }
-                }
 
-                HStack(spacing: 0) {
-                    // Fixed notch-width block reserves the hardware notch; content
-                    // starts exactly at the notch's right edge and a trailing
-                    // Spacer keeps the whole row hard against the left. This can't
-                    // right-drift the way a padding+alignment combo did.
-                    Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
-                    ears
-                    // Toast + agent pill both float outboard of the media ear;
-                    // only one is present at a time (pill hides during a toast).
-                    toastCapsule.padding(.leading, hasMedia ? 8 : 2)
-                    agentPill.padding(.leading, 6)
-                    Spacer(minLength: 0)
+                    HStack(spacing: 0) {
+                        // Fixed notch-width block reserves the hardware notch; content
+                        // starts exactly at the notch's right edge and a trailing
+                        // Spacer keeps the whole row hard against the left. This can't
+                        // right-drift the way a padding+alignment combo did.
+                        Color.clear.frame(width: metrics.notchWidth + 4, height: 1)
+                        ears
+                        // Toast + agent pill both float outboard of the media ear;
+                        // only one is present at a time (pill hides during a toast).
+                        toastCapsule.padding(.leading, hasMedia ? 8 : 2)
+                        agentPill.padding(.leading, 6)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: metrics.notchHeight)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(height: metrics.notchHeight)
+                // The pill morph measures + draws in this space (island top-left).
+                .coordinateSpace(name: "agentIsland")
+                // Keep the LAST good measurement — when the pill fully hides the
+                // GeometryReader unmounts and the preference reverts to .zero, which
+                // would wipe the rect and leave the NEXT open with no rest target
+                // until it re-measures (a late/again goo mount — the double-open).
+                .onPreferenceChange(AgentPillFrameKey.self) { rect in
+                    guard rect != .zero else { return }
+                    agentPillFrame = rect
+                    // Feed the goo a FROZEN target: seed it once per reveal (when the
+                    // reveal edge cleared it to .zero), then only refresh it while the
+                    // pill sits at rest. During a flight the last-seeded rect is held,
+                    // so a mid-morph row reflow can't re-aim the capsule (S7).
+                    if agentSettled || agentPillFrameLatch == .zero { agentPillFrameLatch = rect }
+                }
+                // Own its constant collapsed anchor (left edge flush at the notch).
+                // Nothing here animates horizontally on expand — the bar just fades
+                // IN PLACE, killing the old diagonal drag.
+                .padding(.leading, metrics.islandLeadingPad(expanded: false))
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Hidden while expanded AND while the close liquid is still traveling
+                // — the ears/pill may only appear after the mass has been absorbed
+                // into the notch, not fade in over the morph (the reported ghost).
+                .opacity((state.isExpanded || morphHoldExpanded) ? 0 : 1)
+                // Quick fade, its own curve (closer than the container spring) so the
+                // bar never rides the expanded panel's bubble motion.
+                .animation(.easeOut(duration: 0.2), value: state.isExpanded)
+                .animation(.easeOut(duration: 0.2), value: morphHoldExpanded)
+            } else {
+                // Pill mode (no notch — external display or clamshell): a
+                // centered floating capsule sitting in the menu bar. Media grows
+                // it into the now-playing pill; a toast grows it into the
+                // two-line bubble (both rendered by `ears`). The agent pill
+                // floats as its own glass capsule beside it, mirroring the notch
+                // bar's layout. Centered by the container's .top alignment —
+                // matches the `collapsed:` leading pad AppDelegate hit-tests on.
+                ZStack {
+                    if collapsedVisible, !state.isExpanded { VisualEffectBlur() }
+                    Color.black.opacity(!state.isExpanded && collapsedVisible ? 1 : 0)
+                }
+                .frame(width: collapsedPillSize.width, height: collapsedPillSize.height)
+                .overlay(alignment: .top) { ears }
+                .clipShape(Capsule())
+                .overlay {
+                    // A hairline lifts the floating pill off the wallpaper.
+                    if !state.isExpanded {
+                        Capsule().strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
+                    }
+                }
+                .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+                // The agent pill hangs OFF the pill's right edge as an overlay
+                // rather than joining a centered HStack. Laid out as a pair the
+                // two capsules shared the centering, which pushed the pill
+                // itself ~20pt left of screen centre — while the close morph,
+                // the hover zone and the hit rect all still aimed at dead
+                // centre. An overlay takes no layout width, so the pill owns
+                // the centre and extras grow rightward, exactly like the notch.
+                .overlay(alignment: .trailing) {
+                    agentPill
+                        .fixedSize()
+                        .alignmentGuide(.trailing) { d in d[.leading] - 6 }
+                }
+                // The pill rides vertically centered in the menu-bar strip.
+                .offset(y: metrics.pillDrop)
+                .opacity(state.isExpanded ? 0 : 1)
+                .animation(.easeOut(duration: 0.2), value: state.isExpanded)
             }
-            // The pill morph measures + draws in this space (island top-left).
-            .coordinateSpace(name: "agentIsland")
-            // Keep the LAST good measurement — when the pill fully hides the
-            // GeometryReader unmounts and the preference reverts to .zero, which
-            // would wipe the rect and leave the NEXT open with no rest target
-            // until it re-measures (a late/again goo mount — the double-open).
-            .onPreferenceChange(AgentPillFrameKey.self) { rect in
-                guard rect != .zero else { return }
-                agentPillFrame = rect
-                // Feed the goo a FROZEN target: seed it once per reveal (when the
-                // reveal edge cleared it to .zero), then only refresh it while the
-                // pill sits at rest. During a flight the last-seeded rect is held,
-                // so a mid-morph row reflow can't re-aim the capsule (S7).
-                if agentSettled || agentPillFrameLatch == .zero { agentPillFrameLatch = rect }
-            }
-            // Own its constant collapsed anchor (left edge flush at the notch).
-            // Nothing here animates horizontally on expand — the bar just fades
-            // IN PLACE, killing the old diagonal drag.
-            .padding(.leading, metrics.islandLeadingPad(expanded: false))
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // Hidden while expanded AND while the close liquid is still traveling
-            // — the ears/pill may only appear after the mass has been absorbed
-            // into the notch, not fade in over the morph (the reported ghost).
-            .opacity((state.isExpanded || morphHoldExpanded) ? 0 : 1)
-            // Quick fade, its own curve (closer than the container spring) so the
-            // bar never rides the expanded panel's bubble motion.
-            .animation(.easeOut(duration: 0.2), value: state.isExpanded)
-            .animation(.easeOut(duration: 0.2), value: morphHoldExpanded)
 
             // Expanded: nav bar + content panel below the notch. The nav bar
             // "goo merges" — it buds up out of the panel's top edge on a liquid
@@ -889,7 +931,39 @@ struct NotchView: View {
         // liquid hide ran on an empty bar — all read as double activations.
         let mediaEarMounted = (showMediaEar || earLinger) && !state.isExpanded
         return Group {
-            if pomodoro.isRunning, settings.timerCountdownEar,
+            if let toast = state.toast, !state.isExpanded, !metrics.hasNotch {
+                // Pill mode: a centered song-change bubble — artwork + two
+                // lines of text, filling the taller toast pill. (With a notch
+                // the toast is its own floating capsule — `toastCapsule`.)
+                HStack(spacing: 10) {
+                    if toast.useArtwork, let art = media.artwork {
+                        Image(nsImage: art)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 30, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    } else {
+                        Image(systemName: toast.icon)
+                            .font(.system(size: 15))
+                            .foregroundStyle(toast.color)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(toast.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                        if let sub = toast.subtitle {
+                            Text(sub)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.6))
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .transition(.opacity)
+            } else if pomodoro.isRunning, settings.timerCountdownEar,
                       !mediaEarMounted,
                       !fullscreenHidden,
                       !state.isExpanded {
@@ -942,18 +1016,19 @@ struct NotchView: View {
                             .transition(.opacity.combined(with: .scale(scale: 0.85)))
                         } else {
                             HStack(spacing: 6) {
-                                artworkThumb(side: metrics.notchHeight - 10)
+                                artworkThumb(side: collapsedEarHeight - 10)
                                 Group {
                                     if np.isPlaying {
                                         // A dead tap must not animate: the
                                         // synthetic sine is indistinguishable
                                         // from a live waveform, so a denied
                                         // permission would look like it works.
-                                        LiveEqualizer(barCount: 4, maxHeight: 14,
+                                        LiveEqualizer(barCount: 4,
+                                                      maxHeight: metrics.hasNotch ? 14 : 12,
                                                       color: media.accent)
                                     } else {
                                         Image(systemName: "play.fill")
-                                            .font(.system(size: 10))
+                                            .font(.system(size: metrics.hasNotch ? 10 : 11))
                                             .foregroundStyle(media.accent)
                                     }
                                 }
@@ -964,7 +1039,7 @@ struct NotchView: View {
                     }
                     .animation(.easeOut(duration: 0.15), value: state.earHovered)
                  }
-                 .frame(height: metrics.notchHeight)
+                 .frame(height: collapsedEarHeight)
                  // The dots carry the content through flight; the real views
                  // sharpen in only over the last 16% (the goo's `iconIn` window).
                  // At rest this is 1, so the hover→transport morph works normally.
@@ -1439,13 +1514,42 @@ struct NotchView: View {
     /// Animatable relay so its close-progress branch + opacity window render every
     /// mid-flight frame. Fades in as the real glass fades out, and fades out at the
     /// very end as the collapsed island (bare notch) takes over.
+    /// The collapsed pill's LIVE resting size in pill mode — standby, taller
+    /// now-playing, or toast bubble. Read off the same settled signals the pill
+    /// renders from (`showMediaEar`, not raw player state), so anything aiming
+    /// at the pill — the close morph, the hit rect — can never target a size the
+    /// pill won't actually be.
+    private var collapsedPillSize: CGSize {
+        let media = !fullscreenHidden
+            && (showMediaEar || (pomodoro.isRunning && settings.timerCountdownEar))
+        return metrics.collapsedSize(withMedia: media,
+                                     toast: state.toast != nil && !fullscreenHidden)
+    }
+
+    /// Height the collapsed media row lays out in: the notch strip on a MacBook,
+    /// the taller now-playing pill on a notchless display. Art and waveform size
+    /// off this, so the row fills the pill instead of floating in it.
+    private var collapsedEarHeight: CGFloat {
+        metrics.hasNotch ? metrics.notchHeight : NotchMetrics.pillMediaHeight
+    }
+
     private var liquidCloseLayer: some View {
         // Prefer the size latched at collapse start (S11): a zoomed Mirror has
         // already reverted `expandedSize` to standard by the time this renders,
         // so recomputing it would start the Surface Return from the wrong rect.
         // `.zero` (every non-mirror close) falls back to the live expandedSize.
         let panel = state.closePanelSize == .zero ? expandedSize : state.closePanelSize
+        // Pill mode: the mass has to land ON the resting pill, and the pill's
+        // size is LIVE — a close while music plays settles onto the wider
+        // now-playing pill, a close at standby onto the small one. Read it from
+        // the same settled signals the pill itself renders off, so the goo can
+        // never aim at a size the pill won't be.
         let canvasW: CGFloat = panel.width + 2 * LiquidClose.hPad
+        let pillRest: CGRect? = metrics.hasNotch ? nil : {
+            let s = collapsedPillSize
+            return CGRect(x: (canvasW - s.width) / 2, y: metrics.pillDrop,
+                          width: s.width, height: s.height)
+        }()
         let stack: CGFloat = metrics.notchHeight + NotchMetrics.islandGap
             + NotchMetrics.navIslandHeight + NotchMetrics.navContentGap
         let canvasH: CGFloat = stack + panel.height + LiquidClose.botPad
@@ -1475,6 +1579,7 @@ struct NotchView: View {
                                    + NotchMetrics.navContentGap) * CGFloat(navE),
                             panelWidth: panel.width,
                             panelHeight: panel.height,
+                            pillRest: pillRest,
                             debugPink: liquidClosePink)
                     .frame(width: canvasW, height: canvasH, alignment: .top)
                     .opacity(bodyOp)

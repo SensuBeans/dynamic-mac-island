@@ -289,12 +289,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } else {
                 // LOCKSTEP: the collapsed bar renders off the SETTLED reveal
                 // signal (EarRevealModel), so the hover rect must too.
-                s = self.metrics.collapsedSize(withMedia: self.earReveal.earVisible || (self.pomodoro.isRunning && self.settings.timerCountdownEar),
+                let media = self.earReveal.earVisible
+                    || (self.pomodoro.isRunning && self.settings.timerCountdownEar)
+                s = self.metrics.collapsedSize(withMedia: media,
                                                toast: self.state.toast != nil,
                                                withAgent: self.agentSessions.hasActivePill)
-                x = self.metrics.islandLeadingPad(expanded: false)
+                // Centre on the PILL alone, not pill+agent: the agent pill hangs
+                // off the right edge as an overlay, so the pill owns the centre
+                // and the rect simply extends rightward to cover both.
+                let pillOnly = self.metrics.collapsedSize(withMedia: media,
+                                                          toast: self.state.toast != nil)
+                x = self.metrics.islandLeadingPad(expanded: false, collapsed: pillOnly)
             }
-            let y = self.host.isFlipped ? 0 : self.host.bounds.height - s.height
+            // The collapsed pill floats down into the menu bar on notchless
+            // displays; its hit rect must follow so hover still lands on it.
+            let drop = (!self.state.isExpanded && !self.metrics.hasNotch)
+                ? self.metrics.pillDrop : 0
+            let y = self.host.isFlipped ? drop
+                                        : self.host.bounds.height - s.height - drop
             return NSRect(x: x, y: y, width: s.width, height: s.height)
         }
         host.onMouseState = { [weak self] inside in self?.hoverIsland(inside) }
@@ -340,7 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.state.isExpanded { return self.host.islandRect() }
             let b = self.host.bounds
             let s = self.metrics.hoverZoneSize
-            let y = self.host.isFlipped ? 0 : b.height - s.height
+            let drop = self.metrics.hasNotch ? 0 : self.metrics.pillDrop
+            let y = self.host.isFlipped ? drop : b.height - s.height - drop
             return NSRect(x: (b.width - s.width) / 2, y: y,
                           width: s.width, height: s.height)
         }
@@ -1324,6 +1337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the panel was expanded.
         if let old = metrics,
            old.windowFrame == new.windowFrame,
+           old.hasNotch == new.hasNotch,
            old.notchWidth == new.notchWidth,
            old.notchHeight == new.notchHeight {
             return
