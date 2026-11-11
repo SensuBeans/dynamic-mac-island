@@ -114,6 +114,9 @@ struct AgentSession: Identifiable {
     /// at the machine to watch. Cleared by `acknowledgeResumeReports()`.
     var resumeVerdict: ResumeReport?
 
+    /// The other Mac this session runs on ("Mac mini"), nil = this Mac. Remote rows are read-only.
+    var machine: String? = nil
+
     /// A session parked waiting for the user (a permission prompt or the end of
     /// a turn) — the states the notch offers an Approve / Open action for.
     var needsAttention: Bool { state == .waiting || state == .interrupted }
@@ -507,6 +510,11 @@ final class AgentSessionsModel: ObservableObject {
 
     /// Currently-armed sessions, keyed by sessionId. Touched only on `ioQueue`.
     private var armedResumes: [String: ArmedResume] = [:]
+    /// True when the last `readSessionMetas()` could not see everything — the
+    /// sessions directory failed to list, or a `<pid>.json` failed to read or
+    /// parse. A session missing from such a read is NOT proof its terminal
+    /// closed. ioQueue only.
+    private var lastMetaReadIncomplete = false
     /// Sessions the user explicitly turned auto-resume ON for via the row menu — a
     /// persistent per-session opt-in. An opted-in session arms the moment a reset
     /// is resolvable (a live cap or its own limit banner), bypassing the cut-off
@@ -778,19 +786,49 @@ final class AgentSessionsModel: ObservableObject {
     /// (`ingestChanged`), which reports file creates too, so this never repeats.
     private func scan() {
         let now = Date()
-        for path in jsonlFiles() { processFile(path, now: now) }
+        // A LIVE session's own transcript is adopted however long it has been
+        // quiet. This walk never repeats, so a session silent past idleMax at
+        // launch used to get no parser until it wrote again — no banner, no
+        // context, and an arm made on it later could never fire.
+        let liveSids = Set(readSessionMetas().keys)
+        for path in jsonlFiles() {
+            let sid = (path as NSString).lastPathComponent
+                .replacingOccurrences(of: ".jsonl", with: "")
+            processFile(path, now: now, force: liveSids.contains(sid))
+        }
         rebuild()
+    }
+
+    /// Adopt a live session's transcript on demand when it has no parser yet
+    /// (it was quiet past idleMax when the launch scan ran). Looks only at
+    /// `<projects>/<dir>/<sessionId>.jsonl` — no tree walk.
+    private func adoptTranscriptIfMissing(_ sessionId: String) {
+        guard parser(forID: sessionId) == nil,
+              let dirs = try? FileManager.default.contentsOfDirectory(atPath: projectsURL.path)
+        else { return }
+        let now = Date()
+        for dir in dirs {
+            let path = projectsURL.appendingPathComponent(dir)
+                .appendingPathComponent("\(sessionId).jsonl").path
+            if FileManager.default.fileExists(atPath: path) {
+                processFile(path, now: now, force: true)
+            }
+        }
     }
 
     /// FSEvents delivered these paths — adopt/ingest just them (no tree walk).
     private func ingestChanged(_ paths: [String]) {
         let now = Date()
-        for path in paths where path.hasSuffix(".jsonl") { processFile(path, now: now) }
+        let transcripts = paths.filter { $0.hasSuffix(".jsonl") }
+        // A batch with no transcript path changed nothing a row shows; the
+        // periodic timer still rebuilds, so skip the full rebuild here.
+        guard !transcripts.isEmpty else { return }
+        for path in transcripts { processFile(path, now: now) }
         rebuild()
     }
 
     /// Adopt a new live file or read a known file's appended bytes.
-    private func processFile(_ path: String, now: Date) {
+    private func processFile(_ path: String, now: Date, force: Bool = false) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return }
         let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
         let mtime = (attrs[.modificationDate] as? Date) ?? now
@@ -814,7 +852,9 @@ final class AgentSessionsModel: ObservableObject {
             // arms are already in place by the time this is consulted.
             let sid = (path as NSString).lastPathComponent
                 .replacingOccurrences(of: ".jsonl", with: "")
-            guard now.timeIntervalSince(mtime) < idleMax || armedResumes[sid] != nil
+            // `force`: the caller knows this is a LIVE session's transcript (see
+            // `scan` / `adoptTranscriptIfMissing`), so its age is irrelevant.
+            guard force || now.timeIntervalSince(mtime) < idleMax || armedResumes[sid] != nil
             else { return }
             let p = FileParser(path: path, now: now)
             parsers[path] = p
@@ -836,6 +876,7 @@ final class AgentSessionsModel: ObservableObject {
     private func rebuild() {
         let now = Date()
         let metas = readSessionMetas()   // live sessions (terminals + bg jobs), by sessionId
+        let metasComplete = !lastMetaReadIncomplete   // captured before anything re-reads
 
         // Job ids of background runs still alive this tick. A parked parent's
         // "busy" is only trustworthy while the job it is waiting on is in here
@@ -944,9 +985,13 @@ final class AgentSessionsModel: ObservableObject {
             // (Background sessions were excluded at the top of the loop — they are
             // neither rows nor resume candidates, since there is no terminal to
             // type a keystroke into.)
+            // newestEntryTs is the PARENT transcript's clock only — the same
+            // value the fire-time "user took over" guard reads via
+            // `parser(forID:)`. `lastActivity` also folds in subagent files, and
+            // a subagent entry newer than the parent made that guard unmatchable.
             resumeCandidates.append(ResumeCandidate(
                 id: id, pid: meta.pid, host: identity.host, tty: identity.tty,
-                newestEntryTs: lastActivity, midTurn: p?.isResumeWorthy ?? false,
+                newestEntryTs: p?.newestEntryTs, midTurn: p?.isResumeWorthy ?? false,
                 lastMsgIsAssistant: p?.lastMsgIsAssistant ?? false, status: meta.status,
                 bannerTs: banner?.entryTs, bannerResetText: banner?.resetText))
         }
@@ -969,7 +1014,7 @@ final class AgentSessionsModel: ObservableObject {
         // Refresh cap state BEFORE arming (readUsage updates `lastUsage`), then
         // arm/disarm from this tick's candidates.
         readUsage()
-        evaluateArming(resumeCandidates, now: now)
+        evaluateArming(resumeCandidates, liveIDs: liveIDs, metasComplete: metasComplete, now: now)
 
         // Stamp the armed fire-time onto each session so the row can render its
         // countdown chip (inject mode only — notify-only shows no chip).
@@ -1024,14 +1069,21 @@ final class AgentSessionsModel: ObservableObject {
     /// Arm/disarm sessions for auto-resume from this tick's candidates + cap state.
     /// Called inside `rebuild()` after `readUsage()`; spawns nothing. Also emits
     /// the per-session decision trail (Fix 2) and persists the arm set (Fix 1).
-    private func evaluateArming(_ candidates: [ResumeCandidate], now: Date) {
-        let liveIDs = Set(candidates.map(\.id))
+    /// `liveIDs` is every live (non-background) session this tick, INCLUDING ones
+    /// the user dismissed from the list — a dismissed row is hidden, not closed.
+    /// `metasComplete` is false when this tick's session-file read could not see
+    /// everything; a session missing from such a read is not proof it is gone.
+    private func evaluateArming(_ candidates: [ResumeCandidate], liveIDs: Set<String>,
+                                metasComplete: Bool, now: Date) {
         // Forget decision history for sessions that closed (bounds the map).
         lastResumeDecision = lastResumeDecision.filter { liveIDs.contains($0.key) }
         // Prune per-session opt-in to live sessions (a closed session's sid never
         // returns — a new `claude` gets a fresh sid — so a stale opt-in is dead
-        // weight). Bounds the set + the persisted array.
-        autoResumeOptIn = autoResumeOptIn.filter { liveIDs.contains($0) }
+        // weight). Bounds the set + the persisted array. Skipped on a tick whose
+        // read was incomplete: one torn read must not silently drop an opt-in.
+        if metasComplete {
+            autoResumeOptIn = autoResumeOptIn.filter { liveIDs.contains($0) }
+        }
 
         // Settings OFF ⇒ detector inert: drop live arms (do NOT consume epochs, so
         // toggling back ON re-arms), keep the timer honest, done.
@@ -1073,6 +1125,13 @@ final class AgentSessionsModel: ObservableObject {
         // where the only fire-capable arms in the feature's history disappeared
         // without a trace.
         for id in armedResumes.keys where !liveIDs.contains(id) {
+            // Only a session that is REALLY gone loses its arm: its process is
+            // dead, or a complete read of the sessions directory no longer lists
+            // it. Missing from a torn/failed read with the pid still alive is a
+            // blip — keep the arm; the fire-time guards re-check everything.
+            if let pid = armedResumes[id]?.pid, kill(Int32(pid), 0) == 0, !metasComplete {
+                continue
+            }
             let resetAt = armedResumes[id]?.resetAt
             armedResumes.removeValue(forKey: id)
             lastResumeDecision[id] = nil
@@ -1134,7 +1193,16 @@ final class AgentSessionsModel: ObservableObject {
             // Any arms; the banner path no longer depends on the spool reaching 99%.
             let optedIn = autoResumeOptIn.contains(c.id)
             let hasBanner = c.bannerTs != nil
-            guard optedIn || hasBanner || spoolCapped else {
+            // The opt-in alone is NOT a trigger: it only waives the shape gate
+            // below. It still waits for real evidence of a cap (banner or spool
+            // ceiling) — a future reset in the spool is present for every active
+            // window, so arming on it typed `continue` into uncapped sessions.
+            guard hasBanner || spoolCapped else {
+                if optedIn {
+                    noteDecision(c.id, key: "optin-pending",
+                                 line: "optin-pending — not capped yet(pct=\(lastUsage?.sessionPct ?? 0))")
+                    continue
+                }
                 // Nothing to arm. Log the pct once per entry into this state (the
                 // pct lives in the LINE, not the dedup KEY, so pct drift doesn't
                 // re-log).
@@ -1143,7 +1211,8 @@ final class AgentSessionsModel: ObservableObject {
                 continue
             }
             guard let resetAt = resolveReset(spool: lastUsage?.sessionResetsAt,
-                                             bannerText: c.bannerResetText, now: now) else {
+                                             bannerText: c.bannerResetText,
+                                             bannerTs: c.bannerTs, now: now) else {
                 // Opted-in but no limit yet — hold the opt-in and keep checking each
                 // tick; it arms the instant a cap/banner gives a reset time.
                 noteDecision(c.id, key: optedIn ? "optin-pending" : "no-reset",
@@ -1226,6 +1295,9 @@ final class AgentSessionsModel: ObservableObject {
                 self.autoResumeOptIn.insert(sessionId)
                 // Drop any prior cancel of this session's windows so re-enabling sticks.
                 self.consumedEpochs = self.consumedEpochs.filter { !$0.hasPrefix("\(sessionId)|") }
+                // A quiet session may have no parser yet; without one it can
+                // neither show its banner nor pass the fire-time transcript guard.
+                self.adoptTranscriptIfMissing(sessionId)
                 self.armOptIn(sessionId, now: Date())
                 self.logDecision("optin-enable session=\(sessionId.prefix(8))")
             } else {
@@ -1246,12 +1318,24 @@ final class AgentSessionsModel: ObservableObject {
     /// it pending (evaluateArming keeps retrying every tick until a limit appears).
     /// Never toasts — a pending opt-in is a valid, expected state.
     private func armOptIn(_ sessionId: String, now: Date) {
+        let p = parser(forID: sessionId)
+        let banner = p?.limitBanner
+        // Same capped evidence `evaluateArming` requires: the session's own limit
+        // banner, or the account spool at its ceiling with the reset ahead. A
+        // future reset in the spool alone is NOT a cap — every active window has
+        // one — so without this the opt-in armed on an uncapped session.
+        let spoolCapped: Bool = {
+            guard let u = lastUsage, (u.sessionPct ?? 0) >= 99,
+                  let r = u.sessionResetsAt, r > now else { return false }
+            return true
+        }()
         guard armedResumes[sessionId] == nil,
+              banner != nil || spoolCapped,
               let meta = readSessionMetas()[sessionId],
               let resetAt = resolveReset(spool: lastUsage?.sessionResetsAt,
-                                         bannerText: parser(forID: sessionId)?.limitBanner?.resetText,
+                                         bannerText: banner?.resetText,
+                                         bannerTs: banner?.entryTs,
                                          now: now) else { return }
-        let p = parser(forID: sessionId)
         let identity = resolveIdentity(pid: meta.pid, sid: sessionId)
         let mode: ResumeMode = Self.canInject(into: identity.host) ? .inject : .notifyOnly
         armedResumes[sessionId] = ArmedResume(
@@ -1661,14 +1745,34 @@ final class AgentSessionsModel: ObservableObject {
                 controlQueue.async { [weak self] in
                     let outcome = AgentTerminalControl.resume(pid: pid, ttyPath: ttyPath)
                     DispatchQueue.main.async {
-                        // Tab vanished between guard and send ⇒ notify instead.
-                        let injected = outcome != .notFound
+                        // Only `.ok` means `continue` was actually typed. Every other
+                        // outcome is a failure with its own reason — filing a denied
+                        // Automation grant or a hung Apple Event as "Resumed" left
+                        // the session dead under a green verdict.
+                        let injected = outcome == .ok
+                        let failure: String
+                        switch outcome {
+                        case .ok:
+                            failure = ""
+                        case .notFound:
+                            failure = "its Terminal.app tab was gone by the time limits reset"
+                        case .noTTY:
+                            failure = "the notch couldn't tell which Terminal.app tab it was in"
+                        case .notAuthorized:
+                            failure = "the notch isn't allowed to control Terminal — allow it in "
+                                + "System Settings › Privacy & Security › Automation"
+                        case .appNotRunning:
+                            failure = "Terminal.app wasn't running when limits reset"
+                        case .timedOut:
+                            failure = "Terminal.app didn't respond in time, so continue may not "
+                                + "have been typed"
+                        }
                         self?.settleFire(injected: injected, project: project, name: name,
                                          sessionId: armSessionId, resetAt: armResetAt,
                                          detail: injected
                                              ? "typed continue into its Terminal.app tab"
-                                             : "its Terminal.app tab was gone by the time "
-                                               + "limits reset")
+                                             : failure,
+                                         failed: !injected)
                     }
                 }
             case .other where a.host.isDeck:
@@ -1958,6 +2062,7 @@ final class AgentSessionsModel: ObservableObject {
         // confident sentence "No Claude Code sessions running" while the user
         // was staring at three live Claude terminals.
         let names: [String]
+        lastMetaReadIncomplete = false
         do {
             names = try FileManager.default.contentsOfDirectory(atPath: sessionsURL.path)
             setDiscovery(.ok)
@@ -1965,6 +2070,7 @@ final class AgentSessionsModel: ObservableObject {
             let missing = !FileManager.default.fileExists(atPath: sessionsURL.path)
             setDiscovery(missing ? .sessionsDirMissing
                                  : .sessionsDirUnreadable((error as NSError).localizedDescription))
+            lastMetaReadIncomplete = true
             return [:]
         }
         var out: [String: SessionMeta] = [:]
@@ -1973,8 +2079,13 @@ final class AgentSessionsModel: ObservableObject {
             guard let data = try? Data(contentsOf: url),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let sid = obj["sessionId"] as? String,
-                  let pid = (obj["pid"] as? NSNumber)?.int32Value,
-                  kill(pid, 0) == 0 else { continue }
+                  let pid = (obj["pid"] as? NSNumber)?.int32Value else {
+                // Unreadable / torn file (e.g. caught mid-rewrite): this read
+                // cannot vouch that its session is gone.
+                lastMetaReadIncomplete = true
+                continue
+            }
+            guard kill(pid, 0) == 0 else { continue }
             // `kill(pid, 0)` only proves SOMETHING owns that pid. Pids are
             // recycled, and these files outlive the process that wrote them, so a
             // dead session whose number got reused by any unrelated program read as
@@ -2317,6 +2428,11 @@ final class AgentSessionsModel: ObservableObject {
     /// zone; a 5-hour reset is always ahead, so if today's instance already
     /// passed (e.g. an "11:59pm" reset read just after midnight) roll it to
     /// tomorrow. nil if the text has no parseable "resets …" clause / bad zone.
+    ///
+    /// `now` is the ANCHOR the clock time is resolved against — callers pass the
+    /// banner entry's own timestamp, so the result is the first occurrence of
+    /// that clock time after the banner was written (not after "now", which
+    /// rolled a stale banner's reset to the same time tomorrow and re-armed it).
     private static func parseBannerReset(_ text: String, now: Date) -> Date? {
         let ns = text as NSString
         guard let m = bannerResetRegex.firstMatch(
@@ -2347,8 +2463,14 @@ final class AgentSessionsModel: ObservableObject {
     ///      a stale/garbled spool can't override a ground-truth banner;
     ///   2. the banner text's own parsed reset time.
     /// nil ⇒ no trustworthy reset instant (nothing to arm / fire on).
-    private func resolveReset(spool: Date?, bannerText: String?, now: Date) -> Date? {
-        let bannerDate = bannerText.flatMap { Self.parseBannerReset($0, now: now) }
+    private func resolveReset(spool: Date?, bannerText: String?, bannerTs: Date?,
+                              now: Date) -> Date? {
+        // Resolve the banner's clock time against the banner's own timestamp.
+        let bannerDate = bannerText.flatMap { Self.parseBannerReset($0, now: bannerTs ?? now) }
+        // A banner whose reset has already passed is stale — the window it
+        // announced is over (it lingers as the last message after a fire until
+        // the resumed turn writes). It must never produce a new arm.
+        if let b = bannerDate, b <= now { return nil }
         if let s = spool, s > now {
             if let b = bannerDate {
                 // Agree within 10 min ⇒ trust the spool; disagree ⇒ the banner is

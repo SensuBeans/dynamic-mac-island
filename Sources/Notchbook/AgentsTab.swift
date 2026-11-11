@@ -8,6 +8,7 @@ import SwiftUI
 /// existing dark-glass idiom (see TabViews.swift: StatTile / progressBar).
 struct AgentsTab: View {
     @EnvironmentObject var agents: AgentSessionsModel
+    @EnvironmentObject var remote: RemoteAgentsModel
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var settings: SettingsStore
 
@@ -28,7 +29,7 @@ struct AgentsTab: View {
     /// to 120 and the spring-animated panel visibly dipped cap→120→real. Report
     /// nil until both readers that feed the height have reported.
     private var naturalHeight: CGFloat? {
-        if agents.sessions.isEmpty { return 150 }
+        if agents.sessions.isEmpty && remote.sessions.isEmpty { return 150 }
         guard rowsH > 0, (!hasUsage || usageH > 0) else { return nil }
         return (hasUsage ? usageH + 8 : 0) + rowsH
     }
@@ -64,7 +65,7 @@ struct AgentsTab: View {
 
     @ViewBuilder
     private var sessionList: some View {
-        if agents.sessions.isEmpty {
+        if agents.sessions.isEmpty && remote.sessions.isEmpty {
             emptyState
         } else {
             // Always a ScrollView so any overflow scrolls; when the rows fit, it
@@ -89,8 +90,13 @@ struct AgentsTab: View {
         }
     }
 
+    @ViewBuilder
     private var rows: some View {
         ForEach(agents.sessions) { session in
+            AgentRow(session: session, now: now)
+        }
+        // The other Mac's agents, after this Mac's own, each labeled with that Mac's name.
+        ForEach(remote.sessions) { session in
             AgentRow(session: session, now: now)
         }
     }
@@ -433,11 +439,14 @@ private struct AgentRow: View {
         // ⚡ bolt never gave.
         .contextMenu {
             autoResumeMenu
-            Divider()
+            if session.machine == nil { Divider() }
             // The only way to get rid of a session you are done with. A row
             // otherwise lives until its terminal closes, so a Claude left running
             // for days sat in the list — and in the count — forever.
-            Button("Remove from List") { agents.dismiss(sessionID: session.id) }
+            // Not on another Mac's rows: the local model can't dismiss them (they'd stay put).
+            if session.machine == nil {
+                Button("Remove from List") { agents.dismiss(sessionID: session.id) }
+            }
         }
         // Leaving the island (row unmount: collapse / tab switch / re-sort) drops
         // any in-flight "Cancel?" confirm back to the armed pill. The pending work
@@ -501,6 +510,9 @@ private struct AgentRow: View {
     /// app a row would open. These name the host instead of the tty: the useful
     /// half of the old tag without the noise.
     private var terminalTagText: (symbol: String, text: String)? {
+        if let machine = session.machine {
+            return (machine.localizedCaseInsensitiveContains("book") ? "laptopcomputer" : "desktopcomputer", machine)
+        }
         switch session.host {
         case .terminalApp:      return ("terminal", "Terminal")
         case .other(let app):   return session.host.isDeck ? ("rectangle.split.2x1", "Deck")

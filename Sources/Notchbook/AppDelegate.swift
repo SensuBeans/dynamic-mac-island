@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audioOutput = AudioOutputModel()
     private let settings = SettingsStore()
     private let agentSessions = AgentSessionsModel()
+    private let remoteAgents = RemoteAgentsModel()
     private let serversModel = ServersModel()
     private let notesSync = NotesSyncModel()
 
@@ -46,6 +47,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastBattery: (charging: Bool, low: Bool)?
     private var spaceWork: DispatchWorkItem?
     private var lastWallpaper = ""
+    /// Screen Recording granted? Without it kCGWindowName is unreadable and
+    /// currentWallpaperID() can only return "?". Read at launch and on every
+    /// app activation (a TCC check, so not every 0.5 s poll tick).
+    private var screenCaptureAllowed = CGPreflightScreenCaptureAccess()
+    /// Waits for a first display when launch found none (see the screen guard).
+    private var screenWaitToken: NSObjectProtocol?
 
     private func currentWallpaperID() -> String {
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly],
@@ -221,7 +228,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
-        guard let screen = NotchMetrics.notchScreen() else { return }
+        guard let screen = NotchMetrics.notchScreen() else {
+            // No display at launch (login with the lid shut, headless mini):
+            // nothing below has run, so wait for the first screen and then run
+            // this setup once. The normal launch path never comes through here.
+            guard screenWaitToken == nil else { return }
+            screenWaitToken = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self, NotchMetrics.notchScreen() != nil,
+                      let token = self.screenWaitToken else { return }
+                NotificationCenter.default.removeObserver(token)
+                self.screenWaitToken = nil
+                self.applicationDidFinishLaunching(notification)
+            }
+            return
+        }
         metrics = NotchMetrics(screen: screen)
         state.onQuit = { NSApp.terminate(nil) }
         // The ear's single-owner reducer watches the media pipeline from launch.
@@ -493,6 +516,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Done / Interrupted transitions (suppressed while already viewing
         // the Agents tab, mirroring the track-change toast guard).
         agentSessions.start()
+        remoteAgents.start(local: agentSessions)
         agentSessions.onTransition = { [weak self] session, _ in
             guard let self else { return }
             guard !(self.state.isExpanded && self.state.currentTab == .agents) else { return }
@@ -576,6 +600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
+            // Re-read Screen Recording here too, so granting it in System
+            // Settings and switching back resumes the wallpaper sweep.
+            self?.screenCaptureAllowed = CGPreflightScreenCaptureAccess()
             self?.refreshFullscreenState("app-activate")
         })
 
@@ -612,7 +639,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         spacePoll = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             // Safety-net fullscreen re-check (publishes only on real change).
-            self.refreshFullscreenState("poll")
+            // Its only consumer is `frontmostIsFullscreen && hideInFullscreen`,
+            // so the window sweep is skipped while the setting is off; turning
+            // the setting on re-checks at once (sink below), and the Space-change
+            // and app-activate re-checks still run regardless.
+            if self.settings.hideInFullscreen {
+                self.refreshFullscreenState("poll")
+            }
+            // Without Screen Recording the wallpaper name always reads "?" and
+            // the tick returns below, so skip that second window sweep outright.
+            guard self.screenCaptureAllowed else { return }
             let wallpaper = self.currentWallpaperID()
             guard wallpaper != "?" else { return }
             if self.lastWallpaper.isEmpty {
@@ -629,6 +665,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         spacePoll?.tolerance = 0.1
+
+        // Turning "Hide in fullscreen" back on must not act on a stale value
+        // (the poll skips the sweep while it is off): re-check immediately.
+        settings.$hideInFullscreen.dropFirst()
+            .sink { [weak self] on in
+                guard on else { return }
+                self?.refreshFullscreenState("setting-on")
+            }
+            .store(in: &cancellables)
 
         // Seed the fullscreen state at launch (honors -FullscreenHideForce for V2).
         refreshFullscreenState("startup")
@@ -1011,6 +1056,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(lyrics)
             .environmentObject(audioOutput)
             .environmentObject(agentSessions)
+            .environmentObject(remoteAgents)
             .environmentObject(serversModel)
             .environmentObject(notesSync)
             .environmentObject(settings))
@@ -1021,13 +1067,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// is STILL on the island before opening — instant response for a real
     /// hover, no phantom opens from a cursor that merely passed through.
     private func hoverIsland(_ inside: Bool) {
+        // A non-Instant Expand delay must be left to elapse: the 0.12 s hover
+        // poll and every tracking-area mouseMoved re-enter here while the
+        // cursor rests on the notch, and cancel-and-reschedule on each call
+        // meant a 0.2 / 0.5 s dwell could never fire. So while a delayed
+        // expand is pending, staying inside keeps it; only leaving cancels it.
+        // Instant (0) keeps the original cancel-and-reschedule path unchanged.
+        if inside, settings.expandDelay > 0, settings.hoverToExpand, !state.isExpanded,
+           let pending = expandWork, !pending.isCancelled {
+            return
+        }
         expandWork?.cancel()
         // Hover-to-expand off: the panel only opens on a click in the notch
         // (see host.onZoneClick).
         guard settings.hoverToExpand else { return }
         guard inside, !state.isExpanded else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.state.isExpanded else { return }
+            guard let self else { return }
+            // Fired: no longer pending, so the next hover schedules afresh.
+            self.expandWork = nil
+            guard !self.state.isExpanded else { return }
             let inWindow = self.host.convert(self.host.islandRect(), to: nil)
             let screenRect = self.panel.convertToScreen(inWindow)
             if screenRect.contains(NSEvent.mouseLocation) { self.expand() }
