@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var keyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    private var zoneClickMonitors: [Any] = []
     /// Collapse hit-test rect, held at the recent MAX through a shrink's spring
     /// settle. islandRect() returns the ENDPOINT size at once, but the panel
     /// animates to it over ~0.3 s, so on a SHRINK (a row removed, a session ends,
@@ -366,6 +367,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.onZoneClick = { [weak self] in
             guard let self, !self.settings.hoverToExpand, !self.state.isExpanded else { return }
             self.expand()
+        }
+        // The click above only arrives when the press reaches this view. On a bare
+        // notch the collapsed island draws nothing, and a click on a fully
+        // transparent part of the window can go to whatever is beneath it (or to a
+        // SwiftUI subview), so with hover-to-expand off there was no way to open
+        // it. Watch the press itself, wherever it is delivered, and open when it
+        // lands on the notch zone. Both paths end in expand(), which ignores the
+        // second call.
+        if zoneClickMonitors.isEmpty {
+            let onPress: () -> Void = { [weak self] in
+                guard let self, !self.settings.hoverToExpand, !self.state.isExpanded,
+                      self.panel.isVisible else { return }
+                let zone = self.host.hoverZoneRect?() ?? self.host.islandRect()
+                let zoneScreen = self.panel.convertToScreen(self.host.convert(zone, to: nil))
+                if zoneScreen.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation) { self.expand() }
+            }
+            if let m = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown, handler: { _ in onPress() }) {
+                zoneClickMonitors.append(m)
+            }
+            if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: { event in
+                onPress()
+                return event
+            }) {
+                zoneClickMonitors.append(m)
+            }
         }
         panel.onScroll = { [weak self] event in self?.handleIslandSwipe(event) }
         // The expand trigger hugs the physical notch exactly; the ear and
