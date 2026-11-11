@@ -28,6 +28,17 @@ final class NotesSyncModel: ObservableObject {
         var body: String        // plaintext
         var modSeconds: Double   // local-epoch seconds (consistent, not absolute)
         var load: Load = .ready
+        /// Whether the note holds more than plain text lines (see
+        /// `isRichNote`). nil = its body was never inspected. A rich note is
+        /// shown with `load == .locked` and is never written back, because a
+        /// push rebuilds the note from plain text and would strip the rest.
+        var rich: Bool? = nil
+        /// The note's first line carries Notes' title style; a push keeps it.
+        var titleHeading = false
+        /// Cache only: a local edit Apple Notes had not confirmed when the
+        /// cache was written, so the next launch sends it instead of treating
+        /// it as synced.
+        var unsent = false
 
         // Hand-rolled so a cache written before `load` existed still decodes
         // (synthesized Codable ignores default values and would throw).
@@ -44,6 +55,9 @@ final class NotesSyncModel: ObservableObject {
             body = try c.decode(String.self, forKey: .body)
             modSeconds = try c.decode(Double.self, forKey: .modSeconds)
             load = (try? c.decode(Load.self, forKey: .load)) ?? .ready
+            rich = try? c.decode(Bool.self, forKey: .rich)
+            titleHeading = (try? c.decode(Bool.self, forKey: .titleHeading)) ?? false
+            unsent = (try? c.decode(Bool.self, forKey: .unsent)) ?? false
         }
     }
 
@@ -88,6 +102,8 @@ final class NotesSyncModel: ObservableObject {
     private static let modeKey = "notesSyncMode"
     private static let folderKey = "notesSyncFolder"
     private static let cacheFile = "notes-sync-cache.json"
+    /// Name of the Notes trash folder (English systems).
+    private static let trashFolderName = "Recently Deleted"
 
     private let scriptQueue = DispatchQueue(label: "com.sensubeans.notchbook.notes",
                                             qos: .userInitiated)
@@ -109,6 +125,23 @@ final class NotesSyncModel: ObservableObject {
     /// The note the user explicitly opened; kept in `pages` even once it falls
     /// out of the most-recent window.
     private var openID: String?
+    /// A library pull is queued or running. Each one walks every folder, so a
+    /// second request while one is out is dropped rather than stacked.
+    private var pullInFlight = false
+    /// When the last pull started, for `refresh()`'s minimum interval.
+    private var lastPullAt = Date.distantPast
+    /// The island asks for a refresh on every open; pull at most this often.
+    private static let minRefreshInterval: TimeInterval = 30
+    /// A pull or body fetch failed and the user was told; cleared on the next
+    /// success so a run of failures toasts once, not on every open.
+    private var readFailing = false
+    /// Automatic retries used per note since its last edit or confirmed push.
+    private var pushRetries: [String: Int] = [:]
+    private static let maxPushRetries = 3
+    /// Debounced cache write, and the queue it runs on (off the main thread).
+    private var cacheWork: DispatchWorkItem?
+    private let cacheQueue = DispatchQueue(label: "com.sensubeans.notchbook.notes.cache",
+                                           qos: .utility)
 
     private let unit = "\u{1F}"   // field separator
     private let record = "\u{1E}" // record separator
@@ -118,7 +151,7 @@ final class NotesSyncModel: ObservableObject {
             ?? .local
         folderName = UserDefaults.standard.string(forKey: Self.folderKey) ?? "Notchbook"
         loadCache()   // instant render from the last-synced snapshot
-        if mode == .notes { pull() }
+        if mode == .notes { pull(); resendUnsent() }
     }
 
     // MARK: - Mode
@@ -126,19 +159,31 @@ final class NotesSyncModel: ObservableObject {
     func setMode(_ newMode: Mode) {
         guard newMode != mode else { return }
         mode = newMode
-        if newMode == .notes { pull() }
+        if newMode == .notes { pull(); resendUnsent() }
     }
 
     // MARK: - Pull (index the whole library)
 
     /// Called on tab open / panel expand while in Apple Notes mode.
-    func refresh() { guard mode == .notes else { return }; pull() }
+    /// The panel calls this on every open whatever tab is showing, so it is
+    /// rate-limited here: each pull is a whole-library script against Notes.
+    func refresh() {
+        guard mode == .notes, !pullInFlight,
+              Date().timeIntervalSince(lastPullAt) >= Self.minRefreshInterval
+        else { return }
+        pull()
+    }
 
     /// ONE script for the entire library: folder ids/names plus each note's id,
     /// modification date, lock flag and title. Properties are read as bulk lists
     /// (`id of notes of f`, …) — a per-note Apple Event loop is orders of
     /// magnitude slower. No bodies: those are fetched lazily by `loadBodies`.
     func pull() {
+        // One at a time: pulls share the serial queue with pushes, and stacked
+        // pulls made edits wait behind them.
+        guard !pullInFlight else { return }
+        pullInFlight = true
+        lastPullAt = Date()
         let script = """
         tell application "Notes"
             \(Self.epochPrefix)
@@ -165,8 +210,14 @@ final class NotesSyncModel: ObservableObject {
             let result = Self.run(script)
             DispatchQueue.main.async {
                 self.syncing = false
+                self.pullInFlight = false
                 if self.handlePermission(result) { return }
-                guard result.ok else { return }
+                guard result.ok else {
+                    self.lastPullAt = .distantPast   // let the next open retry
+                    self.reportReadFailure()
+                    return
+                }
+                self.readFailing = false
                 let parsed = self.parseIndex(result.out ?? "")
                 self.folders = parsed
                 self.metaIndex = Dictionary(
@@ -179,12 +230,17 @@ final class NotesSyncModel: ObservableObject {
 
     private func parseIndex(_ raw: String) -> [NoteFolder] {
         var out: [NoteFolder] = []
+        // Notes lists its trash as a folder. Notes in it must not be offered
+        // for editing, so that folder and its notes are left out.
+        var inTrash = false
         for rec in raw.components(separatedBy: record) where !rec.isEmpty {
             let parts = rec.components(separatedBy: unit)
             guard let kind = parts.first else { continue }
             if kind == "F", parts.count >= 3 {
+                inTrash = parts[2] == Self.trashFolderName
+                if inTrash { continue }
                 out.append(NoteFolder(id: parts[1], name: parts[2], notes: []))
-            } else if kind == "N", parts.count >= 5, !out.isEmpty {
+            } else if kind == "N", parts.count >= 5, !out.isEmpty, !inTrash {
                 out[out.count - 1].notes.append(
                     NoteMeta(id: parts[1],
                              title: parts[4],
@@ -221,7 +277,9 @@ final class NotesSyncModel: ObservableObject {
             } else if dirty.contains(id), let held {
                 // A local edit is in flight — the index's copy is the stale one.
                 next.append(held)
-            } else if let held, held.load == .ready, held.modSeconds == meta.modSeconds {
+            } else if let held, held.modSeconds == meta.modSeconds,
+                      (held.load == .ready && held.rich == false) || held.rich == true {
+                // Unchanged since we last read and inspected its body.
                 var p = held
                 p.title = meta.title
                 next.append(p)
@@ -254,6 +312,11 @@ final class NotesSyncModel: ObservableObject {
             }
             if pages[idx].load == .ready,
                let meta, pages[idx].modSeconds == meta.modSeconds { return }
+            if pages[idx].rich == true,
+               let meta, pages[idx].modSeconds == meta.modSeconds {
+                toastReadOnly()   // say why the editor is greyed out
+                return
+            }
             pages[idx].load = .loading
         } else {
             let page = Page(id: id,
@@ -286,7 +349,13 @@ final class NotesSyncModel: ObservableObject {
                 try
                     set n to note id "\(Self.escapeAS(id))"
                     set secs to ((modification date of n) - refDate)
-                    set out to out & (id of n) & us & (secs as string) & us & (name of n) & us & (plaintext of n) & rs
+                    set att to 1
+                    try
+                        set att to (count of attachments of n)
+                    end try
+                    set markup to ""
+                    if att is 0 then set markup to (body of n)
+                    set out to out & (id of n) & us & (secs as string) & us & (name of n) & us & (plaintext of n) & us & (att as string) & us & markup & rs
                 end try
             """
         }.joined(separator: "\n")
@@ -307,11 +376,12 @@ final class NotesSyncModel: ObservableObject {
             DispatchQueue.main.async {
                 self.syncing = false
                 if self.handlePermission(result) { return }
-                guard result.ok else { return }
+                guard result.ok else { self.reportReadFailure(); return }
+                self.readFailing = false
                 for rec in (result.out ?? "").components(separatedBy: self.record)
                 where !rec.isEmpty {
                     let parts = rec.components(separatedBy: self.unit)
-                    guard parts.count >= 4 else { continue }
+                    guard parts.count >= 6 else { continue }
                     let id = parts[0]
                     let secs = Double(parts[1]) ?? 0
                     // A local edit that landed while the fetch was in flight wins.
@@ -321,8 +391,14 @@ final class NotesSyncModel: ObservableObject {
                     self.pages[idx].title = parts[2]
                     self.pages[idx].body = parts[3]
                     self.pages[idx].modSeconds = secs
-                    self.pages[idx].load = .ready
+                    // A note with attachments or any markup beyond plain lines
+                    // stays read-only here: pushing would flatten it.
+                    let rich = (Int(parts[4]) ?? 1) > 0 || Self.isRichNote(html: parts[5])
+                    self.pages[idx].rich = rich
+                    self.pages[idx].titleHeading = !rich && Self.hasTitleHeading(html: parts[5])
+                    self.pages[idx].load = rich ? .locked : .ready
                     self.modCache[id] = secs
+                    if rich, id == self.openID { self.toastReadOnly() }
                 }
                 self.saveCache()
             }
@@ -347,6 +423,9 @@ final class NotesSyncModel: ObservableObject {
             DispatchQueue.main.async {
                 if self.handlePermission(result) { return }
                 let newID = result.ok ? result.out : nil
+                if newID == nil {
+                    self.onToast?("Couldn't create the note", "Notes did not answer")
+                }
                 if let newID { self.open(id: newID) }
                 self.pull()
                 completion?(newID)
@@ -364,6 +443,7 @@ final class NotesSyncModel: ObservableObject {
         pages[idx].body = text
         pages[idx].title = text.components(separatedBy: "\n").first ?? ""
         dirty.insert(id)
+        pushRetries[id] = nil
         saveCache()
 
         // Stamp this edit. A push that completes AFTER a newer keystroke must not
@@ -389,21 +469,83 @@ final class NotesSyncModel: ObservableObject {
     /// genuinely pending notes are flushed.
     func flushPendingEdits() {
         let pending = pushWork.keys.sorted()
-        guard !pending.isEmpty else { return }
         for id in pending {
             pushWork[id]?.cancel()
             pushWork[id] = nil
+            // A parked retry means Notes already failed this push. Running it
+            // again here would hold quit for up to 30 s per note; the note
+            // stays dirty, is cached as unsent, and goes out on next launch.
+            if pushRetries[id] != nil { continue }
+            guard let idx = pages.firstIndex(where: { $0.id == id }),
+                  pages[idx].load == .ready
+            else { continue }
+            let result = Self.run(pushScript(id: id, text: pages[idx].body,
+                                             titleHeading: pages[idx].titleHeading))
+            // Record a confirmed write so the cache below does not mark the
+            // note unsent and the next launch does not send it a second time.
+            let parts = (result.out ?? "").components(separatedBy: unit)
+            if result.ok, parts.first == "OK", parts.count >= 2,
+               let secs = Double(parts[1]) {
+                dirty.remove(id)
+                modCache[id] = secs
+                pages[idx].modSeconds = secs
+            }
+        }
+        // Cache writes are debounced; make sure the last one lands before exit.
+        saveCacheNow()
+    }
+
+    /// Queue a push for every note still marked unsent (restored from the
+    /// cache, or left behind by failed pushes) that has no push scheduled.
+    private func resendUnsent() {
+        for id in dirty where pushWork[id] == nil {
             guard let page = pages.first(where: { $0.id == id }), page.load == .ready
             else { continue }
-            _ = Self.run(pushScript(id: id, text: page.body))
+            let gen = editGeneration[id] ?? 0
+            let text = page.body
+            let work = DispatchWorkItem { [weak self] in
+                self?.push(id: id, text: text, gen: gen)
+            }
+            pushWork[id] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
         }
+    }
+
+    /// A push that did not reach Notes: say so once, keep the note dirty, and
+    /// try again a few times. The retry sits in `pushWork`, so a new keystroke
+    /// replaces it. Quitting does not run it again (see `flushPendingEdits`);
+    /// the next launch sends it.
+    private func pushFailed(id: String, text: String, gen: Int) {
+        let tries = pushRetries[id] ?? 0
+        guard tries < Self.maxPushRetries else {
+            onToast?("Not saved to Notes", "Kept here. Type again to retry")
+            return
+        }
+        if tries == 0 { onToast?("Couldn't save to Notes", "Kept here. Retrying") }
+        pushRetries[id] = tries + 1
+        let work = DispatchWorkItem { [weak self] in
+            self?.push(id: id, text: text, gen: gen)
+        }
+        pushWork[id] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: work)
+    }
+
+    /// A pull or body fetch failed. Toast once per run of failures.
+    private func reportReadFailure() {
+        guard !readFailing else { return }
+        readFailing = true
+        onToast?("Couldn't reach Notes", "Showing the last synced copy")
+    }
+
+    private func toastReadOnly() {
+        onToast?("Read-only in the island", "This note has formatting. Edit it in Notes")
     }
 
     /// The AppleScript for one push. Extracted so the terminate-time flush can run
     /// the identical script synchronously.
-    private func pushScript(id: String, text: String) -> String {
+    private func pushScript(id: String, text: String, titleHeading: Bool) -> String {
         let idEsc = Self.escapeAS(id)
-        let html = Self.escapeAS(Self.htmlBody(from: text))
+        let html = Self.escapeAS(Self.htmlBody(from: text, titleHeading: titleHeading))
         // Conflict guard only when we have a cached mod date to compare against.
         let guardScript: String
         if let cached = modCache[id] {
@@ -435,7 +577,15 @@ final class NotesSyncModel: ObservableObject {
     }
 
     private func push(id: String, text: String, gen: Int) {
-        let script = pushScript(id: id, text: text)
+        // Never write a note that is not a plain, fully loaded one (it may have
+        // turned out rich, or been locked, since this push was scheduled).
+        let page = pages.first(where: { $0.id == id })
+        if let page, page.load != .ready || page.rich != false {
+            if (editGeneration[id] ?? gen) == gen { pushWork[id] = nil; dirty.remove(id) }
+            return
+        }
+        let script = pushScript(id: id, text: text,
+                                titleHeading: page?.titleHeading ?? false)
         scriptQueue.async { [weak self] in
             guard let self else { return }
             let result = Self.run(script)
@@ -451,23 +601,35 @@ final class NotesSyncModel: ObservableObject {
                 let isCurrent = (self.editGeneration[id] ?? gen) == gen
                 if isCurrent { self.pushWork[id] = nil }
                 if self.handlePermission(result) { return }
-                guard result.ok, let out = result.out else { return }
+                guard result.ok, let out = result.out else {
+                    // Not sent. A newer queued edit will push on its own.
+                    if isCurrent { self.pushFailed(id: id, text: text, gen: gen) }
+                    return
+                }
                 let parts = out.components(separatedBy: self.unit)
                 // Stay dirty until Notes gives a definitive answer — a failed
                 // push must not let the next index pull pull the stale copy
                 // back over what the user typed. And stay dirty regardless if a
                 // newer edit is already queued (see above).
-                if isCurrent { self.dirty.remove(id) }
+                if isCurrent { self.dirty.remove(id); self.pushRetries[id] = nil }
                 if parts.first == "CONFLICT", parts.count >= 4 {
-                    // Note changed elsewhere — pull fresh content in, don't clobber.
-                    let secs = Double(parts[1]) ?? 0
+                    // A newer edit is still queued with the local text. Taking
+                    // the Notes copy and its stamp now would let that push sail
+                    // past the guard and overwrite the outside edit. Leave the
+                    // stamp alone: the queued push meets the same conflict and
+                    // settles it when it is the latest.
+                    guard isCurrent else { return }
+                    // Note changed elsewhere — pull fresh content in, don't
+                    // clobber. Re-read it through the body fetch so the fresh
+                    // copy is also checked for rich content before it is
+                    // editable again; `modCache` moves when that read lands.
                     if let idx = self.pages.firstIndex(where: { $0.id == id }) {
                         self.pages[idx].title = parts[2]
                         self.pages[idx].body = parts[3]
-                        self.pages[idx].modSeconds = secs
+                        self.pages[idx].load = .loading
                     }
-                    self.modCache[id] = secs
                     self.saveCache()
+                    self.loadBodies([id])
                     self.onToast?("Updated from Notes", "Kept the newer copy")
                 } else if parts.first == "OK", parts.count >= 2 {
                     let secs = Double(parts[1]) ?? self.modCache[id] ?? 0
@@ -534,15 +696,55 @@ final class NotesSyncModel: ObservableObject {
             // Belt and braces: a placeholder must not carry the true stamp either,
             // so it cannot match the index even if it were somehow read as ready.
             if p.load == .loading { p.modSeconds = 0 }
+            // A ready page cached before bodies were inspected for rich
+            // content: keep its text on screen but read it again before it can
+            // be edited.
+            if p.load == .ready, p.rich == nil { p.load = .loading; p.modSeconds = 0 }
             return p
         }
         modCache = Dictionary(pages.filter { $0.load == .ready }
             .map { ($0.id, $0.modSeconds) }, uniquingKeysWith: { a, _ in a })
+        // Edits Notes never confirmed stay dirty, so a pull cannot replace them
+        // and `resendUnsent` sends them (behind the usual conflict guard).
+        dirty = Set(pages.filter { $0.unsent && $0.load == .ready }.map(\.id))
     }
 
+    /// Debounced: this is called on every keystroke, and encoding every backed
+    /// body plus an atomic write on the main thread made typing stutter.
     private func saveCache() {
+        cacheWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let snapshot = self.cacheSnapshot()
+            let url = Self.cacheURL
+            self.cacheQueue.async { Self.writeCache(snapshot, to: url) }
+        }
+        cacheWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    /// Write the cache before returning (quit path). Goes through the same
+    /// queue so it lands after any write already under way.
+    private func saveCacheNow() {
+        cacheWork?.cancel()
+        cacheWork = nil
+        let snapshot = cacheSnapshot()
+        let url = Self.cacheURL
+        cacheQueue.sync { Self.writeCache(snapshot, to: url) }
+    }
+
+    /// `pages` with each one marked unsent if its edit is still unconfirmed.
+    private func cacheSnapshot() -> [Page] {
+        pages.map { p in
+            var p = p
+            p.unsent = dirty.contains(p.id)
+            return p
+        }
+    }
+
+    private static func writeCache(_ pages: [Page], to url: URL) {
         if let data = try? JSONEncoder().encode(pages) {
-            try? data.write(to: Self.cacheURL, options: .atomic)
+            try? data.write(to: url, options: .atomic)
         }
     }
 
@@ -569,15 +771,81 @@ final class NotesSyncModel: ObservableObject {
 
     /// Notes body is HTML: escape entities, one `<div>` per line (blank →
     /// `<div><br></div>`). The first line becomes the note's title automatically.
-    static func htmlBody(from text: String) -> String {
-        text.components(separatedBy: "\n").map { line in
+    /// With `titleHeading`, the first line keeps the title style it had in Notes.
+    static func htmlBody(from text: String, titleHeading: Bool = false) -> String {
+        text.components(separatedBy: "\n").enumerated().map { index, line in
             if line.isEmpty { return "<div><br></div>" }
             let esc = line
                 .replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: ">", with: "&gt;")
+            if titleHeading, index == 0 { return "<div><h1>\(esc)</h1></div>" }
             return "<div>\(esc)</div>"
         }.joined()
+    }
+
+    /// One tag found in a note's HTML body.
+    private struct HTMLTag {
+        let name: String        // lowercased
+        let closing: Bool
+        let attrs: String       // empty when the tag has no attributes
+        let start: String.Index
+    }
+
+    private static func tags(in html: String) -> [HTMLTag] {
+        guard let re = try? NSRegularExpression(
+            pattern: "<\\s*(/?)\\s*([A-Za-z][A-Za-z0-9]*)([^>]*)>")
+        else { return [] }
+        let ns = html as NSString
+        var out: [HTMLTag] = []
+        for m in re.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            guard let r = Range(m.range, in: html) else { continue }
+            let attrs = ns.substring(with: m.range(at: 3))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/")
+                    .union(.whitespacesAndNewlines))
+            out.append(HTMLTag(name: ns.substring(with: m.range(at: 2)).lowercased(),
+                               closing: ns.substring(with: m.range(at: 1)) == "/",
+                               attrs: attrs,
+                               start: r.lowerBound))
+        }
+        return out
+    }
+
+    /// The one `<h1>` Notes puts on a plain note's title line: a single h1
+    /// with nothing but empty wrappers before it.
+    static func hasTitleHeading(html: String) -> Bool {
+        let all = tags(in: html)
+        let opens = all.filter { $0.name == "h1" && !$0.closing }
+        guard opens.count == 1, let h1 = opens.first else { return false }
+        // Text before the heading means it is not the title line.
+        let before = String(html[html.startIndex..<h1.start])
+        guard let re = try? NSRegularExpression(pattern: "<[^>]*>") else { return false }
+        let text = re.stringByReplacingMatches(
+            in: before, range: NSRange(location: 0, length: (before as NSString).length),
+            withTemplate: "")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// True when a note's HTML body holds anything a plain-text push would
+    /// lose. Plain means: only `<div>` and `<br>` tags with no attributes,
+    /// plus at most the one title `<h1>`. Any other tag (lists and checklists,
+    /// links, images, objects, tables, bold/italic, spans, fonts, other
+    /// headings), any attribute such as a style, or an unreadable body counts
+    /// as rich. Unknown markup is treated as rich on purpose.
+    static func isRichNote(html: String) -> Bool {
+        let all = tags(in: html)
+        // A body with text but no tags at all is not a shape Notes produces.
+        if all.isEmpty { return !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        var sawHeading = false
+        for tag in all {
+            if !tag.attrs.isEmpty { return true }
+            switch tag.name {
+            case "div", "br": continue
+            case "h1": sawHeading = true
+            default: return true
+            }
+        }
+        return sawHeading && !hasTitleHeading(html: html)
     }
 
     /// Escape a Swift string for embedding inside an AppleScript double-quoted

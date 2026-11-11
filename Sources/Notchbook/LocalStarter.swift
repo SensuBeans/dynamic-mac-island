@@ -71,28 +71,57 @@ enum LocalStarter {
         var hidden: [String] = []
         var ports: [String: Int] = [:]
         var favorites: [String] = []
+        /// True when registry.json exists but could not be read or parsed, so
+        /// this value is NOT what is on disk. Never written to the file, and
+        /// `saveRegistry` refuses a registry that carries it.
+        var loadFailed = false
+
+        private enum CodingKeys: String, CodingKey {
+            case custom, hidden, ports, favorites
+        }
     }
 
     // MARK: - Registry I/O
 
+    /// The last registry that parsed, kept so a file that turns unreadable
+    /// still shows the list the user knows instead of a bare folder scan.
+    private static var lastGoodRegistry: Registry?
+    private static let lastGoodLock = NSLock()
+
     static func loadRegistry() -> Registry {
-        guard let data = try? Data(contentsOf: registryURL),
-              let reg = try? JSONDecoder().decode(Registry.self, from: data)
-        else { return Registry() }
+        // No file yet is a real empty registry (first run) and may be saved.
+        guard FileManager.default.fileExists(atPath: registryURL.path) else { return Registry() }
+        if let data = try? Data(contentsOf: registryURL),
+           let reg = try? JSONDecoder().decode(Registry.self, from: data) {
+            lastGoodLock.lock(); lastGoodRegistry = reg; lastGoodLock.unlock()
+            return reg
+        }
+        // The file is there but unreadable (a hand edit left a trailing comma,
+        // a quoted port…). Returning a plain empty registry here let the next
+        // star or play tap save that emptiness over every custom entry, port,
+        // hidden name and favourite. Mark it so nothing can be saved from it.
+        lastGoodLock.lock()
+        var reg = lastGoodRegistry ?? Registry()
+        lastGoodLock.unlock()
+        reg.loadFailed = true
         return reg
     }
 
     /// Atomic write — a torn registry loses every custom entry and favourite,
     /// and this is rewritten on every favourite tap.
-    static func saveRegistry(_ reg: Registry) {
+    /// Returns false when nothing was written.
+    @discardableResult
+    static func saveRegistry(_ reg: Registry) -> Bool {
+        // Never write over a file we failed to read: what we hold is not it.
+        guard !reg.loadFailed else { return false }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? enc.encode(reg) else { return }
+        guard let data = try? enc.encode(reg) else { return false }
         try? FileManager.default.createDirectory(atPath: stateDir,
                                                  withIntermediateDirectories: true)
         let tmp = registryURL.appendingPathExtension("tmp")
-        guard (try? data.write(to: tmp)) != nil else { return }
-        _ = try? FileManager.default.replaceItemAt(registryURL, withItemAt: tmp)
+        guard (try? data.write(to: tmp)) != nil else { return false }
+        return (try? FileManager.default.replaceItemAt(registryURL, withItemAt: tmp)) != nil
     }
 
     // MARK: - Discovery
@@ -278,15 +307,19 @@ enum LocalStarter {
             port: port)
     }
 
-    static func start(_ reg: inout Registry, _ entry: inout Entry) {
+    /// Returns the last line the launch shell wrote to stderr, if any. That is
+    /// where a failure BEFORE the server runs ends up (`cd: no such file or
+    /// directory`); it never reaches the server's log.
+    @discardableResult
+    static func start(_ reg: inout Registry, _ entry: inout Entry) -> String? {
         let port = ensurePort(&reg, &entry)
-        if portLive(port) { return }        // already up — never double-launch
+        if portLive(port) { return nil }    // already up — never double-launch
 
         let fm = FileManager.default
         try? fm.createDirectory(atPath: logsDir, withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: pidsDir, withIntermediateDirectories: true)
 
-        guard let p = plan(&reg, &entry) else { return }
+        guard let p = plan(&reg, &entry) else { return nil }
         let inner = p.inner
         let cwd = p.cwd
 
@@ -296,7 +329,9 @@ enum LocalStarter {
         // so it outlives the notch app exactly as it outlived the daemon. PORT is
         // exported because pyserver/next entries read it to choose their port.
         let cmd = "cd \(q(cwd)) && PORT=\(port) nohup \(inner) >> \(log) 2>&1 & echo $! > \(pid)"
-        shell(cmd)
+        let line = shell(cmd).err.split(separator: "\n").last
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        return line?.isEmpty == false ? line : nil
     }
 
     /// SIGTERM whatever is listening on the entry's port.
@@ -404,6 +439,23 @@ enum LocalStarter {
         return r.out.split(separator: "\n").compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }.first
     }
 
+    /// Does a command line name this exact folder (or something inside it)?
+    /// A plain substring test also matched a sibling whose name merely starts
+    /// the same — `Ambidex` inside `Ambidex-fix-csv` — and ■ then stopped the
+    /// sibling's server. The path has to end where the match ends, or be
+    /// followed by a separator.
+    static func commandLine(_ cmd: String, mentions path: String) -> Bool {
+        guard !path.isEmpty else { return false }
+        var from = cmd.startIndex
+        while let r = cmd.range(of: path, range: from..<cmd.endIndex) {
+            if path.hasSuffix("/") || r.upperBound == cmd.endIndex { return true }
+            let next = cmd[r.upperBound]
+            if next == "/" || next == " " || next == "\"" || next == "'" { return true }
+            from = cmd.index(after: r.lowerBound)
+        }
+        return false
+    }
+
     /// Resolve ownership so the UI can tell the three states apart, and so stop()
     /// refuses to kill something that isn't ours.
     static func owner(of entry: Entry) -> Owner {
@@ -415,7 +467,7 @@ enum LocalStarter {
         // A server we started in a PREVIOUS run is still ours by path: the pid
         // file is gone but the command line points at this project. This is what
         // lets a relaunched app re-adopt a server it orphaned on quit.
-        if !entry.path.isEmpty, cmd.contains(entry.path) { return .ours(live) }
+        if !entry.path.isEmpty, commandLine(cmd, mentions: entry.path) { return .ours(live) }
         // …but a command line only carries the path when it was launched with an
         // absolute one. `cd <dir> && python3 server.py` reduces to `server.py`,
         // and Next overwrites its title with `next-server (vX)`, so the check
@@ -424,6 +476,13 @@ enum LocalStarter {
         if !entry.path.isEmpty, let cwd = processCwd(live),
            samePath(cwd, entry.path) { return .ours(live) }
         return .stranger(live, cmd.isEmpty ? "another process" : cmd)
+    }
+
+    /// Current size of an entry's log. The log is append-only across runs, so
+    /// a caller that wants only THIS run's output notes the size before launch.
+    static func logSize(_ name: String) -> UInt64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: logsDir + "/\(name).log")
+        return (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
     }
 
     static func readLog(_ name: String, limit: Int = 16384) -> String {
@@ -489,5 +548,18 @@ enum LocalStarter {
     @discardableResult
     static func shell(_ command: String) -> Subprocess.Result {
         Subprocess.loginShell(command)
+    }
+}
+
+/// Decoding lives in an extension so the struct keeps its plain `Registry()`
+/// initialiser. Each key is optional: a registry missing `favorites` (or any
+/// other key) used to fail the whole decode and read as empty.
+extension LocalStarter.Registry {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        custom = try c.decodeIfPresent([String: Spec].self, forKey: .custom) ?? [:]
+        hidden = try c.decodeIfPresent([String].self, forKey: .hidden) ?? []
+        ports = try c.decodeIfPresent([String: Int].self, forKey: .ports) ?? [:]
+        favorites = try c.decodeIfPresent([String].self, forKey: .favorites) ?? []
     }
 }

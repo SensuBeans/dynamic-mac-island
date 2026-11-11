@@ -37,9 +37,17 @@ final class MediaWatcher: ObservableObject {
     @Published var nowPlaying: NowPlaying?
     @Published var artwork: NSImage? {
         didSet {
-            accent = artwork.map(Self.dominantColor) ?? .orange
+            // The tint is worked out off the main thread wherever the image is
+            // decoded (it costs 10-60 ms on big covers, enough to drop frames
+            // mid-animation) and handed over through `precomputedAccent`.
+            accent = artwork == nil
+                ? .orange
+                : (precomputedAccent ?? artwork.map(Self.dominantColor) ?? .orange)
+            precomputedAccent = nil
         }
     }
+    /// Tint for the image about to be assigned to `artwork`. Main thread only.
+    private var precomputedAccent: Color?
     /// Waveform/indicator tint pulled from the album art (orange fallback).
     @Published var accent: Color = .orange
     @Published var position: Double = 0
@@ -79,6 +87,14 @@ final class MediaWatcher: ObservableObject {
     private var progressTimer: Timer?
     private var youtubeTimer: Timer?
     private var youtubeVideoID: String?
+    /// Video whose thumbnail was fetched (or is being fetched). Kept apart
+    /// from `youtubeVideoID` so a failed download can retry without blanking
+    /// the id that "Open Tab" jumps to.
+    private var youtubeThumbID: String?
+    /// One progress poll / one Chrome tab-walk at a time. Without these the
+    /// timers kept queuing scripts behind a player that had stopped answering.
+    private var progressPollInFlight = false
+    private var youtubePollInFlight = false
     /// Settings-driven: whether YouTube-in-Chrome detection runs at all.
     private var youtubeEnabled = true
     /// Seconds before the paused media ear hides; < 0 means never hide.
@@ -90,6 +106,10 @@ final class MediaWatcher: ObservableObject {
     /// reserved for the rare one-shot on the main thread (`launchAndPlay`).
     private let scriptQueue = DispatchQueue(label: "com.sensubeans.notchbook.applescript",
                                             qos: .userInitiated)
+    /// The Songs/Albums jumps take seconds (built-in delays, a catalog lookup),
+    /// so they get their own queue instead of stalling every media update.
+    private let libraryQueue = DispatchQueue(label: "com.sensubeans.notchbook.musiclibrary",
+                                             qos: .userInitiated)
 
     init() {
         let dnc = DistributedNotificationCenter.default()
@@ -198,10 +218,12 @@ final class MediaWatcher: ObservableObject {
             return
         }
         // A *paused* native player currently owns the island: YouTube may take
-        // it only when verifiably playing (JS), or — JS blocked — when the
-        // watch tab is the active tab of the front Chrome window (user intent).
+        // it only when verifiably playing (JS). With JS blocked it can't be
+        // verified, so the paused native player keeps the island.
         let nativePausedOwns = (current?.source ?? .youtube) != .youtube
 
+        guard !youtubePollInFlight else { return }
+        youtubePollInFlight = true
         let script = """
         tell application "Google Chrome"
             repeat with w in windows
@@ -216,6 +238,7 @@ final class MediaWatcher: ObservableObject {
         """
         runScriptAsync(script) { [weak self] out in
             guard let self else { return }
+            self.youtubePollInFlight = false
             guard let out, !out.isEmpty else {
                 self.clearYouTube()
                 return
@@ -240,6 +263,9 @@ final class MediaWatcher: ObservableObject {
                         self.position = 0
                         self.duration = 0
                         self.artworkKey = nil
+                        // Forget the last thumbnail's id too: another player's
+                        // cover replaced it, so the same video must refetch.
+                        self.youtubeThumbID = nil
                     } else if np.title != self.nowPlaying?.title {
                         self.position = 0
                     }
@@ -248,35 +274,23 @@ final class MediaWatcher: ObservableObject {
                 self.updateYouTubeArtwork(url: url)
             }
 
-            if self.youtubeJSBlocked {
+            // Always ask the page, even when Chrome is known to refuse JS: the
+            // refusal answers nil, which never takes the island from a paused
+            // native player, and asking each poll is what clears the "JS
+            // blocked" hint once the user allows it. (A separate no-JS branch
+            // used to sit here; it never ran until the flag started being set,
+            // and then it showed a paused video as playing over a paused
+            // Music track.)
+            self.runYouTubeJSAsync("document.querySelector('video').paused") { paused in
+                let definitePlaying = paused.map { $0 != "true" }  // Bool?
                 if nativePausedOwns {
-                    // No JS: gate takeover on the watch tab being the front
-                    // window's active tab.
-                    let vid = Self.youtubeID(from: url)
-                    self.runScriptAsync(
-                        "tell application \"Google Chrome\" to return URL of active tab of front window"
-                    ) { activeURL in
-                        if let vid, activeURL.flatMap(Self.youtubeID(from:)) == vid {
-                            commit(true)
-                        }
-                    }
+                    if definitePlaying == true { commit(true) }  // only a clear "playing" takes over
                 } else {
                     // YouTube already owns or island empty — assume playing for
                     // a fresh tab, keep prior state for an existing session.
                     let assumed = self.nowPlaying?.source == .youtube
                         ? (self.nowPlaying?.isPlaying ?? true) : true
-                    commit(assumed)
-                }
-            } else {
-                self.runScriptAsync(self.youtubeJS("document.querySelector('video').paused")) { paused in
-                    let definitePlaying = paused.map { $0 != "true" }  // Bool?
-                    if nativePausedOwns {
-                        if definitePlaying == true { commit(true) }  // only a clear "playing" takes over
-                    } else {
-                        let assumed = self.nowPlaying?.source == .youtube
-                            ? (self.nowPlaying?.isPlaying ?? true) : true
-                        commit(definitePlaying ?? assumed)
-                    }
+                    commit(definitePlaying ?? assumed)
                 }
             }
         }
@@ -292,16 +306,27 @@ final class MediaWatcher: ObservableObject {
     /// YouTube video thumbnail as artwork; skips the fetch when the id is
     /// unchanged so a steady video doesn't re-download every poll.
     private func updateYouTubeArtwork(url: String) {
-        guard let id = Self.youtubeID(from: url), id != youtubeVideoID,
+        guard let id = Self.youtubeID(from: url), id != youtubeThumbID,
               let thumbURL = URL(string: "https://i.ytimg.com/vi/\(id)/hqdefault.jpg")
         else { return }
         youtubeVideoID = id
+        youtubeThumbID = id
         URLSession.shared.dataTask(with: thumbURL) { [weak self] data, _, _ in
-            guard let data, let image = NSImage(data: data) else { return }
+            guard let data, let image = NSImage(data: data) else {
+                // Failed download: forget the thumbnail marker so the next
+                // poll tries again instead of leaving this video without a
+                // thumbnail for good. The video id itself stays for Open Tab.
+                DispatchQueue.main.async {
+                    if self?.youtubeThumbID == id { self?.youtubeThumbID = nil }
+                }
+                return
+            }
+            let tint = Self.dominantColor(image)
             DispatchQueue.main.async {
-                guard self?.youtubeVideoID == id,
-                      self?.nowPlaying?.source == .youtube else { return }
-                self?.artwork = image
+                guard let self, self.youtubeThumbID == id,
+                      self.nowPlaying?.source == .youtube else { return }
+                self.precomputedAccent = tint
+                self.artwork = image
             }
         }.resume()
     }
@@ -339,6 +364,7 @@ final class MediaWatcher: ObservableObject {
         artwork = nil
         artworkKey = nil
         youtubeVideoID = nil
+        youtubeThumbID = nil
         youtubeURL = nil
         // Restore a paused-in-background native player instead of going blank.
         refresh()
@@ -396,6 +422,8 @@ final class MediaWatcher: ObservableObject {
 
     private func pollProgress() {
         guard let np = nowPlaying, np.source != .youtube, isRunning(np.source) else { return }
+        guard !progressPollInFlight else { return }
+        progressPollInFlight = true
         let modeExpr = np.source == .music
             ? "(shuffle enabled as text) & \"|\" & (song repeat as text)"
             : "(shuffling as text) & \"|\" & (repeating as text)"
@@ -409,7 +437,9 @@ final class MediaWatcher: ObservableObject {
         end tell
         """
         runScriptAsync(script) { [weak self] out in
-            guard let self, let out, !out.isEmpty else { return }
+            guard let self else { return }
+            self.progressPollInFlight = false
+            guard let out, !out.isEmpty else { return }
             let parts = out.components(separatedBy: "|")
                 .map { $0.replacingOccurrences(of: ",", with: ".") }
             guard parts.count >= 2,
@@ -475,6 +505,14 @@ final class MediaWatcher: ObservableObject {
             }
             let np = NowPlaying(title: parts[0], artist: parts[1],
                                 isPlaying: parts[2] == "true", source: source)
+            // Same rule as handle(): a paused player can't take the island
+            // from a different source that owns it. (With auto-switch off a
+            // native player still wins over YouTube, as before.)
+            if !np.isPlaying, let current = self.nowPlaying, current.source != source,
+               self.autoSwitchYouTube || current.source != .youtube {
+                self.askNextSource(rest)
+                return
+            }
             self.nowPlaying = np
             self.fetchArtworkIfNeeded(for: np)
             if !np.isPlaying { self.askNextSource(rest) }
@@ -537,9 +575,11 @@ final class MediaWatcher: ObservableObject {
                 }
                 URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
                     let image = data.flatMap { NSImage(data: $0) }
+                    let tint = image.map(Self.dominantColor)
                     DispatchQueue.main.async {
                         guard let self, self.artworkKey == key else { return }
                         if let image {
+                            self.precomputedAccent = tint
                             self.artwork = image
                         } else {
                             // Failed download → don't cache stale art under this
@@ -599,10 +639,13 @@ final class MediaWatcher: ObservableObject {
                     ? lines[1...].joined(separator: "\n") : ""
                 image = NSImage(contentsOfFile: tmp)
             }
+            // Only an image that will be accepted below needs its tint.
+            let tint = returnedName == title ? image.map(Self.dominantColor) : nil
             try? FileManager.default.removeItem(atPath: tmp)
             DispatchQueue.main.async {
                 guard let self, self.artworkKey == key else { return }
                 if let image, returnedName == title {
+                    self.precomputedAccent = tint
                     self.artwork = image
                 } else if attempt < 3 {
                     // Streamed art needs a beat to arrive; give it up to
@@ -739,7 +782,7 @@ final class MediaWatcher: ObservableObject {
             }
         }
 
-        scriptQueue.async { [weak self] in
+        libraryQueue.async { [weak self] in
             guard let self else { return }
             switch section {
             case .songs:
@@ -1009,20 +1052,42 @@ final class MediaWatcher: ObservableObject {
         case .youtube:
             script = youtubeJS("document.querySelector('video').volume * 100")
         }
+        let isYouTube = np.source == .youtube
         DispatchQueue.global(qos: .userInteractive).async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            p.arguments = ["-e", script]
-            let out = Pipe()
-            p.standardOutput = out
-            p.standardError = Pipe()
-            try? p.run()
-            p.waitUntilExit()
-            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
-                              encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let result = Self.osascriptOutput(script)
+            let text = result.text ?? ""
             let v = Double(text.replacingOccurrences(of: ",", with: ".")) ?? 50
-            DispatchQueue.main.async { completion(min(max(v, 0), 100)) }
+            DispatchQueue.main.async { [weak self] in
+                if isYouTube { self?.noteYouTubeJS(result) }
+                completion(min(max(v, 0), 100))
+            }
+        }
+    }
+
+    /// Records whether Chrome refused JavaScript from Apple Events, from the
+    /// outcome of a YouTube JS script. This is what drives the Media tab hint;
+    /// nothing was setting the flag before.
+    /// Main thread only. Publishes only on a real change.
+    private func noteYouTubeJS(_ result: (text: String?, err: String)) {
+        // Chrome's refusal reads "Executing JavaScript through AppleScript is
+        // turned off…" and arrives on stderr.
+        if result.err.contains("turned off") {
+            if !youtubeJSBlocked { youtubeJSBlocked = true }
+        } else if result.text != nil {
+            if youtubeJSBlocked { youtubeJSBlocked = false }
+        }
+    }
+
+    /// JS (single quotes only!) in the YouTube tab, result on the main thread.
+    /// Same as runScriptAsync, but it also notices Chrome refusing the JS.
+    private func runYouTubeJSAsync(_ js: String, completion: @escaping (String?) -> Void) {
+        let script = youtubeJS(js)
+        scriptQueue.async {
+            let result = Self.osascriptOutput(script)
+            DispatchQueue.main.async { [weak self] in
+                self?.noteYouTubeJS(result)
+                completion(result.text)
+            }
         }
     }
 
@@ -1145,21 +1210,23 @@ final class MediaWatcher: ObservableObject {
     /// Synchronous osascript — ONLY call off the main thread (e.g. already
     /// inside `scriptQueue` or another background queue).
     private func runScriptSync(_ source: String) -> String? {
-        Self.runOsascript(source)
+        // The library jumps have built-in delays and UI scripting, so they
+        // get a longer deadline than the quick hot-path reads.
+        Self.osascriptOutput(source, timeout: 20).text
     }
 
     private static func runOsascript(_ source: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        p.arguments = ["-e", source]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
-                          encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (text?.isEmpty ?? true) ? nil : text
+        osascriptOutput(source).text
+    }
+
+    /// Trimmed stdout (nil if empty, failed to launch, or timed out) plus
+    /// stderr. Bounded by a deadline: a player that stops answering Apple
+    /// Events used to hold the shared script queue for minutes per script.
+    private static func osascriptOutput(_ source: String, timeout: TimeInterval = 10)
+        -> (text: String?, err: String) {
+        let r = Subprocess.osascript(source, timeout: timeout)
+        if r.timedOut { return (nil, r.err) }
+        let text = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (text.isEmpty ? nil : text, r.err)
     }
 }

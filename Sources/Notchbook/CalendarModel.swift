@@ -120,12 +120,30 @@ final class CalendarModel: ObservableObject {
         visibleTimer?.tolerance = 10
     }
 
+    /// Count of load() / loadMonth() calls, read and written on main only. A
+    /// fetch publishes only if no newer call started while it ran; otherwise
+    /// a slow older fetch could put events back after every calendar was
+    /// hidden.
+    private var loadGeneration = 0
+    private var monthLoadGeneration = 0
+
     func load() {
         guard hasAccess else { return }
         let start = Date()
         let days = max(1, lookAheadDays)
         guard let end = Calendar.current.date(byAdding: .day, value: days, to: start) else { return }
         let calendars = activeCalendars()
+        loadGeneration += 1
+        let generation = loadGeneration
+        // Every calendar hidden means show nothing. EventKit may read an empty
+        // list as "all calendars", so never hand it one.
+        if let calendars, calendars.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.loadGeneration else { return }
+                self.events = []
+            }
+            return
+        }
         let allDay = includeAllDay
         // `events(matching:)` blocks across all calendars — fetch off the main
         // thread, publish on main.
@@ -137,7 +155,10 @@ final class CalendarModel: ObservableObject {
                 .filter { allDay || !$0.isAllDay }
                 .sorted { $0.startDate < $1.startDate }
                 .prefix(10))
-            DispatchQueue.main.async { self.events = fetched }
+            DispatchQueue.main.async {
+                guard generation == self.loadGeneration else { return }
+                self.events = fetched
+            }
         }
     }
 
@@ -158,6 +179,16 @@ final class CalendarModel: ObservableObject {
         guard let gridStart = cal.date(byAdding: .day, value: -lead, to: monthStart),
               let gridEnd = cal.date(byAdding: .day, value: 42, to: gridStart) else { return }
         let calendars = activeCalendars()
+        monthLoadGeneration += 1
+        let generation = monthLoadGeneration
+        // Same guard as load(): all calendars hidden means no dots, no list.
+        if let calendars, calendars.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.monthLoadGeneration else { return }
+                self.monthEvents = [:]
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let predicate = self.store.predicateForEvents(withStart: gridStart, end: gridEnd,
@@ -173,7 +204,10 @@ final class CalendarModel: ObservableObject {
                     return (a.startDate ?? .distantPast) < (b.startDate ?? .distantPast)
                 }
             }
-            DispatchQueue.main.async { self.monthEvents = byDay }
+            DispatchQueue.main.async {
+                guard generation == self.monthLoadGeneration else { return }
+                self.monthEvents = byDay
+            }
         }
     }
 }

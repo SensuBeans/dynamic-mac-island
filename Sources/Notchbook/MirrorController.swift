@@ -136,6 +136,13 @@ final class MirrorController: NSObject, ObservableObject {
                 if !self.session.isRunning { self.session.startRunning() }
             }
         }
+        // A camera unplugged while the mirror is live: run start() again so it
+        // swaps the dead input for a camera that is still connected.
+        center.addObserver(forName: .AVCaptureDeviceWasDisconnected,
+                           object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.wantsRunning else { return }
+            self.start()
+        }
     }
 
     /// Restart after a collapse: only if permission is already granted, so
@@ -147,11 +154,34 @@ final class MirrorController: NSObject, ObservableObject {
     }
 
     func start() {
+        // Answer the cases that can never show a camera BEFORE flipping the
+        // intent: the panel size keys off wantsRunning, so setting it first
+        // made the island grow toward the mirror size and then bounce back.
+        // Both checks are synchronous. The device lookup runs on the main
+        // thread, but before any growth starts, so it cannot stutter one.
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        if status == .denied || status == .restricted {
+            stop()
+            denied = true
+            return
+        }
+        if status == .authorized && resolveDevice() == nil {
+            // stop() also covers the last camera being unplugged mid-use.
+            stop()
+            unavailable = true
+            return
+        }
         wantsRunning = true
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
             guard let self else { return }
             guard granted else {
-                DispatchQueue.main.async { self.denied = true }
+                DispatchQueue.main.async {
+                    self.denied = true
+                    // No camera is coming, so drop the intent: the panel size
+                    // keys off it and would otherwise grow to the live-mirror
+                    // footprint just to show the permission message.
+                    self.wantsRunning = false
+                }
                 return
             }
             // Device discovery, input creation and `addInput` all run on the
@@ -159,6 +189,18 @@ final class MirrorController: NSObject, ObservableObject {
             // open never freezes the island animation on the main thread.
             self.sessionQueue.async {
                 guard self.wantsRunning else { return }
+                // The camera the input was built for can be unplugged between
+                // uses. Starting the session on that dead input shows a black
+                // mirror, so drop it and resolve a device again (which falls
+                // back to the system default).
+                if self.configured,
+                   (self.session.inputs.first as? AVCaptureDeviceInput)?
+                       .device.isConnected != true {
+                    self.session.beginConfiguration()
+                    self.session.inputs.forEach { self.session.removeInput($0) }
+                    self.session.commitConfiguration()
+                    self.configured = false
+                }
                 if !self.configured {
                     self.session.sessionPreset = .medium
                     if let device = self.resolveDevice(),
@@ -170,11 +212,17 @@ final class MirrorController: NSObject, ObservableObject {
                 }
                 let ready = self.configured
                 if ready && !self.session.isRunning { self.session.startRunning() }
+                // The last camera went away mid-use: nothing left to capture.
+                if !ready && self.session.isRunning { self.session.stopRunning() }
                 DispatchQueue.main.async {
                     self.denied = false
                     guard self.wantsRunning else { return }
                     guard ready else {
                         self.unavailable = true
+                        // Same as the denied case: nothing to show, so the
+                        // panel must not stay at the live-mirror size.
+                        self.wantsRunning = false
+                        self.isRunning = false
                         return
                     }
                     self.unavailable = false

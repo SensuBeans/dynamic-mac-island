@@ -36,6 +36,12 @@ final class ServersModel: ObservableObject {
     /// serial queue also keeps refresh results in order without a generation
     /// counter. Utility QoS — nothing here is user-blocking.
     private let work = DispatchQueue(label: "notchbook.localstarter", qos: .utility)
+    /// Where the long waits run: watching a port after a launch (up to 8 s) and
+    /// stop's kill-and-verify (up to 5 s). On `work` they held up every refresh
+    /// and every other row's action, so the list froze until they finished.
+    /// Nothing here reads or writes the registry.
+    private let slow = DispatchQueue(label: "notchbook.localstarter.wait",
+                                     qos: .utility, attributes: .concurrent)
     private var pollTimer: Timer?
 
     // MARK: - Polling (visible-only)
@@ -56,11 +62,27 @@ final class ServersModel: ObservableObject {
     func refresh() {
         work.async { [weak self] in
             guard let self else { return }
-            let list = LocalStarter.entries(LocalStarter.loadRegistry()).map(Server.init)
+            let reg = LocalStarter.loadRegistry()
+            let registryOK = !reg.loadFailed
+            let list = LocalStarter.entries(reg).map(Server.init)
             let ordered = Self.order(list)
             DispatchQueue.main.async {
                 self.loaded = true
                 if self.servers != ordered { self.servers = ordered }
+                // Drop messages that stopped being true: a "didn't start" under
+                // a server that has since come up, a registry warning once the
+                // file reads again.
+                for (name, when) in self.autoClear {
+                    let over: Bool
+                    switch when {
+                    case .running: over = ordered.contains { $0.name == name && $0.running }
+                    case .registryReadable: over = registryOK
+                    }
+                    if over {
+                        self.lastError.removeValue(forKey: name)
+                        self.autoClear.removeValue(forKey: name)
+                    }
+                }
             }
         }
     }
@@ -108,6 +130,11 @@ final class ServersModel: ObservableObject {
                 guard var e = LocalStarter.entries(reg).first(where: { $0.name == name })
                 else { return }
                 guard !LocalStarter.portLive(e.port) else { return }   // already up
+                // Needs a new port, and the registry can't be saved to remember it.
+                if reg.loadFailed, e.port == 0 {
+                    self?.setError(name, Self.registryUnreadable, clear: .registryReadable)
+                    return
+                }
                 guard let p = LocalStarter.plan(&reg, &e) else { return }
                 let started = DeckBridge.run(command: "PORT=\(p.port) \(p.inner)",
                                              cwd: p.cwd, title: name)
@@ -115,39 +142,113 @@ final class ServersModel: ObservableObject {
             }
             return
         }
+        // One start per row at a time. The port wait no longer blocks the queue,
+        // so without this a second tap would launch a second copy while the
+        // first is still coming up.
+        guard let token = claim(name, stopping: false) else { return }
         mutate { [weak self] reg in
-            guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
-            LocalStarter.start(&reg, &e)
+            // A stop tapped since then cancels this start.
+            guard let self, self.holds(name, token) else { return }
+            guard var e = LocalStarter.entries(reg).first(where: { $0.name == name }) else {
+                self.release(name, token); return
+            }
+            // Needs a new port, and the registry can't be saved to remember it.
+            if reg.loadFailed, e.port == 0 {
+                self.release(name, token)
+                self.setError(name, Self.registryUnreadable, clear: .registryReadable)
+                return
+            }
+            let logBefore = LocalStarter.logSize(name)
+            let launchError = LocalStarter.start(&reg, &e)
             // The exit status of the launch line means nothing: the real work is
             // backgrounded with `&`, so zsh exits 0 even when the binary does not
-            // exist. Confirm by watching the port, and if it never binds, surface
-            // the last line of the log — which readLog could already produce and
-            // nothing ever called.
-            guard e.port > 0 else { return }
-            for _ in 0..<16 {
-                usleep(500_000)
-                if LocalStarter.portLive(e.port) { return }
+            // exist. Confirm by watching the port, and if it never binds, say why.
+            guard e.port > 0 else { self.release(name, token); return }
+            let port = e.port
+            // Watch off the serial queue so the list keeps updating and the
+            // other favourites launch now, not one 8 s wait after another.
+            self.slow.async { [weak self] in
+                for _ in 0..<16 {
+                    usleep(500_000)
+                    guard let self, self.holds(name, token) else { return }
+                    if LocalStarter.portLive(port) {
+                        self.release(name, token)
+                        self.refresh()
+                        return
+                    }
+                }
+                guard let self, self.holds(name, token) else { return }
+                self.release(name, token)
+                // Only what THIS launch wrote. The log is append-only, so its
+                // last line can be weeks old and unrelated.
+                let logNow = LocalStarter.logSize(name)
+                let grown = logNow >= logBefore ? logNow - logBefore : logNow
+                var reason: String?
+                if grown > 0 {
+                    reason = LocalStarter.readLog(name, limit: Int(min(grown, 2048)))
+                        .split(separator: "\n").last.map(String.init)?
+                        .trimmingCharacters(in: .whitespaces)
+                }
+                // Nothing in the log: the launch failed before the server ran,
+                // and the shell's own complaint is the reason.
+                if reason?.isEmpty != false { reason = launchError }
+                self.setError(name, reason ?? "didn't start — no log output", clear: .running)
             }
-            let tail = LocalStarter.readLog(name, limit: 2048)
-                .split(separator: "\n").last.map(String.init)?
-                .trimmingCharacters(in: .whitespaces)
-            self?.setError(name, tail?.isEmpty == false ? tail! : "didn't start — no log output")
         }
     }
 
     func stop(_ name: String) {
+        // Ignore a second stop while one is still verifying; a stop during a
+        // start takes over from it.
+        guard let token = claim(name, stopping: true) else { return }
         setError(name, nil)
         mutate { [weak self] reg in
-            guard let e = LocalStarter.entries(reg).first(where: { $0.name == name }) else { return }
-            switch LocalStarter.stop(e) {
-            case .stopped, .notRunning:
-                break
-            case .notOurs(let pid, let cmd):
-                self?.setError(name, "port :\(e.port) is held by \(cmd) (pid \(pid)) — not stopped")
-            case .refusedToDie(let pid):
-                self?.setError(name, "pid \(pid) ignored SIGTERM and SIGKILL")
+            guard let self else { return }
+            guard let e = LocalStarter.entries(reg).first(where: { $0.name == name }) else {
+                self.release(name, token); return
+            }
+            // Kill-and-verify can take 5 s; it needs no registry, so it runs off
+            // the serial queue.
+            self.slow.async { [weak self] in
+                let result = LocalStarter.stop(e)
+                guard let self else { return }
+                self.release(name, token)
+                switch result {
+                case .stopped, .notRunning:
+                    break
+                case .notOurs(let pid, let cmd):
+                    self.setError(name, "port :\(e.port) is held by \(cmd) (pid \(pid)) — not stopped")
+                case .refusedToDie(let pid):
+                    self.setError(name, "pid \(pid) ignored SIGTERM and SIGKILL")
+                }
+                self.refresh()
             }
         }
+    }
+
+    /// The action in flight per row, so the waits on `slow` can't overlap for
+    /// one server. Touched from main and from both queues, hence the lock.
+    private var busy: [String: (token: Int, stopping: Bool)] = [:]
+    private var busySeq = 0
+    private let busyLock = NSLock()
+
+    /// Nil when the row is already busy. A stop may replace a pending start.
+    private func claim(_ name: String, stopping: Bool) -> Int? {
+        busyLock.lock(); defer { busyLock.unlock() }
+        if let b = busy[name], b.stopping || !stopping { return nil }
+        busySeq += 1
+        busy[name] = (token: busySeq, stopping: stopping)
+        return busySeq
+    }
+
+    private func holds(_ name: String, _ token: Int) -> Bool {
+        busyLock.lock(); defer { busyLock.unlock() }
+        return busy[name]?.token == token
+    }
+
+    private func release(_ name: String, _ token: Int) {
+        busyLock.lock(); defer { busyLock.unlock() }
+        if busy[name]?.token == token { busy.removeValue(forKey: name) }
     }
 
     /// Why a row's last action failed, keyed by server name. Before this, a
@@ -155,15 +256,40 @@ final class ServersModel: ObservableObject {
     /// spinner, no error, no log view, the dot just stayed gray.
     @Published private(set) var lastError: [String: String] = [:]
 
-    private func setError(_ name: String, _ message: String?) {
+    /// When a message goes away without another tap on its row.
+    private enum AutoClear { case running, registryReadable }
+    /// Main thread only, like `lastError`.
+    private var autoClear: [String: AutoClear] = [:]
+
+    private static let registryUnreadable =
+        "registry.json can't be read — nothing was changed; fix or restore the file"
+
+    private func setError(_ name: String, _ message: String?, clear: AutoClear? = nil) {
         DispatchQueue.main.async { [weak self] in
             if let message { self?.lastError[name] = message }
             else { self?.lastError.removeValue(forKey: name) }
+            self?.autoClear[name] = message == nil ? nil : clear
         }
     }
 
-    func favorite(_ name: String) { mutate { _ in LocalStarter.toggleFavorite(name) } }
-    func remove(_ name: String)   { mutate { _ in LocalStarter.remove(name) } }
+    /// With an unreadable registry these would be silent no-ops (the save is
+    /// refused), so the row says why instead.
+    func favorite(_ name: String) {
+        mutate { [weak self] reg in
+            if reg.loadFailed {
+                self?.setError(name, Self.registryUnreadable, clear: .registryReadable); return
+            }
+            LocalStarter.toggleFavorite(name)
+        }
+    }
+    func remove(_ name: String) {
+        mutate { [weak self] reg in
+            if reg.loadFailed {
+                self?.setError(name, Self.registryUnreadable, clear: .registryReadable); return
+            }
+            LocalStarter.remove(name)
+        }
+    }
 
     func startFavorites() {
         for s in servers where s.favorite && !s.running { start(s.name) }

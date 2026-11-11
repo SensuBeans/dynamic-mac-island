@@ -201,6 +201,12 @@ final class NotchState: ObservableObject {
 
     private var lastSaved: [String]?
 
+    /// The saved pages at `url`, or nil when the file is missing or unreadable.
+    private static func readPages(at url: URL) -> [String]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([String].self, from: data)
+    }
+
     /// Tabs shown in the nav dock and reachable by swipe, in canonical order.
     /// Never empty — if every tab were hidden, media stays as a floor.
     ///
@@ -259,11 +265,23 @@ final class NotchState: ObservableObject {
         // truncate saved pages to that count, but NEVER truncate away a page
         // that still holds text (grow the count to keep it). The old code
         // discarded ALL notes on any count mismatch — this must not.
+        var restoredFromBackup = false
         let desired = min(9, max(1,
             UserDefaults.standard.object(forKey: "notes.pageCount") as? Int
                 ?? Self.defaultPageCount))
-        if let data = try? Data(contentsOf: Self.storeURL),
-           let saved = try? JSONDecoder().decode([String].self, from: data) {
+        var saved = Self.readPages(at: Self.storeURL)
+        if saved == nil, FileManager.default.fileExists(atPath: Self.storeURL.path) {
+            // notes.json is there but unreadable. Set the damaged file aside
+            // (the next save would overwrite it) and fall back to the backup
+            // instead of starting from blank pages.
+            let stamp = Int(Date().timeIntervalSince1970)
+            try? FileManager.default.copyItem(
+                at: Self.storeURL,
+                to: Self.storeURL.appendingPathExtension("unreadable-\(stamp)"))
+            saved = Self.readPages(at: Self.storeURL.appendingPathExtension("bak"))
+            restoredFromBackup = saved != nil
+        }
+        if let saved {
             let lastNonEmpty = (saved.lastIndex { !$0.isEmpty }).map { $0 + 1 } ?? 0
             let target = max(desired, lastNonEmpty)
             var p = saved
@@ -273,7 +291,9 @@ final class NotchState: ObservableObject {
                 p = Array(p.prefix(target))
             }
             pages = p
-            lastSaved = (p == saved) ? saved : nil  // nil forces a resave at the new count
+            // nil forces a resave: at the new count, or to put restored backup
+            // text back into notes.json.
+            lastSaved = (p == saved && !restoredFromBackup) ? saved : nil
         } else {
             pages = Array(repeating: "", count: desired)
         }
@@ -296,7 +316,10 @@ final class NotchState: ObservableObject {
         saveWork?.cancel()
         guard pages != lastSaved else { return }
         // Keep a one-step backup so a bad write can never destroy notes.
-        if let existing = try? Data(contentsOf: Self.storeURL) {
+        // Only a readable file may replace the backup: copying a damaged
+        // notes.json over it would destroy the last good copy.
+        if let existing = try? Data(contentsOf: Self.storeURL),
+           (try? JSONDecoder().decode([String].self, from: existing)) != nil {
             try? existing.write(to: Self.storeURL.appendingPathExtension("bak"),
                                 options: .atomic)
         }

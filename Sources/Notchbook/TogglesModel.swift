@@ -160,7 +160,7 @@ final class TogglesModel: ObservableObject {
     }
 
     func toggleDarkMode() {
-        shell("/usr/bin/osascript", "-e",
+        shell(on: consentQueue, "/usr/bin/osascript", "-e",
               "tell application \"System Events\" to tell appearance preferences to set dark mode to not dark mode")
     }
 
@@ -299,26 +299,69 @@ final class TogglesModel: ObservableObject {
     /// full → whole screen immediately. All land on the clipboard.
     var screenshotMode = "selection"
 
+    /// True while an interactive capture is waiting on the user, so a second
+    /// click does not stack another crosshair on top of the first.
+    private var interactiveCaptureRunning = false
+
     func screenshot() {
         switch screenshotMode {
-        case "window": shell("/usr/sbin/screencapture", "-icw")
+        case "window": interactiveScreenshot("-icw")
         case "full":   shell("/usr/sbin/screencapture", "-c")
-        default:       shell("/usr/sbin/screencapture", "-ic")
+        default:       interactiveScreenshot("-ic")
         }
     }
+
+    /// `screencapture -i` only exits when the user finishes (or cancels) the
+    /// selection. It gets its own background thread so it cannot hold up the
+    /// other controls, and a deadline long enough that it only ever catches a
+    /// truly stuck helper, never a user who is still choosing.
+    private func interactiveScreenshot(_ flags: String) {
+        let path = "/usr/sbin/screencapture"
+        guard FileManager.default.isExecutableFile(atPath: path) else {
+            lastActionFailed = "screencapture is not available on this macOS"
+            return
+        }
+        guard !interactiveCaptureRunning else { return }
+        interactiveCaptureRunning = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let r = Subprocess.run(path, [flags], timeout: 600)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.interactiveCaptureRunning = false
+                if !r.ok { self.lastActionFailed = r.failureReason }
+            }
+        }
+    }
+
+    /// Helpers run here, one at a time and in the order they were asked for
+    /// (Hide Desktop needs `defaults write` to land before `killall Finder`).
+    private let shellQueue = DispatchQueue(label: "com.sensubeans.notchbook.toggles.shell",
+                                           qos: .userInitiated)
+
+    /// Dark Mode talks to System Events, which can sit behind the Automation
+    /// consent prompt for the whole 10 s deadline. It waits in its own line so
+    /// Hide Desktop, Mute and volume are not held up behind it.
+    private let consentQueue = DispatchQueue(label: "com.sensubeans.notchbook.toggles.consent",
+                                             qos: .userInitiated)
 
     /// Runs a helper tool and reports whether it actually worked. The old
     /// version was `try? p.run()` with no wait and no status, so a missing
     /// binary or a denied Automation grant produced a button that did nothing,
     /// forever, looking exactly like the buttons that work.
-    @discardableResult
-    private func shell(_ launchPath: String, _ args: String...) -> Bool {
+    ///
+    /// The helper runs off the main thread: waiting for it there froze the
+    /// whole island for as long as the child took (up to the 10 s deadline
+    /// when a permission prompt was pending). A failure is reported on main
+    /// once the child has finished.
+    private func shell(on queue: DispatchQueue? = nil, _ launchPath: String, _ args: String...) {
         guard FileManager.default.isExecutableFile(atPath: launchPath) else {
             lastActionFailed = "\(URL(fileURLWithPath: launchPath).lastPathComponent) is not available on this macOS"
-            return false
+            return
         }
-        let r = Subprocess.run(launchPath, args, timeout: 10)
-        if !r.ok { lastActionFailed = r.failureReason }
-        return r.ok
+        (queue ?? shellQueue).async { [weak self] in
+            let r = Subprocess.run(launchPath, args, timeout: 10)
+            guard !r.ok else { return }
+            DispatchQueue.main.async { self?.lastActionFailed = r.failureReason }
+        }
     }
 }

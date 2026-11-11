@@ -31,19 +31,25 @@ final class TrayThumbnails {
     /// Only files that actually exist are recorded, so a merely-unmounted file
     /// isn't blocked forever once its volume returns.
     private var failed: [URL: ThumbState] = [:]
+    /// URLs whose file was gone at the last check, so a dead tile answers
+    /// "missing" straight away instead of flashing its old thumbnail first.
+    private var gone: Set<URL> = []
+    /// Callers waiting on an in-flight existence check, keyed by URL, so one
+    /// file is never being checked twice at once.
+    private var checks: [URL: [(Bool) -> Void]] = [:]
     private let lock = NSLock()
 
     /// Calls back on the main queue with a thumbnail, or nil if QuickLook
     /// can't render one (the caller falls back to the Finder icon).
     func load(_ url: URL, side: CGFloat = 64, completion: @escaping (ThumbState) -> Void) {
         if let hit = cache.object(forKey: url as NSURL) {
-            completion(.image(hit))
+            answer(.image(hit), for: url, completion: completion)
             return
         }
         lock.lock()
         if let known = failed[url] {
             lock.unlock()
-            completion(known)
+            answer(known, for: url, completion: completion)
             return
         }
         if pending[url] != nil {
@@ -79,8 +85,39 @@ final class TrayThumbnails {
                 // back when its volume remounts or the download finishes.
                 self.failed[url] = state
             }
+            // Either verdict means the file was just seen on disk.
+            if state != .missing && state != .denied { self.gone.remove(url) }
             self.lock.unlock()
             DispatchQueue.main.async { waiters.forEach { $0(state) } }
+        }
+    }
+
+    /// Answers from the cache now, then checks the file is still there.
+    /// A cached answer only says the file was there when it was rendered; a
+    /// file deleted or moved afterwards would keep looking alive and Open /
+    /// Reveal / AirDrop would silently do nothing. The check runs off the main
+    /// thread because a network share that has stopped answering can block it
+    /// for a long time, and this runs for every tile each time the island
+    /// opens. The caller is called again only if the check changes the answer.
+    private func answer(_ known: ThumbState, for url: URL,
+                        completion: @escaping (ThumbState) -> Void) {
+        lock.lock()
+        let wasGone = gone.contains(url)
+        let first = checks[url] == nil
+        checks[url, default: []].append { exists in completion(exists ? known : .missing) }
+        lock.unlock()
+        completion(wasGone ? .missing : known)
+        guard first else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let exists = FileManager.default.fileExists(atPath: url.path)
+            guard let self else { return }
+            self.lock.lock()
+            let waiters = self.checks.removeValue(forKey: url) ?? []
+            let changed = exists == self.gone.contains(url)
+            if exists { self.gone.remove(url) } else { self.gone.insert(url) }
+            self.lock.unlock()
+            guard changed else { return }
+            DispatchQueue.main.async { waiters.forEach { $0(exists) } }
         }
     }
 

@@ -442,7 +442,8 @@ struct MediaTab: View {
     @EnvironmentObject var media: MediaWatcher
     @EnvironmentObject var state: NotchState
     @EnvironmentObject var toggles: TogglesModel
-    @EnvironmentObject var spectrum: AudioSpectrum
+    // AudioSpectrum is observed by MediaWaveform below, not here: it publishes
+    // every 60 ms, and observing it here rebuilt this whole card that often.
     @EnvironmentObject var lyrics: LyricsModel
     @EnvironmentObject var audioOutput: AudioOutputModel
     @State private var volume: Double = 50
@@ -552,32 +553,10 @@ struct MediaTab: View {
                             // Fill whatever width the title leaves over with
                             // waveform bars — the count adapts to the gap.
                             GeometryReader { geo in
-                                EqualizerBars(barCount: max(4, Int(geo.size.width / 5)),
-                                              barWidth: 2.5, maxHeight: 26,
+                                MediaWaveform(width: geo.size.width,
                                               color: media.accent,
-                                              animating: np.isPlaying && state.isExpanded
-                                                  && spectrum.failure == nil,
-                                              // isExpanded here too, not just on
-                                              // `animating`: the panel is never
-                                              // unmounted, only faded to 0, and
-                                              // step() stays live while levels are
-                                              // non-empty. Without this the Canvas
-                                              // eased 30x a second behind a closed
-                                              // island for the whole listening
-                                              // session.
-                                              levels: state.isExpanded && np.isPlaying
-                                                  && !spectrum.levels.isEmpty
-                                                  ? spectrum.levels : nil)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                    .overlay(alignment: .center) {
-                                        // Name the reason instead of faking a
-                                        // waveform over a tap that isn't running.
-                                        if let why = spectrum.failure {
-                                            Text(why)
-                                                .font(.system(size: 9))
-                                                .foregroundStyle(.white.opacity(0.4))
-                                        }
-                                    }
+                                              isPlaying: np.isPlaying,
+                                              isExpanded: state.isExpanded)
                             }
                         }
                         .buttonStyle(.plain)
@@ -858,6 +837,46 @@ struct MediaTab: View {
     }
 }
 
+/// The media card's live waveform. It is its own view so that only these
+/// bars, not the whole MediaTab card, re-render on each AudioSpectrum publish
+/// (every 60 ms, and the tap keeps running behind a closed island).
+private struct MediaWaveform: View {
+    @EnvironmentObject var spectrum: AudioSpectrum
+    let width: CGFloat
+    let color: Color
+    let isPlaying: Bool
+    let isExpanded: Bool
+
+    var body: some View {
+        EqualizerBars(barCount: max(4, Int(width / 5)),
+                      barWidth: 2.5, maxHeight: 26,
+                      color: color,
+                      animating: isPlaying && isExpanded
+                          && spectrum.failure == nil,
+                      // isExpanded here too, not just on
+                      // `animating`: the panel is never
+                      // unmounted, only faded to 0, and
+                      // step() stays live while levels are
+                      // non-empty. Without this the Canvas
+                      // eased 30x a second behind a closed
+                      // island for the whole listening
+                      // session.
+                      levels: isExpanded && isPlaying
+                          && !spectrum.levels.isEmpty
+                          ? spectrum.levels : nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .center) {
+                // Name the reason instead of faking a
+                // waveform over a tap that isn't running.
+                if let why = spectrum.failure {
+                    Text(why)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+    }
+}
+
 /// Apple Music-style synced lyrics: bold rounded lines, the current one
 /// bright, the next ones dimmed and softly blurred, springing upward as the
 /// song advances. Tap any line to seek there.
@@ -870,7 +889,10 @@ private struct LyricsTicker: View {
     /// playing. Small backward poll corrections are ignored so a just-promoted
     /// line never demotes and bounces; a real seek (≥ threshold) is accepted.
     @State private var displayPos: Double = 0
-    private let timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
+    // Held in @State so the same timer survives when the parent rebuilds this
+    // struct. As a plain `let`, every parent render made a new timer and the
+    // subscription restarted before 0.2 s passed, so the lyrics never advanced.
+    @State private var timer = Timer.publish(every: 0.2, on: .main, in: .common).autoconnect()
     private let seekThreshold: Double = 1.5
 
     var body: some View {
@@ -1082,18 +1104,25 @@ struct TimerTab: View {
 
     private func applyCustomTime() {
         let parts = customTime.split(separator: ":")
-        var seconds = 0
+        // Worked out as a Double and bounded BEFORE converting to Int: the
+        // field is free text, and Int(nan), Int(1e30) or an overflowing
+        // m * 60 on a very long number would crash the app.
+        var total: Double = 0
         if parts.count == 2, let m = Int(parts[0]), let s = Int(parts[1]) {
-            seconds = m * 60 + s
+            total = Double(m) * 60 + Double(s)
         } else if let m = Double(customTime.replacingOccurrences(of: ",", with: ".")) {
-            seconds = Int(m * 60)
+            total = m * 60
         }
+        let seconds = total.isFinite ? Int(min(max(total, 0), 12 * 3600)) : 0
         if seconds > 0 {
             let clamped = min(seconds, 12 * 3600)
-            pomodoro.setCustomFocus(seconds: clamped)
             // Same write-back as the presets, rounded to the store's whole-minute
             // resolution. A sub-minute custom time keeps at least 1.
+            // The store goes FIRST: AppDelegate pushes every store change into
+            // the model as whole minutes, so writing it after setCustomFocus
+            // turned 12:30 into 12:00.
             settings.focusMinutes = max(1, clamped / 60)
+            pomodoro.setCustomFocus(seconds: clamped)
         }
         customTime = ""
     }
@@ -1417,9 +1446,12 @@ private struct TrayTile: View {
             Button("Remove") { tray.remove(url) }
         }
         .onAppear { reload() }
-        // Re-check when the tab becomes visible again: a file can come back
-        // (volume remounted, download finished) and the tile must catch up.
-        .onChange(of: state.currentTab) { if $0 == .tray { reload() } }
+        // Re-check each time the island opens: a file can go away (deleted,
+        // moved) or come back (volume remounted, download finished) and the
+        // tile must catch up. This watches the island opening, not the tab:
+        // the tile only exists while the tray tab is showing, so it never saw
+        // a switch TO the tray, and closing the island does not unmount it.
+        .onChange(of: state.isExpanded) { if $0 { reload() } }
     }
 }
 
@@ -1431,6 +1463,10 @@ struct CalendarTab: View {
     @EnvironmentObject var settings: SettingsStore
     @State private var visibleMonth = Date()
     @State private var selectedDay = Calendar.current.startOfDay(for: Date())
+    /// The "today" the two values above were last set against. The panel stays
+    /// mounted while the island is closed, so without this they kept showing
+    /// yesterday (or last month) after midnight or an overnight sleep.
+    @State private var anchoredToday = Calendar.current.startOfDay(for: Date())
 
     var body: some View {
         Group {
@@ -1449,6 +1485,16 @@ struct CalendarTab: View {
         }
         .onAppear {
             calendarModel.load()
+            if state.calendarMonthMode { calendarModel.loadMonth(containing: visibleMonth) }
+        }
+        // On open, move to today only if the date changed since last time, so
+        // a day picked earlier the same day is kept.
+        .onChange(of: state.isExpanded) { open in
+            let today = Calendar.current.startOfDay(for: Date())
+            guard open, today != anchoredToday else { return }
+            anchoredToday = today
+            visibleMonth = Date()
+            selectedDay = today
             if state.calendarMonthMode { calendarModel.loadMonth(containing: visibleMonth) }
         }
     }
@@ -2007,6 +2053,7 @@ struct TogglesTab: View {
     @ViewBuilder private var displayCard: some View {
         if toggles.displaySliderAvailable {
             BrightnessCard(icon: "sun.min.fill", endIcon: "sun.max.fill",
+                           live: toggles.displayLevel,
                            read: { toggles.readDisplayBrightness() },
                            set: { toggles.setDisplayBrightness($0) })
         } else {
@@ -2019,6 +2066,7 @@ struct TogglesTab: View {
     @ViewBuilder private var keyboardCard: some View {
         if toggles.keyboardSliderAvailable {
             BrightnessCard(icon: "keyboard", endIcon: "light.max",
+                           live: toggles.keyboardLevel,
                            read: { toggles.readKeyboardBrightness() },
                            set: { toggles.setKeyboardBrightness($0) })
         } else {
@@ -2033,10 +2081,14 @@ struct TogglesTab: View {
 private struct BrightnessCard: View {
     let icon: String
     let endIcon: String
+    /// The system's current level, re-read by TogglesModel every 0.5 s while
+    /// the Controls tab is showing.
+    let live: Double
     let read: () -> Double
     let set: (Double) -> Void
 
     @State private var level: Double = 0
+    @State private var dragging = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -2055,9 +2107,11 @@ private struct BrightnessCard: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { v in
+                            dragging = true
                             level = min(1, max(0, v.location.x / geo.size.width))
                             set(level)
                         }
+                        .onEnded { _ in dragging = false }
                 )
             }
             .frame(height: 4)
@@ -2070,6 +2124,9 @@ private struct BrightnessCard: View {
         .frame(height: 28)
         .background(RoundedRectangle(cornerRadius: 9).fill(.white.opacity(0.06)))
         .onAppear { level = read() }
+        // Follow changes made outside the app (F1/F2, Control Center). Not
+        // while dragging, so the bar does not fight the finger.
+        .onChange(of: live) { if !dragging { level = $0 } }
     }
 }
 

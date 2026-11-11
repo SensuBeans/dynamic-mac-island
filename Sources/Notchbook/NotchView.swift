@@ -225,7 +225,7 @@ struct NotchView: View {
     }
 
     /// Island close/open progress (0 = fully expanded, 1 = collapsed). Driven off
-    /// `state.isExpanded` on an easeInOutCubic curve (0.85 s close / 0.70 s open);
+    /// `state.isExpanded` on a fast-start curve (0.50 s close / 0.45 s open);
     /// drives the LiquidClose "Surface Return" morph while the logic triggers
     /// (expand/collapse) stay untouched.
     @State private var closeT: Double = 1
@@ -676,7 +676,7 @@ struct NotchView: View {
                 let swipeDriven = abs(state.tabSwipeProgress) > 0.01
                 navShowWasSwipe = swipeDriven
                 let dur = swipeDriven ? 0.12 : 0.85 * (liquidNavDebug ? 8 : 1)
-                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+                withAnimation(.timingCurve(0.25, 0.1, 0.1, 1, duration: dur)) {
                     navT = 1
                 }
             } else {
@@ -687,7 +687,7 @@ struct NotchView: View {
                 // navShown has been continuously false for a beat; a flicker
                 // cancels it and the capsule stays put under the gesture.
                 let work = DispatchWorkItem {
-                    withAnimation(.timingCurve(0.65, 0, 0.35, 1,
+                    withAnimation(.timingCurve(0.25, 0.1, 0.1, 1,
                                                duration: 0.70 * (liquidNavDebug ? 8 : 1))) {
                         navT = 0
                     }
@@ -706,7 +706,7 @@ struct NotchView: View {
         // real morph, and nothing can restart one mid-flight.
         .onChange(of: showMediaEar) { show in
             let dur = (show ? 0.70 : 0.55) * (liquidIslandDebug ? 6 : 1)
-            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+            withAnimation(.timingCurve(0.25, 0.1, 0.1, 1, duration: dur)) {
                 earT = show ? 1 : 0
             }
             if show {
@@ -763,7 +763,7 @@ struct NotchView: View {
                     if !showAgentPill { agentLinger = false }
                 }
             }
-            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+            withAnimation(.timingCurve(0.25, 0.1, 0.1, 1, duration: dur)) {
                 agentT = show ? 1 : 0
             }
             // Mark settled when the morph finishes (the withAnimation completion
@@ -786,13 +786,16 @@ struct NotchView: View {
             if showAgentPill { agentT = 1; agentSettled = true; lastAgentPill = activePill }
             closeT = state.isExpanded ? 0 : 1
         }
-        // Drive `closeT` (C4 Surface Return) on easeInOutCubic: 0.85 s close /
-        // 0.70 s open. The nav capsule's melt (navT→0, animated below) is chained
+        // Drive `closeT` (C4 Surface Return) on a fast-start curve: 0.50 s close /
+        // 0.45 s open. The old easeInOutCubic (0.65, 0, 0.35, 1) at 0.85 / 0.70 s
+        // showed nothing for its first ~200 ms and sat still for its last ~200 ms;
+        // every liquid morph here (nav, ear, agent pill) now shares this curve so
+        // motion starts the moment the trigger lands. The nav capsule's melt (navT→0, animated below) is chained
         // as the opening beat, not duplicated here. 6× under LiquidIslandDebug.
         .onChange(of: state.isExpanded) { expanded in
-            let base = expanded ? 0.70 : 0.85
+            let base = expanded ? 0.45 : 0.50
             let dur = base * (liquidIslandDebug ? 6 : 1)
-            withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: dur)) {
+            withAnimation(.timingCurve(0.25, 0.1, 0.1, 1, duration: dur)) {
                 closeT = expanded ? 0 : 1
             }
             // Hold the container at expanded height for the whole close morph so
@@ -816,7 +819,7 @@ struct NotchView: View {
             // Animate the nav melt (was a hard snap) so it reads as the capsule-
             // melt beat of the close, then rests flat for the next expand.
             if !expanded {
-                withAnimation(.timingCurve(0.65, 0, 0.35, 1, duration: 0.30 * (liquidIslandDebug ? 6 : 1))) {
+                withAnimation(.timingCurve(0.25, 0.1, 0.1, 1, duration: 0.30 * (liquidIslandDebug ? 6 : 1))) {
                     navT = 0
                 }
             }
@@ -1743,7 +1746,11 @@ struct NotchView: View {
             if let art = media.artwork, settings.ambientGlow {
                 AmbientGlow(art: art, size: size,
                             intensity: state.currentTab == .media
-                                ? settings.glowIntensity : 0.6)
+                                ? settings.glowIntensity : 0.6,
+                            // Live only while the panel can be seen: open, or
+                            // still fading out during the close morph.
+                            active: state.isExpanded || morphHoldExpanded
+                                || closeTFreeze != nil)
                     // Tab switches crossfade the intensity change — no pop when
                     // entering/leaving Media.
                     .animation(.easeInOut(duration: 0.35), value: state.currentTab)
@@ -2124,6 +2131,10 @@ private struct AmbientGlow: View {
     let art: NSImage
     let size: CGSize
     let intensity: Double
+    /// False while the island is closed. The audio tap keeps running then (for
+    /// the collapsed ear's equalizer), and this view stays mounted behind the
+    /// faded-out panel, so without this the glow kept animating unseen.
+    let active: Bool
 
     @EnvironmentObject private var spectrum: AudioSpectrum
     @EnvironmentObject private var media: MediaWatcher
@@ -2134,7 +2145,7 @@ private struct AmbientGlow: View {
     /// background settles to its base.
     private var pulse: CGFloat {
         let recent = spectrum.levels.suffix(3)
-        guard media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
+        guard active, media.nowPlaying?.isPlaying == true, !recent.isEmpty else { return 0 }
         return CGFloat(recent.reduce(0, +)) / CGFloat(recent.count)
     }
 
@@ -2170,7 +2181,7 @@ private struct AmbientGlow: View {
         // Each fresh audio sample nudges the colors along; loudness sets the
         // pace, and no samples (paused) means no motion.
         .onChange(of: spectrum.levels) { levels in
-            guard !levels.isEmpty else { return }
+            guard active, !levels.isEmpty else { return }
             colorPhase += 0.5 + 2.0 * Double(p)
         }
     }

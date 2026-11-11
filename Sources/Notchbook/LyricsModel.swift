@@ -100,6 +100,10 @@ final class LyricsModel: ObservableObject {
         request.setValue("DynamicIsland/1.0 (github.com/SensuBeans/dynamic-mac-island)",
                          forHTTPHeaderField: "User-Agent")
         task = URLSession.shared.dataTask(with: request) { data, _, error in
+            // Cancelled means a newer fetch replaced this one (only fetch()
+            // cancels). Reporting it as a network error wiped fetchedKey, and
+            // the newer search's lyrics were then thrown away.
+            if (error as NSError?)?.code == NSURLErrorCancelled { return }
             if error != nil || data == nil { completion(.network); return }
             var best: [Line] = []
             var plain = ""
